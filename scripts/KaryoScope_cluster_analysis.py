@@ -10,9 +10,9 @@
 #   --n-clusters 10
 #
 # Sample metadata file format (TSV):
-#   sample    group    color
-#   SW26_Pre  control  #377EB8
-#   SW26_Post treatment #E41A1C
+#   sample      group   color
+#   SW26_Pre    pre     #377EB8
+#   SW26_Post   post    #E41A1C
 #
 # Comparison modes:
 #   two-group: Fisher's exact test between control and treatment groups
@@ -43,10 +43,8 @@ parser.add_argument("--output-prefix", dest="output_prefix", required=True,
                     help="Prefix for output files")
 parser.add_argument("--sample-metadata", dest="sample_metadata", default=None,
                     help="TSV file with sample metadata (columns: sample, group, color).\n"
-                         "If not provided, groups are auto-inferred from sample names:\n"
-                         "  - Names containing 'Pre' -> 'control' group\n"
-                         "  - Names containing 'Post' -> 'treatment' group\n"
-                         "  - Otherwise -> sample name becomes group name")
+                         "If not provided, each sample becomes its own group.\n"
+                         "Use --control-group to specify the reference group.")
 parser.add_argument("--comparison-mode", dest="comparison_mode", default="two-group",
                     choices=["two-group", "multi-group", "per-sample"],
                     help="Comparison mode for enrichment testing:\n"
