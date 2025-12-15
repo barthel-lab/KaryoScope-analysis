@@ -27,6 +27,7 @@ from collections import defaultdict, Counter
 from scipy.cluster.hierarchy import linkage, dendrogram, leaves_list, fcluster, cut_tree
 from scipy.spatial.distance import pdist, squareform
 from scipy.stats import fisher_exact, chi2_contingency
+from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
 import matplotlib.pyplot as plt
 import matplotlib
 import matplotlib.colors as mcolors
@@ -55,6 +56,10 @@ parser.add_argument("--control-group", dest="control_group", default=None,
                     help="Name of control group for two-group comparison (default: auto-detect)")
 parser.add_argument("--n-clusters", dest="n_clusters", type=int, default=None,
                     help="Number of clusters to cut tree into (default: auto-determine)")
+parser.add_argument("--min-k", dest="min_k", type=int, default=5,
+                    help="Minimum number of clusters to test during auto-detection (default: 5)")
+parser.add_argument("--max-k", dest="max_k", type=int, default=100,
+                    help="Maximum number of clusters to test during auto-detection (default: 100)")
 parser.add_argument("--min-cluster-size", dest="min_cluster_size", type=int, default=10,
                     help="Minimum cluster size to consider (default: 10)")
 parser.add_argument("--min-read-length", dest="min_read_length", type=int, default=0,
@@ -79,6 +84,10 @@ parser.add_argument("--umap-neighbors", dest="umap_neighbors", type=int, default
                     help="UMAP n_neighbors parameter (default: 25)")
 parser.add_argument("--umap-min-dist", dest="umap_min_dist", type=float, default=0.2,
                     help="UMAP min_dist parameter (default: 0.2)")
+parser.add_argument("--perfect-threshold", dest="perfect_threshold", type=float, default=0.95,
+                    help="Threshold for perfect enrichment (default: 0.95 = 95%%)")
+parser.add_argument("--strong-threshold", dest="strong_threshold", type=float, default=0.80,
+                    help="Threshold for strong enrichment (default: 0.80 = 80%%)")
 
 args = parser.parse_args()
 
@@ -619,75 +628,113 @@ print(f"\n--- Analyzing cluster structure ---")
 read_names_arr = np.array(read_names)
 read_groups_arr = np.array([read_to_group[r] for r in read_names])
 
-# Fast enrichment check for k-optimization (simplified - just needs direction)
+# Fast enrichment check for k-optimization (returns enrichment type and max purity)
 def fast_enrichment_check(cluster_mask, read_groups, group_totals, control_grp, all_grps):
-    """Fast enrichment calculation for k-optimization loop."""
+    """Fast enrichment calculation for k-optimization loop.
+
+    Returns: (enrichment_label, max_purity) where max_purity is the highest group percentage.
+    """
     cluster_groups = read_groups[cluster_mask]
     group_counts = Counter(cluster_groups)
     total_in = len(cluster_groups)
     if total_in == 0:
-        return "Mixed"
+        return "Mixed", 0.0
+
+    # Calculate max purity (highest percentage from any single group)
+    max_purity = max(group_counts.get(g, 0) / total_in for g in all_grps)
 
     # For two groups, use simple proportion comparison
     if len(all_grps) == 2:
         ctrl_count = group_counts.get(control_grp, 0)
         ctrl_pct = ctrl_count / total_in
         other_grp = [g for g in all_grps if g != control_grp][0]
-        other_count = group_counts.get(other_grp, 0)
 
         # Quick significance check using binomial proportion
         expected_ctrl = group_totals[control_grp] / sum(group_totals.values())
         if ctrl_pct > expected_ctrl + 0.15:  # >15% enrichment threshold for speed
-            return f"{control_grp}-enriched"
+            return f"{control_grp}-enriched", max_purity
         elif ctrl_pct < expected_ctrl - 0.15:
-            return f"{other_grp}-enriched"
-    return "Mixed"
+            return f"{other_grp}-enriched", max_purity
+    return "Mixed", max_purity
 
-# Calculate within-cluster variance for different k values
+# Calculate clustering metrics for different k values
 if args.n_clusters is None:
     # Try different numbers of clusters and evaluate
-    k_range = range(5, min(51, len(read_names) // 10))
+    # Upper bound: min of max_k or n_reads/10 (need at least 10 reads per cluster on average)
+    max_k_limit = min(args.max_k + 1, len(read_names) // 10)
+    k_range = range(args.min_k, max_k_limit)
 
     print(f"Testing cluster counts from {min(k_range)} to {max(k_range)}...")
-
-    best_k = 10
-    best_score = -np.inf
 
     cluster_stats = []
     for k in k_range:
         labels = fcluster(linkage_matrix, k, criterion='maxclust')
         labels_arr = np.array(labels)
 
+        # Calculate standard clustering metrics
+        silhouette = silhouette_score(adj_matrix, labels) if k > 1 else 0
+        calinski_harabasz = calinski_harabasz_score(adj_matrix, labels) if k > 1 else 0
+        davies_bouldin = davies_bouldin_score(adj_matrix, labels) if k > 1 else np.inf
+
         # Count clusters meeting minimum size
         cluster_sizes = Counter(labels)
         valid_clusters = sum(1 for size in cluster_sizes.values() if size >= args.min_cluster_size)
 
-        # Calculate enrichment diversity (using fast method)
+        # Calculate enrichment diversity with strength categories
         enrichments = []
+        purities = []
+        perfect_enriched = 0  # >= perfect_threshold (default 95%)
+        strong_enriched = 0   # >= strong_threshold (default 80%)
+        any_enriched = 0      # any significant enrichment
+
         for cluster_id in range(1, k + 1):
             cluster_mask = labels_arr == cluster_id
             if cluster_mask.sum() >= args.min_cluster_size:
-                enrich = fast_enrichment_check(cluster_mask, read_groups_arr, group_totals, control_group, all_groups)
+                enrich, purity = fast_enrichment_check(cluster_mask, read_groups_arr, group_totals, control_group, all_groups)
                 enrichments.append(enrich)
+                purities.append(purity)
 
-        # Score: maximize variety of enrichments while having reasonable cluster count
+                if enrich != "Mixed":
+                    any_enriched += 1
+                    if purity >= args.perfect_threshold:
+                        perfect_enriched += 1
+                    if purity >= args.strong_threshold:
+                        strong_enriched += 1
+
+        # Count enrichments by group
         group_enriched_counts = {g: sum(1 for e in enrichments if e == f"{g}-enriched") for g in all_groups}
         mixed = enrichments.count("Mixed")
 
-        # We want some of each type - score based on having at least some enriched clusters per group
-        score = sum(min(c, 2) for c in group_enriched_counts.values()) + min(mixed, 3) + valid_clusters * 0.1
+        # Calculate enrichment ratios
+        enriched_ratio = any_enriched / valid_clusters if valid_clusters > 0 else 0
+        perfect_ratio = perfect_enriched / valid_clusters if valid_clusters > 0 else 0
+        strong_ratio = strong_enriched / valid_clusters if valid_clusters > 0 else 0
+
+        # Composite score: balance silhouette with enrichment quality
+        # Normalize silhouette to 0-1 range (typically -1 to 1, but usually 0-0.5 for real data)
+        silhouette_norm = (silhouette + 1) / 2  # Map -1,1 to 0,1
+        # Weighted composite: cluster quality + enrichment discovery + enrichment purity
+        composite_score = (0.3 * silhouette_norm +
+                          0.3 * enriched_ratio +
+                          0.2 * strong_ratio +
+                          0.2 * perfect_ratio)
 
         cluster_stats.append({
             'k': k,
+            'silhouette': silhouette,
+            'calinski_harabasz': calinski_harabasz,
+            'davies_bouldin': davies_bouldin,
             'valid_clusters': valid_clusters,
+            'any_enriched': any_enriched,
+            'strong_enriched': strong_enriched,
+            'perfect_enriched': perfect_enriched,
+            'enriched_ratio': enriched_ratio,
+            'strong_ratio': strong_ratio,
+            'perfect_ratio': perfect_ratio,
+            'composite_score': composite_score,
             **{f'{g}_enriched': group_enriched_counts.get(g, 0) for g in all_groups},
-            'mixed': mixed,
-            'score': score
+            'mixed': mixed
         })
-
-        if score > best_score:
-            best_score = score
-            best_k = k
 
     # Save cluster analysis
     stats_df = pd.DataFrame(cluster_stats)
@@ -695,8 +742,99 @@ if args.n_clusters is None:
     stats_df.to_csv(stats_file, sep='\t', index=False)
     print(f"  Saved k analysis to: {stats_file}")
 
-    n_clusters = best_k
-    print(f"\n  Optimal k: {n_clusters} (score: {best_score:.2f})")
+    # Generate k-selection diagnostic plot (2x3 grid)
+    fig, axes = plt.subplots(2, 3, figsize=(16, 10))
+
+    # 1. Silhouette score (higher is better)
+    ax1 = axes[0, 0]
+    ax1.plot(stats_df['k'], stats_df['silhouette'], 'b-o', markersize=3)
+    ax1.set_xlabel('Number of clusters (k)')
+    ax1.set_ylabel('Silhouette Score')
+    ax1.set_title('Silhouette Score (higher = better)')
+    best_silhouette_k = int(stats_df.loc[stats_df['silhouette'].idxmax(), 'k'])
+    ax1.axvline(x=best_silhouette_k, color='g', linestyle='--', alpha=0.5, label=f'Best k={best_silhouette_k}')
+    ax1.legend()
+
+    # 2. Calinski-Harabasz index (higher is better)
+    ax2 = axes[0, 1]
+    ax2.plot(stats_df['k'], stats_df['calinski_harabasz'], 'b-o', markersize=3)
+    ax2.set_xlabel('Number of clusters (k)')
+    ax2.set_ylabel('Calinski-Harabasz Index')
+    ax2.set_title('Calinski-Harabasz (higher = better)')
+    best_ch_k = int(stats_df.loc[stats_df['calinski_harabasz'].idxmax(), 'k'])
+    ax2.axvline(x=best_ch_k, color='g', linestyle='--', alpha=0.5, label=f'Best k={best_ch_k}')
+    ax2.legend()
+
+    # 3. Enrichment ratios
+    ax3 = axes[0, 2]
+    ax3.plot(stats_df['k'], stats_df['enriched_ratio'], '-o', markersize=3, label='Any enriched', color='blue')
+    ax3.plot(stats_df['k'], stats_df['strong_ratio'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
+    ax3.plot(stats_df['k'], stats_df['perfect_ratio'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='red')
+    ax3.set_xlabel('Number of clusters (k)')
+    ax3.set_ylabel('Ratio (enriched / valid clusters)')
+    ax3.set_title('Enrichment Ratios')
+    ax3.set_ylim(0, 1)
+    ax3.legend()
+
+    # 4. Enrichment counts (absolute)
+    ax4 = axes[1, 0]
+    ax4.plot(stats_df['k'], stats_df['any_enriched'], '-o', markersize=3, label='Any enriched', color='blue')
+    ax4.plot(stats_df['k'], stats_df['strong_enriched'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
+    ax4.plot(stats_df['k'], stats_df['perfect_enriched'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='red')
+    ax4.set_xlabel('Number of clusters (k)')
+    ax4.set_ylabel('Number of clusters')
+    ax4.set_title('Enrichment Counts (absolute)')
+    ax4.legend()
+
+    # 5. Enrichment by group
+    ax5 = axes[1, 1]
+    for g in all_groups:
+        col = f'{g}_enriched'
+        if col in stats_df.columns:
+            ax5.plot(stats_df['k'], stats_df[col], '-o', markersize=3, label=f'{g}-enriched', color=group_colors.get(g, None))
+    ax5.plot(stats_df['k'], stats_df['mixed'], '-o', markersize=3, label='Mixed', color='gray')
+    ax5.set_xlabel('Number of clusters (k)')
+    ax5.set_ylabel('Number of clusters')
+    ax5.set_title('Enrichment by Group')
+    ax5.legend()
+
+    # 6. Composite score (our recommended metric)
+    ax6 = axes[1, 2]
+    ax6.plot(stats_df['k'], stats_df['composite_score'], 'b-o', markersize=3)
+    ax6.set_xlabel('Number of clusters (k)')
+    ax6.set_ylabel('Composite Score')
+    ax6.set_title('Composite Score (silhouette + enrichment)')
+    best_composite_k = int(stats_df.loc[stats_df['composite_score'].idxmax(), 'k'])
+    ax6.axvline(x=best_composite_k, color='g', linestyle='--', alpha=0.5, label=f'Best k={best_composite_k}')
+    ax6.axhline(y=stats_df['composite_score'].max(), color='r', linestyle='--', alpha=0.3)
+    ax6.legend()
+
+    plt.tight_layout()
+    k_plot_file = f"{args.output_prefix}.k_selection.pdf"
+    plt.savefig(k_plot_file, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved k-selection plot to: {k_plot_file}")
+
+    # Find best k by each metric
+    best_db_k = int(stats_df.loc[stats_df['davies_bouldin'].idxmin(), 'k'])
+
+    print(f"\n  Optimal k by metric:")
+    print(f"    Silhouette:        k={best_silhouette_k} (score={stats_df['silhouette'].max():.4f})")
+    print(f"    Calinski-Harabasz: k={best_ch_k} (score={stats_df['calinski_harabasz'].max():.1f})")
+    print(f"    Davies-Bouldin:    k={best_db_k} (score={stats_df['davies_bouldin'].min():.4f})")
+    print(f"    Composite:         k={best_composite_k} (score={stats_df['composite_score'].max():.4f})")
+
+    # Report enrichment stats at best composite k
+    best_row = stats_df[stats_df['k'] == best_composite_k].iloc[0]
+    print(f"\n  At k={best_composite_k}:")
+    print(f"    Valid clusters:    {int(best_row['valid_clusters'])}")
+    print(f"    Any enriched:      {int(best_row['any_enriched'])} ({best_row['enriched_ratio']*100:.1f}%)")
+    print(f"    Strong enriched:   {int(best_row['strong_enriched'])} ({best_row['strong_ratio']*100:.1f}%)")
+    print(f"    Perfect enriched:  {int(best_row['perfect_enriched'])} ({best_row['perfect_ratio']*100:.1f}%)")
+
+    print(f"\n  Using k={best_composite_k} (based on composite score)")
+
+    n_clusters = best_composite_k
 else:
     n_clusters = args.n_clusters
     print(f"  Using specified k: {n_clusters}")
