@@ -235,11 +235,14 @@ def load_color_files(colors_dir, database, featuresets):
         featureset_color_order[fs] = []
 
         with open(colors_path, "r") as f:
-            for line in f:
+            for i, line in enumerate(f):
                 parts = line.strip().split()
                 if len(parts) >= 2:
                     feature = parts[0]
                     color = parts[1]
+                    # Skip header line (feature/color)
+                    if i == 0 and feature.lower() == 'feature':
+                        continue
                     featureset_colors[fs][feature] = (color, 1.0)
                     featureset_color_order[fs].append(feature)
 
@@ -572,16 +575,19 @@ def draw_annotation_bars(d, cluster_reads, read_x_positions, read_to_original_cl
             d.append(draw.Rectangle(base_x, annot_start_y + 15, group_width, 8, fill=sample_color))
 
 
-def draw_feature_bars(d, drawing_data, featuresets, bar_width, read_heights):
-    """Draw feature rectangles with a single outer border per read column.
+def draw_feature_bars(d, drawing_data, featuresets, bar_width, read_heights, num_featuresets):
+    """Draw feature rectangles with borders between featuresets and around outer edge.
 
     Args:
         d: Drawing object
         drawing_data: Feature data per read
         featuresets: List of feature sets
         bar_width: Width of each bar
-        read_heights: Dict of read -> (min_y, max_y) for outer border
+        read_heights: Dict of read -> (min_y, max_y, x_start, total_width) for borders
+        num_featuresets: Number of feature sets
     """
+    stroke_width = 0.5
+
     # First draw all feature rectangles (no individual borders)
     for read in drawing_data:
         for fs in featuresets:
@@ -594,15 +600,25 @@ def draw_feature_bars(d, drawing_data, featuresets, bar_width, read_heights):
                         fill_opacity=rect["fill_opacity"]
                     ))
 
-    # Then draw outer borders around each read's full column
+    # Draw borders: outer border + vertical lines between featuresets
     for read, (min_y, max_y, x_start, total_width) in read_heights.items():
+        # Outer border
         d.append(draw.Rectangle(
             x_start, min_y,
             total_width, max_y - min_y,
             fill='none',
             stroke='black',
-            stroke_width=0.5
+            stroke_width=stroke_width
         ))
+
+        # Vertical lines between featureset bars
+        for i in range(1, num_featuresets):
+            line_x = x_start + i * bar_width
+            d.append(draw.Line(
+                line_x, min_y, line_x, max_y,
+                stroke='black',
+                stroke_width=stroke_width
+            ))
 
 
 def draw_read_labels(d, cluster_reads, read_x_positions, group_width, top_margin, text_color):
@@ -625,29 +641,30 @@ def draw_read_labels(d, cluster_reads, read_x_positions, group_width, top_margin
             ))
 
 
-def draw_sample_legend(d, sample_colors, legend_x, legend_y, text_color):
-    """Draw sample legend at top."""
+def draw_top_legends(d, sample_colors, cluster_colors, read_to_original_cluster,
+                     read_to_original_enrichment, enrichment_colors, legend_x, legend_y, text_color):
+    """Draw sample, cluster, and enrichment legends stacked vertically."""
+    row_height = 20
+
+    # --- Sample legend (row 1) ---
+    current_y = legend_y
     d.append(draw.Text(
-        "Sample:", font_size=10, x=legend_x, y=legend_y,
+        "Sample:", font_size=10, x=legend_x, y=current_y,
         fill=text_color, font_family='sans-serif', font_weight='bold'
     ))
 
     for i, (sample, color) in enumerate(sample_colors.items()):
-        item_x = legend_x + 55 + i * 100
-        d.append(draw.Rectangle(item_x, legend_y - 8, 12, 12, fill=color))
+        item_x = legend_x + 60 + i * 100
+        d.append(draw.Rectangle(item_x, current_y - 8, 12, 12, fill=color))
         d.append(draw.Text(
-            sample, font_size=9, x=item_x + 16, y=legend_y,
+            sample, font_size=9, x=item_x + 16, y=current_y,
             fill=text_color, font_family='sans-serif'
         ))
 
-    return legend_x + 55 + len(sample_colors) * 100 + 30
-
-
-def draw_cluster_legend(d, cluster_colors, read_to_original_cluster, read_to_original_enrichment,
-                        enrichment_colors, legend_x, legend_y, text_color):
-    """Draw cluster legend at top."""
+    # --- Cluster legend (row 2) ---
+    current_y += row_height
     d.append(draw.Text(
-        "Cluster:", font_size=10, x=legend_x, y=legend_y,
+        "Cluster:", font_size=10, x=legend_x, y=current_y,
         fill=text_color, font_family='sans-serif', font_weight='bold'
     ))
 
@@ -663,7 +680,7 @@ def draw_cluster_legend(d, cluster_colors, read_to_original_cluster, read_to_ori
         clusters_by_enrichment[enrich] = sorted(set(clusters_by_enrichment[enrich]))
 
     # Draw cluster items
-    cluster_legend_x = legend_x + 55
+    cluster_legend_x = legend_x + 60
 
     # Sort enrichment types for consistent ordering
     enrichment_order = sorted(clusters_by_enrichment.keys(),
@@ -672,36 +689,33 @@ def draw_cluster_legend(d, cluster_colors, read_to_original_cluster, read_to_ori
     for enrich_type in enrichment_order:
         for cid in clusters_by_enrichment[enrich_type]:
             color = cluster_colors.get(cid, '#666666')
-            d.append(draw.Rectangle(cluster_legend_x, legend_y - 8, 12, 12, fill=color))
+            d.append(draw.Rectangle(cluster_legend_x, current_y - 8, 12, 12, fill=color))
 
             # Enrichment indicator
             enrich_color = enrichment_colors.get(enrich_type, '#999999')
-            d.append(draw.Rectangle(cluster_legend_x, legend_y + 5, 12, 3, fill=enrich_color))
+            d.append(draw.Rectangle(cluster_legend_x, current_y + 5, 12, 3, fill=enrich_color))
 
             d.append(draw.Text(
-                f"C{cid}", font_size=8, x=cluster_legend_x + 15, y=legend_y,
+                f"C{cid}", font_size=8, x=cluster_legend_x + 15, y=current_y,
                 fill=text_color, font_family='sans-serif'
             ))
             cluster_legend_x += 45
 
-    return cluster_legend_x + 20
-
-
-def draw_enrichment_legend(d, enrichment_colors, legend_x, legend_y, text_color):
-    """Draw enrichment legend at top."""
+    # --- Enrichment legend (row 3) ---
+    current_y += row_height
     d.append(draw.Text(
-        "Enrichment:", font_size=10, x=legend_x, y=legend_y,
+        "Enrichment:", font_size=10, x=legend_x, y=current_y,
         fill=text_color, font_family='sans-serif', font_weight='bold'
     ))
 
     for i, (enrich, color) in enumerate(sorted(enrichment_colors.items())):
-        item_x = legend_x + 75 + i * 110
-        d.append(draw.Rectangle(item_x, legend_y - 8, 12, 12, fill=color))
+        item_x = legend_x + 75 + i * 100
+        d.append(draw.Rectangle(item_x, current_y - 8, 12, 12, fill=color))
 
         # Clean up label for display
         short_enrich = enrich.replace('-enriched', '')
         d.append(draw.Text(
-            short_enrich, font_size=9, x=item_x + 16, y=legend_y,
+            short_enrich, font_size=9, x=item_x + 16, y=current_y,
             fill=text_color, font_family='sans-serif'
         ))
 
@@ -709,11 +723,11 @@ def draw_enrichment_legend(d, enrichment_colors, legend_x, legend_y, text_color)
 def draw_color_legends(d, featuresets, featureset_colors, featureset_color_order,
                        fs_display_names, color_legend_y_start, left_margin, text_color):
     """Draw featureset color legends at bottom."""
-    color_box_size = 12
-    color_text_offset = 16
-    colors_per_column = 8
-    item_width = 160
-    row_height = 18
+    color_box_size = 10
+    color_text_offset = 14
+    colors_per_column = 12  # More items per column = fewer columns
+    item_width = 120  # Narrower columns
+    row_height = 14  # Tighter row spacing
 
     def get_featureset_width(fs):
         num_items = len(featureset_color_order[fs])
@@ -724,14 +738,14 @@ def draw_color_legends(d, featuresets, featureset_colors, featureset_color_order
     current_legend_x = left_margin
     for fs in featuresets:
         featureset_legend_x[fs] = current_legend_x
-        current_legend_x += get_featureset_width(fs) + 30
+        current_legend_x += get_featureset_width(fs) + 15  # Reduced spacing between sections
 
     for fs in featuresets:
         section_x = featureset_legend_x[fs]
         display_name = fs_display_names.get(fs, fs)
 
         d.append(draw.Text(
-            display_name, font_size=10, x=section_x, y=color_legend_y_start,
+            display_name, font_size=9, x=section_x, y=color_legend_y_start,
             fill=text_color, font_family='sans-serif', font_weight='bold'
         ))
 
@@ -742,15 +756,15 @@ def draw_color_legends(d, featuresets, featureset_colors, featureset_color_order
             col = i // colors_per_column
 
             item_x = section_x + col * item_width
-            item_y = color_legend_y_start + 22 + row * row_height
+            item_y = color_legend_y_start + 18 + row * row_height
 
             d.append(draw.Rectangle(
-                item_x, item_y - 9, color_box_size, color_box_size,
+                item_x, item_y - 7, color_box_size, color_box_size,
                 fill=color, stroke=text_color, stroke_width=0.5
             ))
 
             d.append(draw.Text(
-                feature_name, font_size=8, x=item_x + color_text_offset, y=item_y,
+                feature_name, font_size=7, x=item_x + color_text_offset, y=item_y,
                 fill=text_color, font_family='sans-serif'
             ))
 
@@ -793,8 +807,8 @@ def parse_args():
                         help="Background color for the SVG (default: black)")
     parser.add_argument("--bar-width", dest="bar_width", type=int, default=8,
                         help="Width of each feature bar in pixels (default: 8)")
-    parser.add_argument("--bar-spacing", dest="bar_spacing", type=int, default=1,
-                        help="Spacing between bars within a read group (default: 1)")
+    parser.add_argument("--bar-spacing", dest="bar_spacing", type=int, default=0,
+                        help="Spacing between bars within a read group (default: 0)")
     parser.add_argument("--read-spacing", dest="read_spacing", type=int, default=12,
                         help="Spacing between read groups (default: 12)")
     parser.add_argument("--cluster-spacing", dest="cluster_spacing", type=int, default=30,
@@ -1027,7 +1041,20 @@ def main():
             read_heights[read] = (min_y, max_y, min_x, max_x - min_x)
             max_stop_y = max(max_stop_y, max_y)
 
-    image_width = current_x + 50
+    # Calculate required width for color legends (must match draw_color_legends)
+    colors_per_column = 12
+    item_width = 120
+    legend_spacing = 15
+
+    def get_legend_width(fs):
+        num_items = len(featureset_color_order[fs])
+        num_cols = (num_items + colors_per_column - 1) // colors_per_column
+        return max(num_cols * item_width, 100)
+
+    total_legend_width = left_margin + sum(get_legend_width(fs) + legend_spacing for fs in featuresets)
+
+    # Image width is max of data width and legend width
+    image_width = max(current_x + 50, total_legend_width + 50)
     legend_bottom_margin = 350
     image_height = max_stop_y + 50 + legend_bottom_margin
 
@@ -1060,7 +1087,7 @@ def main():
                         enrichment_colors, group_width, top_margin, left_margin, text_color)
 
     # Feature bars
-    draw_feature_bars(d, drawing_data, featuresets, args.bar_width, read_heights)
+    draw_feature_bars(d, drawing_data, featuresets, args.bar_width, read_heights, num_featuresets)
 
     # Read labels
     draw_read_labels(d, cluster_reads, read_x_positions, group_width, top_margin, text_color)
@@ -1089,16 +1116,10 @@ def main():
     legend_y = 20
     legend_x = left_margin
 
-    # Sample legend
-    legend_x = draw_sample_legend(d, sample_colors, legend_x, legend_y, text_color)
-
-    # Cluster legend
-    legend_x = draw_cluster_legend(d, cluster_colors, read_to_original_cluster,
-                                   read_to_original_enrichment, enrichment_colors,
-                                   legend_x, legend_y, text_color)
-
-    # Enrichment legend
-    draw_enrichment_legend(d, enrichment_colors, legend_x, legend_y, text_color)
+    # Sample, Cluster, Enrichment legends (stacked vertically)
+    draw_top_legends(d, sample_colors, cluster_colors, read_to_original_cluster,
+                     read_to_original_enrichment, enrichment_colors,
+                     legend_x, legend_y, text_color)
 
     # Color legends at bottom
     color_legend_y_start = max_stop_y + 130
