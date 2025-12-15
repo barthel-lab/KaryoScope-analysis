@@ -156,11 +156,37 @@ def load_representative_reads(reps_file, max_reps=None, top_clusters=None, max_c
     for cluster_id in clusters:
         cluster_data = reps_df[reps_df['cluster_id'] == cluster_id]
         enrichment = cluster_data['enrichment'].iloc[0]
-        reads = list(zip(cluster_data['read'], cluster_data['sample']))
 
-        # Apply max_reps limit if specified
-        if max_reps is not None and len(reads) > max_reps:
-            reads = reads[:max_reps]
+        # Apply max_reps limit with proportional sampling by sample
+        if max_reps is not None and len(cluster_data) > max_reps:
+            # Count reads per sample in this cluster
+            sample_counts = cluster_data['sample'].value_counts()
+            total_reads = len(cluster_data)
+
+            # Calculate proportional allocation for each sample
+            selected_reads = []
+            remaining_slots = max_reps
+
+            # Sort samples by count (descending) for consistent ordering
+            for sample in sample_counts.index:
+                # Proportional allocation, at least 1 if sample has reads and slots remain
+                proportion = sample_counts[sample] / total_reads
+                n_select = max(1, round(proportion * max_reps))
+                n_select = min(n_select, remaining_slots, sample_counts[sample])
+
+                if n_select > 0:
+                    sample_reads = cluster_data[cluster_data['sample'] == sample]
+                    selected = list(zip(sample_reads['read'].iloc[:n_select],
+                                       sample_reads['sample'].iloc[:n_select]))
+                    selected_reads.extend(selected)
+                    remaining_slots -= n_select
+
+                if remaining_slots <= 0:
+                    break
+
+            reads = selected_reads
+        else:
+            reads = list(zip(cluster_data['read'], cluster_data['sample']))
 
         cluster_reads[cluster_id] = {
             'enrichment': enrichment,
@@ -168,7 +194,7 @@ def load_representative_reads(reps_file, max_reps=None, top_clusters=None, max_c
         }
 
     if max_reps is not None:
-        print(f"  Limited to max {max_reps} representatives per cluster")
+        print(f"  Limited to max {max_reps} representatives per cluster (proportional sampling)")
 
     return cluster_reads, unique_enrichments
 
@@ -385,13 +411,14 @@ def generate_sample_colors(samples, existing_colors=None):
 def compute_dendrogram_order(feature_matrix_data, cluster_reads):
     """Compute dendrogram ordering for reads using original pairwise distances.
 
-    Extracts pairwise distances from the full feature matrix to preserve
-    the original distance relationships when showing a subset of reads.
+    Extracts pairwise distances from the full feature matrix and performs
+    hierarchical clustering with optimal leaf ordering to minimize crossings.
 
     Returns:
-        tuple: (reordered_cluster_reads, dendro_result, read_to_original_cluster, read_to_original_enrichment)
+        tuple: (reordered_cluster_reads, dendro_data, read_to_original_cluster, read_to_original_enrichment)
+               dendro_data contains 'linkage' and 'dist_matrix' for manual drawing
     """
-    from scipy.cluster.hierarchy import dendrogram as scipy_dendro, linkage
+    from scipy.cluster.hierarchy import linkage, leaves_list, optimal_leaf_ordering
     from scipy.spatial.distance import pdist, squareform
 
     read_to_original_cluster = {}
@@ -414,7 +441,6 @@ def compute_dendrogram_order(feature_matrix_data, cluster_reads):
     try:
         full_matrix = feature_matrix_data['adj_matrix']
         full_read_names = list(feature_matrix_data['read_names'])
-        linkage_method = str(feature_matrix_data.get('linkage_method', 'ward'))
 
         read_to_idx = {r: i for i, r in enumerate(full_read_names)}
         subset_indices = [read_to_idx[r] for r in all_displayed_reads if r in read_to_idx]
@@ -431,14 +457,26 @@ def compute_dendrogram_order(feature_matrix_data, cluster_reads):
         subset_dist_square = full_dist_square[np.ix_(subset_indices, subset_indices)]
         subset_distances = squareform(subset_dist_square)
 
-        # Compute linkage on subset using preserved distances
-        subset_linkage = linkage(subset_distances, method=linkage_method)
+        # Compute linkage on subset using 'average' method
+        subset_linkage = linkage(subset_distances, method='average')
 
-        dendro_result = scipy_dendro(subset_linkage, no_plot=True)
-        leaf_order = dendro_result['leaves']
+        # Apply optimal leaf ordering to rotate branches and minimize crossings
+        # This reorders leaves so that adjacent leaves are most similar
+        optimized_linkage = optimal_leaf_ordering(subset_linkage, subset_distances)
 
-        # Reorder reads
+        # Get leaf order from optimized linkage
+        leaf_order = leaves_list(optimized_linkage)
+
+        # Reorder reads according to optimal ordering
         reordered_reads = [subset_reads[i] for i in leaf_order]
+
+        # Store data for manual dendrogram drawing (use optimized linkage)
+        dendro_data = {
+            'linkage': optimized_linkage,
+            'dist_matrix': subset_dist_square,
+            'reads': reordered_reads,
+            'leaf_order': leaf_order
+        }
 
         # Rebuild cluster_reads with reordered reads
         cluster_reads_reordered = OrderedDict()
@@ -447,53 +485,130 @@ def compute_dendrogram_order(feature_matrix_data, cluster_reads):
             'reads': [(r, read_to_sample_map[r]) for r in reordered_reads]
         }
 
-        print(f"  Reordered {len(reordered_reads)} reads according to dendrogram")
-        return cluster_reads_reordered, dendro_result, read_to_original_cluster, read_to_original_enrichment
+        print(f"  Reordered {len(reordered_reads)} reads according to dendrogram (optimal leaf ordering)")
+        return cluster_reads_reordered, dendro_data, read_to_original_cluster, read_to_original_enrichment
 
     except Exception as e:
         print(f"  Warning: Could not compute dendrogram order: {e}")
+        import traceback
+        traceback.print_exc()
         return cluster_reads, None, read_to_original_cluster, read_to_original_enrichment
 
 
-def draw_dendrogram(d, dendro_result, read_x_positions, displayed_reads,
+def draw_dendrogram(d, dendro_data, read_x_positions, displayed_reads,
                     group_width, top_margin, dendrogram_height, background_color):
-    """Draw linear dendrogram header."""
+    """Draw dendrogram manually using linkage matrix with original distances.
+
+    The linkage matrix Z has rows [idx1, idx2, distance, count]:
+    - idx1, idx2: indices of clusters being merged (< n are leaves, >= n are internal nodes)
+    - distance: the merge distance (height of the horizontal line)
+    - count: number of leaves in the new cluster
+
+    We recursively traverse the tree to get proper leaf positions for each subtree,
+    which ensures branches don't cross.
+    """
     n_leaves = len(displayed_reads)
+    linkage_matrix = dendro_data['linkage']
+    leaf_order = dendro_data['leaf_order']
 
-    def get_pixel_x(dx):
-        leaf_idx = (dx - 5) / 10
-        leaf_idx = max(0, min(leaf_idx, n_leaves - 1))
-
-        low_idx = int(leaf_idx)
-        high_idx = min(low_idx + 1, n_leaves - 1)
-
-        low_x = read_x_positions[displayed_reads[low_idx]] + group_width / 2
-        high_x = read_x_positions[displayed_reads[high_idx]] + group_width / 2
-
-        frac = leaf_idx - low_idx
-        return low_x * (1 - frac) + high_x * frac
-
+    # Base Y position (bottom of dendrogram, where leaves attach)
     dendro_base_y = top_margin + 20
-    max_height = max([max(dc) for dc in dendro_result['dcoord']]) if dendro_result['dcoord'] else 1
-    max_height = max(max_height, 1)
 
-    def get_pixel_y(dy):
-        return dendro_base_y - (dy / max_height) * (dendrogram_height - 15)
+    # Find max distance in linkage for scaling
+    max_distance = linkage_matrix[:, 2].max() if len(linkage_matrix) > 0 else 1
+    max_distance = max(max_distance, 1)
+
+    def distance_to_y(dist):
+        """Convert distance to Y pixel coordinate (higher distance = higher up)."""
+        return dendro_base_y - (dist / max_distance) * (dendrogram_height - 15)
 
     line_color = '#AAAAAA' if background_color == 'black' else '#444444'
 
-    for icoord, dcoord in zip(dendro_result['icoord'], dendro_result['dcoord']):
-        x1 = get_pixel_x(icoord[0])
-        x2 = get_pixel_x(icoord[3])
-        y_bottom_left = get_pixel_y(dcoord[0])
-        y_top = get_pixel_y(dcoord[1])
-        y_bottom_right = get_pixel_y(dcoord[3])
+    # Build a mapping from original leaf index to display position
+    # leaf_order tells us: position i in display has original leaf leaf_order[i]
+    # We need: original leaf j is at display position where leaf_order[pos] == j
+    original_to_display_pos = {orig_idx: pos for pos, orig_idx in enumerate(leaf_order)}
 
+    # Get x position for each display position
+    display_pos_x = {}
+    for pos, read in enumerate(displayed_reads):
+        if read in read_x_positions:
+            display_pos_x[pos] = read_x_positions[read] + group_width / 2
+
+    # Recursively compute the x-center and leaf range for each node
+    # This ensures we get the correct x positions based on actual leaf positions
+    node_x_center = {}
+    node_height = {}
+    node_leaves = {}  # Store which leaves are under each node
+
+    def get_node_info(node_idx):
+        """Recursively get x-center, height, and leaves for a node."""
+        if node_idx in node_x_center:
+            return node_x_center[node_idx], node_height[node_idx], node_leaves[node_idx]
+
+        if node_idx < n_leaves:
+            # Leaf node - use display position
+            display_pos = original_to_display_pos.get(node_idx)
+            if display_pos is not None and display_pos in display_pos_x:
+                x = display_pos_x[display_pos]
+                node_x_center[node_idx] = x
+                node_height[node_idx] = 0
+                node_leaves[node_idx] = [display_pos]
+                return x, 0, [display_pos]
+            return None, 0, []
+
+        # Internal node - get from linkage matrix
+        row_idx = node_idx - n_leaves
+        if row_idx >= len(linkage_matrix):
+            return None, 0, []
+
+        idx1, idx2, dist, count = linkage_matrix[row_idx]
+        idx1, idx2 = int(idx1), int(idx2)
+
+        x1, h1, leaves1 = get_node_info(idx1)
+        x2, h2, leaves2 = get_node_info(idx2)
+
+        if x1 is None or x2 is None:
+            return None, dist, []
+
+        # Combine leaves and compute center as mean of all leaf positions
+        all_leaves = leaves1 + leaves2
+        x_center = sum(display_pos_x[pos] for pos in all_leaves) / len(all_leaves)
+
+        node_x_center[node_idx] = x_center
+        node_height[node_idx] = dist
+        node_leaves[node_idx] = all_leaves
+
+        return x_center, dist, all_leaves
+
+    # First pass: compute all node info
+    root_idx = n_leaves + len(linkage_matrix) - 1
+    get_node_info(root_idx)
+
+    # Second pass: draw the dendrogram
+    for row_idx, (idx1, idx2, dist, count) in enumerate(linkage_matrix):
+        idx1, idx2 = int(idx1), int(idx2)
+
+        x1 = node_x_center.get(idx1)
+        x2 = node_x_center.get(idx2)
+        h1 = node_height.get(idx1, 0)
+        h2 = node_height.get(idx2, 0)
+
+        if x1 is None or x2 is None:
+            continue
+
+        # Y coordinates
+        y_bottom_left = distance_to_y(h1)
+        y_bottom_right = distance_to_y(h2)
+        y_top = distance_to_y(dist)
+
+        # Draw the U-shape: left vertical, horizontal, right vertical
         d.append(draw.Line(x1, y_bottom_left, x1, y_top, stroke=line_color, stroke_width=1.5))
         d.append(draw.Line(x1, y_top, x2, y_top, stroke=line_color, stroke_width=1.5))
-        d.append(draw.Line(x2, y_top, x2, y_bottom_right, stroke=line_color, stroke_width=1.5))
+        d.append(draw.Line(x2, y_bottom_right, x2, y_top, stroke=line_color, stroke_width=1.5))
 
-    print(f"  Drew dendrogram for {n_leaves} reads ({len(dendro_result['icoord'])} branches)")
+    n_branches = len(linkage_matrix)
+    print(f"  Drew dendrogram for {n_leaves} reads ({n_branches} branches)")
 
 
 def draw_cluster_brackets(d, cluster_reads, cluster_x_start, cluster_x_end,
