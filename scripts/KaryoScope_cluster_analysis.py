@@ -62,24 +62,29 @@ parser.add_argument("--max-k", dest="max_k", type=int, default=100,
                     help="Maximum number of clusters to test during auto-detection (default: 100)")
 parser.add_argument("--min-cluster-size", dest="min_cluster_size", type=int, default=10,
                     help="Minimum cluster size to consider (default: 10)")
-parser.add_argument("--min-read-length", dest="min_read_length", type=int, default=0,
-                    help="Minimum read length in bp to include (default: 0, no filter)")
+parser.add_argument("--min-read-length", dest="min_read_length", type=int, default=10000,
+                    help="Minimum read length in bp to include (default: 10000)")
 parser.add_argument("--n-representatives", dest="n_reps", type=int, default=5,
                     help="Number of representative reads per cluster (default: 5)")
 parser.add_argument("--small-feature-quantile", dest="small_quantile", type=float, default=0.1,
                     help="Quantile threshold for small feature collapsing (default: 0.1)")
 parser.add_argument("--linkage-method", dest="linkage_method", default="ward",
                     help="Linkage method for hierarchical clustering (default: ward)")
-parser.add_argument("--matrix-type", dest="matrix_type", default="binary",
+parser.add_argument("--matrix-type", dest="matrix_type", default="length_weighted",
                     choices=["binary", "count", "length_weighted"],
                     help="Type of adjacency matrix:\n"
                          "  binary: 0/1 for presence/absence of transitions\n"
                          "  count: count of each transition\n"
-                         "  length_weighted: transitions weighted by feature length (default: binary)")
-parser.add_argument("--include-abundance", dest="include_abundance", action="store_true",
-                    help="Include feature abundance (proportion of read) as additional dimensions")
-parser.add_argument("--plot-umap", dest="plot_umap", action="store_true",
-                    help="Generate UMAP visualization (requires umap-learn)")
+                         "  length_weighted: transitions weighted by feature length (default: length_weighted)")
+parser.add_argument("--abundance", dest="include_abundance",
+                    action=argparse.BooleanOptionalAction, default=True,
+                    help="Include feature abundance dimensions (default: True)")
+parser.add_argument("--umap", dest="plot_umap",
+                    action=argparse.BooleanOptionalAction, default=True,
+                    help="Generate UMAP visualization (default: True, requires umap-learn)")
+parser.add_argument("--circular-dendrogram", dest="plot_circular_dendrogram",
+                    action=argparse.BooleanOptionalAction, default=True,
+                    help="Generate circular dendrogram visualization (default: True)")
 parser.add_argument("--umap-neighbors", dest="umap_neighbors", type=int, default=25,
                     help="UMAP n_neighbors parameter (default: 25)")
 parser.add_argument("--umap-min-dist", dest="umap_min_dist", type=float, default=0.2,
@@ -495,8 +500,15 @@ if args.comparison_mode == "two-group":
             print(f"        Use --control-group to specify a different reference group.")
     print(f"  Reference group: {control_group}")
 
+# Convert sample colors to group colors (use first sample's color for each group)
+group_colors_from_meta = {}
+for sample, color in sample_colors_from_meta.items():
+    group = sample_to_group.get(sample, sample)
+    if group not in group_colors_from_meta:
+        group_colors_from_meta[group] = color
+
 # Generate colors for groups
-group_colors = generate_group_colors(all_groups, sample_colors_from_meta)
+group_colors = generate_group_colors(all_groups, group_colors_from_meta)
 
 # Generate colors for samples (derive from group colors or use custom)
 sample_colors = {}
@@ -1026,14 +1038,21 @@ print(f"  Saved sample metadata to: {metadata_out_file}")
 print(f"\n--- Generating cluster visualization ---")
 
 fig, axes = plt.subplots(2, 2, figsize=(16, 14))
-
-# 1. Dendrogram with cluster coloring
-ax1 = axes[0, 0]
 from scipy.cluster.hierarchy import set_link_color_palette
+from matplotlib.patches import Patch
+
 # Color palette for clusters
 colors = plt.cm.tab20(np.linspace(0, 1, n_clusters))
 set_link_color_palette([matplotlib.colors.rgb2hex(c) for c in colors])
 
+# Create cluster color map
+cluster_color_map = {c: matplotlib.colors.rgb2hex(colors[i % len(colors)]) for i, c in enumerate(sorted(set(cluster_labels)))}
+
+# Create cluster to enrichment mapping
+cluster_to_enrichment = dict(zip(cluster_df['cluster_id'], cluster_df['enrichment']))
+
+# 1. Linear Dendrogram with cluster coloring
+ax1 = axes[0, 0]
 dend = dendrogram(
     linkage_matrix,
     ax=ax1,
@@ -1068,7 +1087,6 @@ ax2.set_xticks(range(len(cluster_sizes)))
 ax2.set_xticklabels([f"C{c}" for c in cluster_ids], rotation=45)
 
 # Legend - dynamic based on groups
-from matplotlib.patches import Patch
 legend_patches = [Patch(facecolor=c, label=f'{g}-enriched') for g, c in group_colors.items()]
 legend_patches.append(Patch(facecolor='#999999', label='Mixed'))
 ax2.legend(handles=legend_patches, loc='upper right')
@@ -1114,6 +1132,94 @@ plt.savefig(plot_file, dpi=150, bbox_inches='tight')
 plt.close()
 print(f"  Saved cluster visualization to: {plot_file}")
 
+# --- Circular Dendrogram (separate output) ---
+if args.plot_circular_dendrogram:
+    print(f"\n--- Generating circular dendrogram ---")
+
+    # Get dendrogram structure
+    dend_data = dendrogram(linkage_matrix, no_plot=True)
+    dend_colored = dendrogram(
+        linkage_matrix,
+        no_plot=True,
+        color_threshold=linkage_matrix[-(n_clusters-1), 2] if n_clusters > 1 else 0
+    )
+
+    n_leaves = len(dend_data['leaves'])
+    max_dist = max(max(y) for y in dend_data['dcoord'])
+    leaf_order = dend_data['leaves']
+
+    # Prepare annotation data for each leaf (in dendrogram order)
+    leaf_samples = [read_to_sample[read_names[i]] for i in leaf_order]
+    leaf_clusters = [cluster_labels[i] for i in leaf_order]
+    leaf_enrichments = [cluster_to_enrichment.get(c, 'Mixed') for c in leaf_clusters]
+
+    # Color mappings for annotations
+    enrichment_colors = {f'{g}-enriched': c for g, c in group_colors.items()}
+    enrichment_colors['Mixed'] = '#CCCCCC'
+
+    # Create figure with circular dendrogram
+    fig_circ = plt.figure(figsize=(16, 14))
+    ax_circ = fig_circ.add_subplot(111, polar=True)
+
+    # Plot each link in polar coordinates
+    for xcoord, ycoord, color in zip(dend_colored['icoord'], dend_colored['dcoord'], dend_colored['color_list']):
+        # Convert x coordinates to angles (0 to 2*pi)
+        theta = [2 * np.pi * x / (n_leaves * 10) for x in xcoord]
+        # Convert y (distance) to radius (invert so root is at center)
+        r = [max_dist - y + max_dist * 0.1 for y in ycoord]
+        ax_circ.plot(theta, r, color=color, linewidth=0.5)
+
+    # Calculate theta positions for leaves
+    theta_leaves = np.linspace(0, 2 * np.pi, n_leaves, endpoint=False)
+
+    # Ring 1 (innermost): Sample of origin
+    ring1_bottom = max_dist * 1.12
+    ring1_height = max_dist * 0.06
+    for theta, sample in zip(theta_leaves, leaf_samples):
+        ax_circ.bar(theta, ring1_height, width=2 * np.pi / n_leaves, bottom=ring1_bottom,
+                    color=sample_colors.get(sample, '#999999'), alpha=0.9, edgecolor='none')
+
+    # Ring 2 (middle): Cluster number
+    ring2_bottom = max_dist * 1.20
+    ring2_height = max_dist * 0.06
+    for theta, cluster in zip(theta_leaves, leaf_clusters):
+        ax_circ.bar(theta, ring2_height, width=2 * np.pi / n_leaves, bottom=ring2_bottom,
+                    color=cluster_color_map.get(cluster, '#999999'), alpha=0.9, edgecolor='none')
+
+    # Ring 3 (outermost): Cluster enrichment
+    ring3_bottom = max_dist * 1.28
+    ring3_height = max_dist * 0.06
+    for theta, enrich in zip(theta_leaves, leaf_enrichments):
+        ax_circ.bar(theta, ring3_height, width=2 * np.pi / n_leaves, bottom=ring3_bottom,
+                    color=enrichment_colors.get(enrich, '#CCCCCC'), alpha=0.9, edgecolor='none')
+
+    ax_circ.set_title(f"Circular Dendrogram (k={n_clusters} clusters)\nRings: Sample | Cluster | Enrichment", pad=30, fontsize=12)
+    ax_circ.set_yticklabels([])
+    ax_circ.set_xticklabels([])
+    ax_circ.grid(False)
+
+    # Add legends
+    # Sample legend (inner ring)
+    sample_patches = [Patch(facecolor=sample_colors[s], label=s) for s in sorted(sample_colors.keys())]
+    leg1 = ax_circ.legend(handles=sample_patches, loc='upper left', bbox_to_anchor=(1.05, 1.0), title='Sample (inner)')
+
+    # Cluster legend (middle ring)
+    cluster_patches = [Patch(facecolor=cluster_color_map[c], label=f'C{c}') for c in sorted(cluster_color_map.keys())]
+    leg2 = ax_circ.legend(handles=cluster_patches, loc='upper left', bbox_to_anchor=(1.05, 0.75),
+                          title='Cluster (middle)', ncol=2, fontsize=7)
+    ax_circ.add_artist(leg1)
+
+    # Enrichment legend (outer ring)
+    enrich_patches = [Patch(facecolor=enrichment_colors[e], label=e) for e in sorted(enrichment_colors.keys())]
+    leg3 = ax_circ.legend(handles=enrich_patches, loc='upper left', bbox_to_anchor=(1.05, 0.35), title='Enrichment (outer)')
+    ax_circ.add_artist(leg2)
+
+    plt.tight_layout()
+    circ_dend_file = f"{args.output_prefix}.circular_dendrogram.pdf"
+    plt.savefig(circ_dend_file, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved circular dendrogram to: {circ_dend_file}")
+
 # --- UMAP Visualization ---
 if args.plot_umap and len(read_names) > 10:
     print(f"\n--- Generating UMAP visualization ---")
@@ -1134,39 +1240,81 @@ if args.plot_umap and len(read_names) > 10:
         read_to_cluster = dict(zip(read_names, cluster_labels))
         cluster_to_enrichment = dict(zip(cluster_df['cluster_id'], cluster_df['enrichment']))
 
-        # Create dual UMAP plot (sample + enrichment coloring)
-        fig, axes = plt.subplots(1, 2, figsize=(16, 7))
-
-        # Left: Colored by sample (use sample_colors generated earlier)
+        # Prepare data for plotting
         sample_list = [read_to_sample[r] for r in read_names]
-        point_colors_sample = [sample_colors.get(s, '#999999') for s in sample_list]
+        group_list = [sample_to_group.get(s, s) for s in sample_list]
+        cluster_list = [read_to_cluster[r] for r in read_names]
 
-        axes[0].scatter(embedding[:, 0], embedding[:, 1], c=point_colors_sample, s=15, alpha=0.6)
-        axes[0].set_title("UMAP - Colored by Sample")
-        axes[0].set_xlabel("UMAP 1")
-        axes[0].set_ylabel("UMAP 2")
-
-        # Add sample legend
-        sample_patches = [Patch(facecolor=sample_colors[s], label=s) for s in sorted(sample_colors.keys())]
-        axes[0].legend(handles=sample_patches, loc='upper right')
-
-        # Right: Colored by enrichment (use group_colors for dynamic mapping)
+        # Color mappings
         enrichment_colors = {f'{g}-enriched': c for g, c in group_colors.items()}
         enrichment_colors['Mixed'] = '#CCCCCC'
+
+        # Generate distinct colors for clusters
+        n_unique_clusters = len(set(cluster_list))
+        cluster_cmap = plt.cm.tab20(np.linspace(0, 1, max(20, n_unique_clusters)))
+        cluster_color_map = {c: matplotlib.colors.rgb2hex(cluster_cmap[i % 20]) for i, c in enumerate(sorted(set(cluster_list)))}
+
+        # Create 2x2 UMAP plot (group, enrichment, cluster numbers, cluster colors)
+        fig, axes = plt.subplots(2, 2, figsize=(16, 14))
+
+        # 1. Top-left: Colored by group (from metadata)
+        point_colors_group = [group_colors.get(g, '#999999') for g in group_list]
+        axes[0, 0].scatter(embedding[:, 0], embedding[:, 1], c=point_colors_group, s=15, alpha=0.6)
+        axes[0, 0].set_title("UMAP - Colored by Group")
+        axes[0, 0].set_xlabel("UMAP 1")
+        axes[0, 0].set_ylabel("UMAP 2")
+        group_patches = [Patch(facecolor=group_colors[g], label=g) for g in sorted(group_colors.keys())]
+        axes[0, 0].legend(handles=group_patches, loc='upper right')
+
+        # 2. Top-right: Colored by enrichment
         point_colors_enrich = []
         for r in read_names:
             cluster = read_to_cluster[r]
             enrich = cluster_to_enrichment.get(cluster, 'Mixed')
             point_colors_enrich.append(enrichment_colors.get(enrich, '#CCCCCC'))
-
-        axes[1].scatter(embedding[:, 0], embedding[:, 1], c=point_colors_enrich, s=15, alpha=0.6)
-        axes[1].set_title("UMAP - Colored by Cluster Enrichment")
-        axes[1].set_xlabel("UMAP 1")
-        axes[1].set_ylabel("UMAP 2")
-
-        # Add enrichment legend
+        axes[0, 1].scatter(embedding[:, 0], embedding[:, 1], c=point_colors_enrich, s=15, alpha=0.6)
+        axes[0, 1].set_title("UMAP - Colored by Cluster Enrichment")
+        axes[0, 1].set_xlabel("UMAP 1")
+        axes[0, 1].set_ylabel("UMAP 2")
         enrich_patches = [Patch(facecolor=c, label=e) for e, c in enrichment_colors.items()]
-        axes[1].legend(handles=enrich_patches, loc='upper right')
+        axes[0, 1].legend(handles=enrich_patches, loc='upper right')
+
+        # 3. Bottom-left: Colored by cluster with cluster number labels
+        point_colors_cluster = [cluster_color_map[c] for c in cluster_list]
+        axes[1, 0].scatter(embedding[:, 0], embedding[:, 1], c=point_colors_cluster, s=15, alpha=0.6)
+        axes[1, 0].set_title("UMAP - Colored by Cluster")
+        axes[1, 0].set_xlabel("UMAP 1")
+        axes[1, 0].set_ylabel("UMAP 2")
+
+        # Add cluster number labels at cluster centroids
+        for cluster_id in sorted(set(cluster_list)):
+            mask = [c == cluster_id for c in cluster_list]
+            cluster_points = embedding[mask]
+            centroid_x = np.mean(cluster_points[:, 0])
+            centroid_y = np.mean(cluster_points[:, 1])
+            axes[1, 0].annotate(str(cluster_id), (centroid_x, centroid_y),
+                               fontsize=8, fontweight='bold', ha='center', va='center',
+                               bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7, edgecolor='gray'))
+
+        # 4. Bottom-right: Cluster numbers only (no points, just labels for clarity)
+        axes[1, 1].scatter(embedding[:, 0], embedding[:, 1], c=point_colors_cluster, s=10, alpha=0.3)
+        axes[1, 1].set_title("UMAP - Cluster Labels")
+        axes[1, 1].set_xlabel("UMAP 1")
+        axes[1, 1].set_ylabel("UMAP 2")
+
+        # Add cluster labels with enrichment info
+        for cluster_id in sorted(set(cluster_list)):
+            mask = [c == cluster_id for c in cluster_list]
+            cluster_points = embedding[mask]
+            centroid_x = np.mean(cluster_points[:, 0])
+            centroid_y = np.mean(cluster_points[:, 1])
+            enrich = cluster_to_enrichment.get(cluster_id, 'Mixed')
+            enrich_short = enrich.replace('-enriched', '').replace('Mixed', 'M')[:4]
+            label = f"C{cluster_id}\n({enrich_short})"
+            axes[1, 1].annotate(label, (centroid_x, centroid_y),
+                               fontsize=7, ha='center', va='center',
+                               bbox=dict(boxstyle='round,pad=0.2', facecolor=enrichment_colors.get(enrich, '#CCCCCC'),
+                                        alpha=0.8, edgecolor='gray'))
 
         plt.tight_layout()
         umap_file = f"{args.output_prefix}.umap.pdf"
@@ -1190,41 +1338,110 @@ if args.plot_umap and len(read_names) > 10:
         # Try to generate interactive Plotly version
         try:
             import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
 
+            # Create figure with dropdown menu for different colorings
             fig = go.Figure()
 
-            # Add traces by sample
-            for sample in sorted(set(sample_list)):
-                mask = [s == sample for s in sample_list]
-                sample_embedding = embedding[mask]
-                sample_reads = [r for r, m in zip(read_names, mask) if m]
-                sample_clusters = [read_to_cluster[r] for r in sample_reads]
-                sample_enrichments = [cluster_to_enrichment.get(c, 'Mixed') for c in sample_clusters]
+            # Prepare data arrays
+            embedding_x = embedding[:, 0]
+            embedding_y = embedding[:, 1]
+            enrichment_list = [cluster_to_enrichment.get(c, 'Mixed') for c in cluster_list]
 
-                hover_text = [f"Read: {r[:12]}...<br>Cluster: {c}<br>Enrichment: {e}"
-                             for r, c, e in zip(sample_reads, sample_clusters, sample_enrichments)]
+            # Hover text (same for all views)
+            hover_text = [f"Read: {r[:20]}...<br>Group: {g}<br>Cluster: {c}<br>Enrichment: {e}"
+                         for r, g, c, e in zip(read_names, group_list, cluster_list, enrichment_list)]
 
+            # 1. Add traces for GROUP coloring (default view)
+            for group in sorted(set(group_list)):
+                mask = np.array([g == group for g in group_list])
                 fig.add_trace(go.Scatter(
-                    x=sample_embedding[:, 0],
-                    y=sample_embedding[:, 1],
+                    x=embedding_x[mask],
+                    y=embedding_y[mask],
                     mode='markers',
-                    name=sample,
-                    text=hover_text,
+                    name=group,
+                    text=[hover_text[i] for i in range(len(mask)) if mask[i]],
                     hoverinfo='text',
-                    marker=dict(
-                        size=6,
-                        color=sample_colors.get(sample, '#999999'),
-                        opacity=0.7
-                    )
+                    marker=dict(size=6, color=group_colors.get(group, '#999999'), opacity=0.7),
+                    visible=True
                 ))
 
+            n_group_traces = len(set(group_list))
+
+            # 2. Add traces for CLUSTER coloring
+            for cluster_id in sorted(set(cluster_list)):
+                mask = np.array([c == cluster_id for c in cluster_list])
+                enrich = cluster_to_enrichment.get(cluster_id, 'Mixed')
+                fig.add_trace(go.Scatter(
+                    x=embedding_x[mask],
+                    y=embedding_y[mask],
+                    mode='markers',
+                    name=f"C{cluster_id} ({enrich[:4]})",
+                    text=[hover_text[i] for i in range(len(mask)) if mask[i]],
+                    hoverinfo='text',
+                    marker=dict(size=6, color=cluster_color_map.get(cluster_id, '#999999'), opacity=0.7),
+                    visible=False
+                ))
+
+            n_cluster_traces = len(set(cluster_list))
+
+            # 3. Add traces for ENRICHMENT coloring
+            for enrich in sorted(set(enrichment_list)):
+                mask = np.array([e == enrich for e in enrichment_list])
+                fig.add_trace(go.Scatter(
+                    x=embedding_x[mask],
+                    y=embedding_y[mask],
+                    mode='markers',
+                    name=enrich,
+                    text=[hover_text[i] for i in range(len(mask)) if mask[i]],
+                    hoverinfo='text',
+                    marker=dict(size=6, color=enrichment_colors.get(enrich, '#CCCCCC'), opacity=0.7),
+                    visible=False
+                ))
+
+            n_enrichment_traces = len(set(enrichment_list))
+
+            # Create visibility arrays for dropdown
+            total_traces = n_group_traces + n_cluster_traces + n_enrichment_traces
+
+            vis_group = [True] * n_group_traces + [False] * n_cluster_traces + [False] * n_enrichment_traces
+            vis_cluster = [False] * n_group_traces + [True] * n_cluster_traces + [False] * n_enrichment_traces
+            vis_enrichment = [False] * n_group_traces + [False] * n_cluster_traces + [True] * n_enrichment_traces
+
+            # Add dropdown menu
             fig.update_layout(
-                title=f"UMAP - Interactive ({len(read_names):,} reads)",
+                updatemenus=[
+                    dict(
+                        active=0,
+                        buttons=[
+                            dict(label="Color by Group",
+                                 method="update",
+                                 args=[{"visible": vis_group},
+                                       {"title": f"UMAP - Colored by Group ({len(read_names):,} reads)"}]),
+                            dict(label="Color by Cluster",
+                                 method="update",
+                                 args=[{"visible": vis_cluster},
+                                       {"title": f"UMAP - Colored by Cluster ({len(read_names):,} reads)"}]),
+                            dict(label="Color by Enrichment",
+                                 method="update",
+                                 args=[{"visible": vis_enrichment},
+                                       {"title": f"UMAP - Colored by Enrichment ({len(read_names):,} reads)"}]),
+                        ],
+                        direction="down",
+                        showactive=True,
+                        x=0.0,
+                        xanchor="left",
+                        y=1.15,
+                        yanchor="top"
+                    )
+                ],
+                title=f"UMAP - Colored by Group ({len(read_names):,} reads)",
                 xaxis_title="UMAP 1",
                 yaxis_title="UMAP 2",
                 hovermode='closest',
-                width=900,
-                height=700
+                width=1000,
+                height=750,
+                legend=dict(yanchor="top", y=0.99, xanchor="left", x=1.02)
             )
 
             umap_html_file = f"{args.output_prefix}.umap.html"
