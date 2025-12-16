@@ -76,6 +76,12 @@ parser.add_argument("--matrix-type", dest="matrix_type", default="length_weighte
                          "  binary: 0/1 for presence/absence of transitions\n"
                          "  count: count of each transition\n"
                          "  length_weighted: transitions weighted by feature length (default: length_weighted)")
+parser.add_argument("--edges", dest="edge_mode", default="bidirectional",
+                    choices=["directional", "bidirectional", "symmetric"],
+                    help="Edge counting mode:\n"
+                         "  directional: standard A->B edge counting\n"
+                         "  bidirectional: A->B and B->A are both counted separately\n"
+                         "  symmetric: edges are sorted alphabetically, A->B and B->A both count as A->B (default: bidirectional)")
 parser.add_argument("--abundance", dest="include_abundance",
                     action=argparse.BooleanOptionalAction, default=True,
                     help="Include feature abundance dimensions (default: True)")
@@ -201,13 +207,34 @@ def collapse_small_clusters(df, small_len_thresh, small_gap_thresh):
     result = df.groupby('read', group_keys=False).apply(collapse_read_features)
     return result.reset_index(drop=True)
 
-def get_edges(features):
-    """Get directed edges from a list of features."""
+def get_edges(features, edge_mode="directional"):
+    """Get edges from a list of features based on edge counting mode.
+
+    Args:
+        features: List of feature names in order
+        edge_mode: One of:
+            - "directional": standard A->B edge counting
+            - "bidirectional": A->B and B->A are both counted separately
+            - "symmetric": edges sorted alphabetically, A->B and B->A both count as A->B
+
+    Returns:
+        List of (from, to) tuples
+    """
     if len(features) <= 1:
         return []
     edges = []
     for i in range(len(features) - 1):
-        edges.append((features[i], features[i + 1]))
+        from_feat, to_feat = features[i], features[i + 1]
+
+        if edge_mode == "directional":
+            edges.append((from_feat, to_feat))
+        elif edge_mode == "bidirectional":
+            edges.append((from_feat, to_feat))
+            edges.append((to_feat, from_feat))
+        elif edge_mode == "symmetric":
+            # Sort alphabetically so A->B and B->A both become the same edge
+            sorted_pair = tuple(sorted([from_feat, to_feat]))
+            edges.append(sorted_pair)
     return edges
 
 def load_sample_metadata(metadata_file, sample_labels):
@@ -530,7 +557,8 @@ print(f"  Features before collapse: {len(in_data):,}")
 print(f"  Features after collapse: {len(collapsed_df):,}")
 
 # --- Build adjacency matrix ---
-print(f"\n--- Building adjacency matrix ({args.matrix_type}) ---")
+edge_mode_str = f" [{args.edge_mode}]"
+print(f"\n--- Building adjacency matrix ({args.matrix_type}{edge_mode_str}) ---")
 
 # Get feature data per read (with lengths for weighting)
 read_feature_data = collapsed_df.groupby('read').apply(
@@ -541,29 +569,58 @@ read_features = {r: [f[0] for f in data] for r, data in read_feature_data.items(
 read_feature_lengths = {r: {f: l for f, l in data} for r, data in read_feature_data.items()}
 
 # Get edges with weights (length of source feature)
-def get_weighted_edges(features_with_lengths):
-    """Get directed edges with weights (length of source feature)."""
+def get_weighted_edges(features_with_lengths, edge_mode="directional"):
+    """Get edges with weights based on edge counting mode.
+
+    Args:
+        features_with_lengths: List of (feature_name, length) tuples in order
+        edge_mode: One of:
+            - "directional": standard A->B edge counting, weight = source length
+            - "bidirectional": A->B and B->A counted separately, reverse uses avg weight
+            - "symmetric": edges sorted alphabetically, weight = avg of both features
+
+    Returns:
+        List of (from, to, weight) tuples
+    """
     if len(features_with_lengths) <= 1:
         return []
     edges = []
     for i in range(len(features_with_lengths) - 1):
         from_feat, from_len = features_with_lengths[i]
-        to_feat, _ = features_with_lengths[i + 1]
-        edges.append((from_feat, to_feat, from_len))
+        to_feat, to_len = features_with_lengths[i + 1]
+        avg_len = (from_len + to_len) / 2
+
+        if edge_mode == "directional":
+            edges.append((from_feat, to_feat, from_len))
+        elif edge_mode == "bidirectional":
+            edges.append((from_feat, to_feat, from_len))
+            edges.append((to_feat, from_feat, avg_len))
+        elif edge_mode == "symmetric":
+            # Sort alphabetically so A->B and B->A both become the same edge
+            sorted_pair = tuple(sorted([from_feat, to_feat]))
+            edges.append((sorted_pair[0], sorted_pair[1], avg_len))
     return edges
 
 read_edges = {}
 read_weighted_edges = {}
 for read_name, features in read_features.items():
-    read_edges[read_name] = get_edges(features)
-    read_weighted_edges[read_name] = get_weighted_edges(read_feature_data[read_name])
+    read_edges[read_name] = get_edges(features, edge_mode=args.edge_mode)
+    read_weighted_edges[read_name] = get_weighted_edges(read_feature_data[read_name], edge_mode=args.edge_mode)
 
 all_features = sorted(collapsed_df['feature'].unique())
 all_pairs = []
-for f1 in all_features:
-    for f2 in all_features:
-        if f1 != f2:
+if args.edge_mode == "symmetric":
+    # For symmetric mode, only include A->B where A < B (alphabetically)
+    # Both A->B and B->A edges in the data will map to this single column
+    for i, f1 in enumerate(all_features):
+        for f2 in all_features[i+1:]:
             all_pairs.append(f"{f1}->{f2}")
+else:
+    # For directional and bidirectional, include all A->B pairs
+    for f1 in all_features:
+        for f2 in all_features:
+            if f1 != f2:
+                all_pairs.append(f"{f1}->{f2}")
 
 read_names = sorted(read_features.keys())
 pair_to_idx = {pair: i for i, pair in enumerate(all_pairs)}
