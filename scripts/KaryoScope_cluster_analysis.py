@@ -28,6 +28,7 @@ from scipy.cluster.hierarchy import linkage, dendrogram, leaves_list, fcluster, 
 from scipy.spatial.distance import pdist, squareform
 from scipy.stats import fisher_exact, chi2_contingency
 from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
+from joblib import Parallel, delayed
 import matplotlib.pyplot as plt
 import matplotlib
 import matplotlib.colors as mcolors
@@ -99,6 +100,13 @@ parser.add_argument("--perfect-threshold", dest="perfect_threshold", type=float,
                     help="Threshold for perfect enrichment (default: 0.95 = 95%%)")
 parser.add_argument("--strong-threshold", dest="strong_threshold", type=float, default=0.80,
                     help="Threshold for strong enrichment (default: 0.80 = 80%%)")
+parser.add_argument("--davies-bouldin", dest="compute_davies_bouldin",
+                    action=argparse.BooleanOptionalAction, default=False,
+                    help="Compute Davies-Bouldin index (not recommended, favors high k) (default: False)")
+parser.add_argument("--early-stopping", dest="early_stopping", type=int, default=15,
+                    help="Stop k search if no improvement for N iterations (0 to disable) (default: 15)")
+parser.add_argument("--n-cores", dest="n_cores", type=int, default=4,
+                    help="Number of parallel cores for k evaluation (default: 4)")
 parser.add_argument("--nested", dest="nested",
                     action=argparse.BooleanOptionalAction, default=False,
                     help="Hierarchical testing: first test groups, then test samples within enriched groups (default: False)")
@@ -860,19 +868,32 @@ if args.n_clusters is None:
     # Try different numbers of clusters and evaluate
     # Upper bound: min of max_k or n_reads/10 (need at least 10 reads per cluster on average)
     max_k_limit = min(args.max_k + 1, len(read_names) // 10)
-    k_range = range(args.min_k, max_k_limit)
+    k_range = list(range(args.min_k, max_k_limit))
+    n_samples = len(read_names)
 
-    print(f"Testing cluster counts from {min(k_range)} to {max(k_range)}...")
+    print(f"Testing cluster counts from {min(k_range)} to {max(k_range)} ({len(k_range)} values, {args.n_cores} cores)...")
 
-    cluster_stats = []
-    for k in k_range:
+    # Define evaluation function for a single k value
+    def evaluate_k(k):
+        """Evaluate clustering quality metrics for a given k."""
         labels = fcluster(linkage_matrix, k, criterion='maxclust')
         labels_arr = np.array(labels)
 
         # Calculate standard clustering metrics
-        silhouette = silhouette_score(adj_matrix, labels) if k > 1 else 0
-        calinski_harabasz = calinski_harabasz_score(adj_matrix, labels) if k > 1 else 0
-        davies_bouldin = davies_bouldin_score(adj_matrix, labels) if k > 1 else np.inf
+        if k > 1:
+            if n_samples > 2000:
+                silhouette = silhouette_score(adj_matrix, labels, sample_size=min(2000, n_samples))
+            else:
+                silhouette = silhouette_score(adj_matrix, labels)
+            calinski_harabasz = calinski_harabasz_score(adj_matrix, labels)
+            if args.compute_davies_bouldin:
+                davies_bouldin = davies_bouldin_score(adj_matrix, labels)
+            else:
+                davies_bouldin = np.nan
+        else:
+            silhouette = 0
+            calinski_harabasz = 0
+            davies_bouldin = np.nan
 
         # Count clusters meeting minimum size
         cluster_sizes = Counter(labels)
@@ -881,9 +902,9 @@ if args.n_clusters is None:
         # Calculate enrichment diversity with strength categories
         enrichments = []
         purities = []
-        perfect_enriched = 0  # >= perfect_threshold (default 95%)
-        strong_enriched = 0   # >= strong_threshold (default 80%)
-        any_enriched = 0      # any significant enrichment
+        perfect_enriched = 0
+        strong_enriched = 0
+        any_enriched = 0
 
         for cluster_id in range(1, k + 1):
             cluster_mask = labels_arr == cluster_id
@@ -908,16 +929,14 @@ if args.n_clusters is None:
         perfect_ratio = perfect_enriched / valid_clusters if valid_clusters > 0 else 0
         strong_ratio = strong_enriched / valid_clusters if valid_clusters > 0 else 0
 
-        # Composite score: balance silhouette with enrichment quality
-        # Normalize silhouette to 0-1 range (typically -1 to 1, but usually 0-0.5 for real data)
-        silhouette_norm = (silhouette + 1) / 2  # Map -1,1 to 0,1
-        # Weighted composite: cluster quality + enrichment discovery + enrichment purity
+        # Composite score
+        silhouette_norm = (silhouette + 1) / 2
         composite_score = (0.3 * silhouette_norm +
                           0.3 * enriched_ratio +
                           0.2 * strong_ratio +
                           0.2 * perfect_ratio)
 
-        cluster_stats.append({
+        return {
             'k': k,
             'silhouette': silhouette,
             'calinski_harabasz': calinski_harabasz,
@@ -932,7 +951,62 @@ if args.n_clusters is None:
             'composite_score': composite_score,
             **{f'{g}_enriched': group_enriched_counts.get(g, 0) for g in all_groups},
             'mixed': mixed
-        })
+        }
+
+    # Parallel evaluation with early stopping
+    if args.early_stopping > 0 and args.n_cores == 1:
+        # Sequential with early stopping
+        cluster_stats = []
+        best_composite = -1
+        no_improvement_count = 0
+
+        for k in k_range:
+            stats = evaluate_k(k)
+            cluster_stats.append(stats)
+
+            if stats['composite_score'] > best_composite:
+                best_composite = stats['composite_score']
+                no_improvement_count = 0
+            else:
+                no_improvement_count += 1
+
+            if no_improvement_count >= args.early_stopping:
+                print(f"  Early stopping at k={k} (no improvement for {args.early_stopping} iterations)")
+                break
+    else:
+        # Parallel evaluation (early stopping works in batches)
+        batch_size = args.n_cores * 3  # Process in batches for early stopping
+
+        cluster_stats = []
+        best_composite = -1
+        no_improvement_count = 0
+        k_idx = 0
+
+        while k_idx < len(k_range):
+            # Get next batch of k values
+            batch_k = k_range[k_idx:k_idx + batch_size]
+
+            # Evaluate batch in parallel
+            batch_results = Parallel(n_jobs=args.n_cores)(
+                delayed(evaluate_k)(k) for k in batch_k
+            )
+
+            # Process results and check for early stopping
+            for stats in batch_results:
+                cluster_stats.append(stats)
+
+                if stats['composite_score'] > best_composite:
+                    best_composite = stats['composite_score']
+                    no_improvement_count = 0
+                else:
+                    no_improvement_count += 1
+
+            # Check early stopping after each batch
+            if args.early_stopping > 0 and no_improvement_count >= args.early_stopping:
+                print(f"  Early stopping at k={batch_k[-1]} (no improvement for {args.early_stopping} iterations)")
+                break
+
+            k_idx += batch_size
 
     # Save cluster analysis
     stats_df = pd.DataFrame(cluster_stats)
@@ -1014,12 +1088,12 @@ if args.n_clusters is None:
     print(f"  Saved k-selection plot to: {k_plot_file}")
 
     # Find best k by each metric
-    best_db_k = int(stats_df.loc[stats_df['davies_bouldin'].idxmin(), 'k'])
-
     print(f"\n  Optimal k by metric:")
     print(f"    Silhouette:        k={best_silhouette_k} (score={stats_df['silhouette'].max():.4f})")
     print(f"    Calinski-Harabasz: k={best_ch_k} (score={stats_df['calinski_harabasz'].max():.1f})")
-    print(f"    Davies-Bouldin:    k={best_db_k} (score={stats_df['davies_bouldin'].min():.4f})")
+    if args.compute_davies_bouldin:
+        best_db_k = int(stats_df.loc[stats_df['davies_bouldin'].idxmin(), 'k'])
+        print(f"    Davies-Bouldin:    k={best_db_k} (score={stats_df['davies_bouldin'].min():.4f})")
     print(f"    Composite:         k={best_composite_k} (score={stats_df['composite_score'].max():.4f})")
 
     # Report enrichment stats at best composite k
