@@ -74,6 +74,27 @@ def plot_metric_by_enrichment(df, metric, ax, title=None, ylabel=None):
     ax.tick_params(axis='x', rotation=45)
 
 
+def plot_metric_by_sample(df, metric, ax, title=None, ylabel=None):
+    """Create a box plot of a metric by sample."""
+    if metric not in df.columns or 'sample' not in df.columns:
+        ax.text(0.5, 0.5, f"Required columns not found", ha='center', va='center')
+        ax.set_title(title or metric)
+        return
+
+    # Sort samples by median value
+    sample_order = df.groupby('sample')[metric].median().sort_values(ascending=False).index
+
+    sns.boxplot(data=df, x='sample', y=metric, order=sample_order, ax=ax,
+                palette='tab10', showfliers=False)
+    sns.stripplot(data=df, x='sample', y=metric, order=sample_order, ax=ax,
+                  color='black', alpha=0.3, size=2)
+
+    ax.set_title(title or metric)
+    ax.set_ylabel(ylabel or metric)
+    ax.set_xlabel('Sample')
+    ax.tick_params(axis='x', rotation=45)
+
+
 def plot_cluster_composition(df, group_col, ax, title):
     """Create a stacked bar chart of cluster composition."""
     if group_col not in df.columns:
@@ -256,7 +277,25 @@ def main():
             pdf.savefig(fig, bbox_inches='tight')
             plt.close(fig)
 
-        # Page 3: Correlation heatmap and cluster sizes
+        # Page 3: Metrics by sample (batch effect detection)
+        if 'sample' in df.columns and df['sample'].nunique() > 1:
+            fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+            fig.suptitle('Sequence Metrics by Sample (Batch Effect Check)', fontsize=14, fontweight='bold')
+
+            plot_metric_by_sample(df, 'read_length', axes[0, 0],
+                                  title='Read Length by Sample', ylabel='Read Length (bp)')
+            plot_metric_by_sample(df, 'align_fraction', axes[0, 1],
+                                  title='Alignment Fraction by Sample', ylabel='Alignment Fraction')
+            plot_metric_by_sample(df, 'de', axes[1, 0],
+                                  title='Divergence by Sample', ylabel='Divergence')
+            plot_metric_by_sample(df, 'mapq', axes[1, 1],
+                                  title='Mapping Quality by Sample', ylabel='MAPQ')
+
+            plt.tight_layout()
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
+
+        # Page 4: Correlation heatmap and cluster sizes
         fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
         metrics = ['read_length', 'centroid_distance', 'mapq', 'de', 'align_len', 'align_fraction']
