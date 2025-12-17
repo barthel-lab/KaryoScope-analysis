@@ -73,40 +73,76 @@ def load_sample_metadata(metadata_file):
 
 
 def load_cluster_analysis(cluster_analysis_file):
-    """Load cluster analysis results to get enrichment info.
+    """Load cluster analysis results to get enrichment info and cluster order.
 
     Returns:
-        dict: cluster_id -> enrichment label
+        tuple: (cluster_enrichments dict, cluster_order list)
+            - cluster_enrichments: cluster_id -> enrichment label
+            - cluster_order: list of cluster_ids sorted by enrichment tier then p-value:
+                Tier 0: 100% enriched (perfect)
+                Tier 1: 80%+ enriched (strong)
+                Tier 2: all others
     """
     cluster_enrichments = {}
+    cluster_order = []
 
     if cluster_analysis_file and os.path.exists(cluster_analysis_file):
         try:
             df = pd.read_csv(cluster_analysis_file, sep='\t')
+
+            # Find percentage columns (they end with _pct)
+            pct_cols = [c for c in df.columns if c.endswith('_pct')]
+
+            # Determine enrichment tier for each cluster
+            def get_enrichment_tier(row):
+                max_pct = max(row[col] for col in pct_cols)
+                if max_pct == 100.0:
+                    return 0  # Perfect: 100% enriched
+                elif max_pct >= 80.0:
+                    return 1  # Strong: 80%+ enriched
+                else:
+                    return 2  # Other
+
+            df['enrichment_tier'] = df.apply(get_enrichment_tier, axis=1)
+
+            # Sort by: enrichment tier (lower = better), then by p-value
+            df = df.sort_values(['enrichment_tier', 'p_value'], ascending=[True, True])
+
             for _, row in df.iterrows():
                 cluster_enrichments[row['cluster_id']] = row['enrichment']
+                cluster_order.append(row['cluster_id'])
             print(f"  Loaded cluster analysis: {len(df)} clusters")
         except Exception as e:
             print(f"  Warning: Could not load cluster analysis: {e}")
 
-    return cluster_enrichments
+    return cluster_enrichments, cluster_order
 
 
-def load_representative_reads(reps_file, max_reps=None, top_clusters=None, max_clusters=None):
-    """Load representative reads from TSV file.
+def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order=None, max_reps=None, top_clusters=None, max_clusters=None):
+    """Load read assignments from TSV file.
 
     Args:
-        reps_file: Path to representative_reads.tsv
-        max_reps: Maximum representatives per cluster
+        reps_file: Path to read_assignments.tsv (all reads with cluster assignments and stats)
+        cluster_enrichments: Dict of cluster_id -> enrichment label from cluster_analysis.tsv
+        cluster_order: List of cluster_ids in priority order (100% enriched first, then 80%+, then by p-value)
+        max_reps: Maximum representatives per cluster (selects by rank, closest to centroid first)
         top_clusters: Dict of {category: n_clusters} where category is a group name or 'mixed'
         max_clusters: Maximum total clusters to include
 
     Returns:
         tuple: (cluster_reads OrderedDict, unique_enrichments set)
     """
-    print(f"\nLoading representative reads from: {reps_file}")
+    print(f"\nLoading read assignments from: {reps_file}")
     reps_df = pd.read_csv(reps_file, sep='\t')
-    print(f"  Total representative reads: {len(reps_df)}")
+    print(f"  Total reads: {len(reps_df)}")
+
+    # Merge enrichment info from cluster_analysis.tsv
+    if cluster_enrichments:
+        reps_df['enrichment'] = reps_df['cluster'].map(cluster_enrichments)
+        reps_df['enrichment'] = reps_df['enrichment'].fillna('unknown')
+    else:
+        # Fallback: use group as enrichment proxy
+        reps_df['enrichment'] = reps_df['group'].apply(lambda x: f"{x}-enriched" if pd.notna(x) else 'unknown')
 
     # Get unique enrichment labels from data
     unique_enrichments = set(reps_df['enrichment'].unique())
@@ -117,11 +153,11 @@ def load_representative_reads(reps_file, max_reps=None, top_clusters=None, max_c
         selected_clusters = []
         for category, n_clusters in top_clusters.items():
             # Map category to enrichment label(s)
-            # 'mixed' -> 'Mixed'
+            # 'mixed' -> 'mixed'
             # 'post' -> 'post-enriched'
             # 'pre' -> 'pre-enriched'
             if category.lower() == 'mixed':
-                target_enrichments = ['Mixed']
+                target_enrichments = ['mixed']
             else:
                 # Try to match group name to enrichment label
                 target_enrichments = []
@@ -135,18 +171,29 @@ def load_representative_reads(reps_file, max_reps=None, top_clusters=None, max_c
 
             for target_enrich in target_enrichments:
                 type_df = reps_df[reps_df['enrichment'] == target_enrich]
-                type_clusters = type_df['cluster_id'].unique()[:n_clusters]
+                # Use cluster_order to get most significant clusters first
+                if cluster_order:
+                    type_clusters_set = set(type_df['cluster'].unique())
+                    type_clusters = [c for c in cluster_order if c in type_clusters_set][:n_clusters]
+                else:
+                    type_clusters = list(type_df['cluster'].unique()[:n_clusters])
                 selected_clusters.extend(type_clusters)
                 print(f"  Selected top {len(type_clusters)} {target_enrich} clusters")
 
             if not target_enrichments:
                 print(f"  Warning: No enrichment category matches '{category}'")
 
-        reps_df = reps_df[reps_df['cluster_id'].isin(selected_clusters)]
+        reps_df = reps_df[reps_df['cluster'].isin(selected_clusters)]
         print(f"  Total after --top-clusters selection: {len(reps_df)}")
 
-    # Get unique clusters in order
-    clusters = reps_df['cluster_id'].unique()
+    # Get unique clusters - use priority order from cluster_analysis.tsv if available
+    # (sorted by: 100% enriched first, then 80%+, then by p-value)
+    available_clusters = set(reps_df['cluster'].unique())
+    if cluster_order:
+        clusters = [c for c in cluster_order if c in available_clusters]
+    else:
+        clusters = list(reps_df['cluster'].unique())
+
     if max_clusters:
         clusters = clusters[:max_clusters]
     print(f"  Clusters to plot: {len(clusters)}")
@@ -154,10 +201,11 @@ def load_representative_reads(reps_file, max_reps=None, top_clusters=None, max_c
     # Group reads by cluster
     cluster_reads = OrderedDict()
     for cluster_id in clusters:
-        cluster_data = reps_df[reps_df['cluster_id'] == cluster_id]
+        cluster_data = reps_df[reps_df['cluster'] == cluster_id]
         enrichment = cluster_data['enrichment'].iloc[0]
 
-        # Apply max_reps limit with proportional sampling by sample
+        # Apply max_reps limit using rank (rank 1 = closest to centroid)
+        # with proportional sampling by sample to maintain representation
         if max_reps is not None and len(cluster_data) > max_reps:
             # Count reads per sample in this cluster
             sample_counts = cluster_data['sample'].value_counts()
@@ -175,7 +223,8 @@ def load_representative_reads(reps_file, max_reps=None, top_clusters=None, max_c
                 n_select = min(n_select, remaining_slots, sample_counts[sample])
 
                 if n_select > 0:
-                    sample_reads = cluster_data[cluster_data['sample'] == sample]
+                    # Select reads with lowest rank (closest to centroid) for this sample
+                    sample_reads = cluster_data[cluster_data['sample'] == sample].sort_values('rank')
                     selected = list(zip(sample_reads['read'].iloc[:n_select],
                                        sample_reads['sample'].iloc[:n_select]))
                     selected_reads.extend(selected)
@@ -194,7 +243,7 @@ def load_representative_reads(reps_file, max_reps=None, top_clusters=None, max_c
         }
 
     if max_reps is not None:
-        print(f"  Limited to max {max_reps} representatives per cluster (proportional sampling)")
+        print(f"  Limited to max {max_reps} representatives per cluster (by centroid proximity, proportional sampling)")
 
     return cluster_reads, unique_enrichments
 
@@ -898,7 +947,7 @@ def parse_args():
     parser.add_argument("--cluster-analysis-prefix", dest="cluster_prefix", default=None,
                         help="Prefix from cluster_analysis.py outputs (auto-discovers files)")
     parser.add_argument("--representatives", default=None,
-                        help="TSV file with representative reads (or auto-discovered from prefix)")
+                        help="TSV file with read assignments (or auto-discovered from prefix as .read_assignments.tsv)")
     parser.add_argument("--feature-matrix", dest="feature_matrix_file", default=None,
                         help="NPZ file with feature matrix (or auto-discovered from prefix)")
     parser.add_argument("--sample-metadata", dest="sample_metadata", default=None,
@@ -957,13 +1006,13 @@ def main():
     if args.cluster_prefix:
         prefix = args.cluster_prefix
         if not args.representatives:
-            args.representatives = f"{prefix}.representative_reads.tsv"
+            args.representatives = f"{prefix}.read_assignments.tsv"
         if not args.feature_matrix_file:
             args.feature_matrix_file = f"{prefix}.feature_matrix.npz"
         if not args.sample_metadata:
             args.sample_metadata = f"{prefix}.sample_metadata.tsv"
 
-        # Also check for cluster analysis file
+        # Also check for cluster analysis file (for enrichment info)
         cluster_analysis_file = f"{prefix}.cluster_analysis.tsv"
     else:
         cluster_analysis_file = None
@@ -997,6 +1046,9 @@ def main():
     # Load sample metadata
     sample_to_group, sample_colors, group_colors = load_sample_metadata(args.sample_metadata)
 
+    # Load cluster analysis to get enrichment info and cluster priority order
+    cluster_enrichments, cluster_order = load_cluster_analysis(cluster_analysis_file)
+
     # Parse top_clusters if provided
     top_clusters = None
     if args.top_clusters:
@@ -1005,9 +1057,11 @@ def main():
             key, val = part.strip().split(':')
             top_clusters[key.strip()] = int(val)
 
-    # Load representative reads
+    # Load read assignments
     cluster_reads, unique_enrichments = load_representative_reads(
         args.representatives,
+        cluster_enrichments=cluster_enrichments,
+        cluster_order=cluster_order,
         max_reps=max_reps,
         top_clusters=top_clusters,
         max_clusters=args.max_clusters
@@ -1252,7 +1306,9 @@ def main():
                 sys.stderr.write(f"  - {feature}\n")
 
     print(f"\n--- Summary ---")
-    print(f"Clusters plotted: {len(cluster_reads)}")
+    # Use original cluster count (before dendrogram reordering merges them)
+    original_cluster_count = len(set(read_to_original_cluster.values())) if read_to_original_cluster else len(cluster_reads)
+    print(f"Clusters plotted: {original_cluster_count}")
     total_reads = sum(len(data['reads']) for data in cluster_reads.values())
     print(f"Total reads plotted: {total_reads}")
     print(f"\n✅ Saved to {args.output}")
