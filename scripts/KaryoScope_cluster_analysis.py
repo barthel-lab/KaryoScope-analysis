@@ -1,6 +1,6 @@
 # KaryoScope Cluster Analysis
 # Analyzes hierarchical clustering results to identify biologically interesting clusters
-# and select representative reads for visualization
+# with read assignments sorted by centroid distance for visualization
 #
 # Usage:
 # python KaryoScope_cluster_analysis.py \
@@ -64,8 +64,6 @@ parser.add_argument("--min-cluster-size", dest="min_cluster_size", type=int, def
                     help="Minimum cluster size to consider (default: 10)")
 parser.add_argument("--min-read-length", dest="min_read_length", type=int, default=10000,
                     help="Minimum read length in bp to include (default: 10000)")
-parser.add_argument("--n-representatives", dest="n_reps", type=int, default=5,
-                    help="Number of representative reads per cluster (default: 5)")
 parser.add_argument("--small-feature-quantile", dest="small_quantile", type=float, default=0.1,
                     help="Quantile threshold for small feature collapsing (default: 0.1)")
 parser.add_argument("--linkage-method", dest="linkage_method", default="ward",
@@ -1076,6 +1074,7 @@ cluster_labels = fcluster(linkage_matrix, n_clusters, criterion='maxclust')
 # Analyze each cluster
 cluster_analysis = []
 cluster_reads_dict = {}
+read_centroid_distances = {}  # Store centroid distance for each read
 
 # Pre-compute arrays for faster cluster analysis
 cluster_labels_arr = np.array(cluster_labels)
@@ -1108,50 +1107,9 @@ for cluster_id in range(1, n_clusters + 1):
     centroid_idx = np.argmin(distances_to_centroid)
     centroid_read = cluster_reads[centroid_idx]
 
-    # Get representative reads - balanced by group but prioritizing centroid proximity
-    # Pre-compute cluster read groups for efficiency
-    cluster_read_groups = [read_to_group[r] for r in cluster_reads]
-
-    group_reads = {}
-    for g in all_groups:
-        # Build list of (index, read, distance) for this group
-        group_reads[g] = [(i, cluster_reads[i], distances_to_centroid[i])
-                         for i in range(len(cluster_reads))
-                         if cluster_read_groups[i] == g]
-        # Sort by distance to centroid
-        group_reads[g].sort(key=lambda x: x[2])
-
-    # Calculate proportional representation for each group
-    group_n_reps = {}
-    total_pct = sum(stats['group_pcts'].values())
-    remaining_reps = args.n_reps
-
-    for g in all_groups:
-        pct = stats['group_pcts'].get(g, 0)
-        n_reps = round(args.n_reps * pct / 100) if total_pct > 0 else 0
-        n_reps = min(n_reps, len(group_reads[g]), remaining_reps)
-        group_n_reps[g] = n_reps
-        remaining_reps -= n_reps
-
-    # Fill remaining slots from groups with available reads
-    while remaining_reps > 0:
-        filled = False
-        for g in sorted(all_groups, key=lambda x: stats['group_pcts'].get(x, 0), reverse=True):
-            if len(group_reads[g]) > group_n_reps[g] and remaining_reps > 0:
-                group_n_reps[g] += 1
-                remaining_reps -= 1
-                filled = True
-        if not filled:
-            break
-
-    # Select best (closest to centroid) from each group
-    representative_reads = []
-    avg_dists = {}
-    for g in all_groups:
-        n_reps = group_n_reps[g]
-        selected = group_reads[g][:n_reps]
-        representative_reads.extend([r[1] for r in selected])
-        avg_dists[g] = np.mean([r[2] for r in selected]) if n_reps > 0 else np.nan
+    # Store centroid distances for all reads in this cluster
+    for i, read in enumerate(cluster_reads):
+        read_centroid_distances[read] = distances_to_centroid[i]
 
     # Build cluster analysis record
     cluster_record = {
@@ -1162,15 +1120,13 @@ for cluster_id in range(1, n_clusters + 1):
         'enrichment': stats['enrichment'],
         'centroid_read': centroid_read,
         'centroid_sample': read_to_sample[centroid_read],
-        'centroid_group': sample_to_group.get(read_to_sample[centroid_read], read_to_sample[centroid_read]),
-        'representative_reads': ','.join(representative_reads)
+        'centroid_group': sample_to_group.get(read_to_sample[centroid_read], read_to_sample[centroid_read])
     }
 
     # Add group-specific columns
     for g in all_groups:
         cluster_record[f'{g}_count'] = stats['group_counts'].get(g, 0)
         cluster_record[f'{g}_pct'] = stats['group_pcts'].get(g, 0)
-        cluster_record[f'avg_dist_{g}'] = avg_dists.get(g, np.nan)
 
     # Option A: Nested/hierarchical testing within enriched group
     if args.nested and stats['enrichment'] != 'mixed' and args.comparison_mode != 'per-sample':
@@ -1253,25 +1209,37 @@ cluster_df_export = cluster_df.drop(columns=cols_to_drop, errors='ignore')
 cluster_df_export.to_csv(analysis_file, sep='\t', index=False)
 print(f"\n  Saved cluster analysis to: {analysis_file}")
 
-# Save cluster assignments for all reads
-assignments = pd.DataFrame({
-    'read': read_names,
-    'cluster': cluster_labels,
-    'sample': [read_to_sample[r] for r in read_names]
-})
-assignments_file = f"{args.output_prefix}.cluster_assignments.tsv"
-assignments.to_csv(assignments_file, sep='\t', index=False)
-print(f"  Saved cluster assignments to: {assignments_file}")
+# Save read assignments with stats (sorted by cluster, then centroid distance)
+# Build list of read records
+read_records = []
+for i, read in enumerate(read_names):
+    cluster = cluster_labels[i]
+    sample = read_to_sample[read]
+    group = sample_to_group.get(sample, sample)
+    centroid_dist = read_centroid_distances.get(read, np.nan)
+    read_len = read_length_dict.get(read, 0)
+    read_records.append({
+        'read': read,
+        'cluster': cluster,
+        'sample': sample,
+        'group': group,
+        'centroid_distance': centroid_dist,
+        'read_length': read_len
+    })
 
-# Save representative reads per cluster (for plotting)
-reps_file = f"{args.output_prefix}.representative_reads.tsv"
-with open(reps_file, 'w') as f:
-    f.write("cluster_id\tenrichment\tread\tsample\n")
-    for _, row in cluster_df.iterrows():
-        for read in row['representative_reads'].split(','):
-            sample = read_to_sample[read]
-            f.write(f"{row['cluster_id']}\t{row['enrichment']}\t{read}\t{sample}\n")
-print(f"  Saved representative reads to: {reps_file}")
+# Create DataFrame and sort by cluster, then centroid_distance
+assignments = pd.DataFrame(read_records)
+assignments = assignments.sort_values(['cluster', 'centroid_distance'], ascending=[True, True])
+
+# Add rank within cluster (1 = closest to centroid)
+assignments['rank'] = assignments.groupby('cluster').cumcount() + 1
+
+# Reorder columns
+assignments = assignments[['read', 'cluster', 'sample', 'group', 'centroid_distance', 'read_length', 'rank']]
+
+assignments_file = f"{args.output_prefix}.read_assignments.tsv"
+assignments.to_csv(assignments_file, sep='\t', index=False)
+print(f"  Saved read assignments to: {assignments_file}")
 
 # Save feature matrix data for cluster_plot.py (for computing subset dendrograms)
 matrix_file = f"{args.output_prefix}.feature_matrix.npz"
@@ -1729,9 +1697,8 @@ print(f"  - Mixed: {sum(cluster_df['enrichment'] == 'Mixed')}")
 print(f"\nOutput files:")
 print(f"  - {analysis_file}")
 print(f"  - {assignments_file}")
-print(f"  - {reps_file}")
 print(f"  - {matrix_file}")
 print(f"  - {plot_file}")
-print(f"\nNext step: Use representative_reads.tsv with KaryoScope_cluster_plot.py")
-print(f"to visualize representative reads from each cluster.")
+print(f"\nNext step: Use read_assignments.tsv with KaryoScope_cluster_plot.py")
+print(f"to visualize reads from each cluster (sorted by centroid distance).")
 print(f"Use --feature-matrix with the .feature_matrix.npz file for dendrogram header.")
