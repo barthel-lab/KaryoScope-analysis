@@ -8,19 +8,17 @@ Designed to work with outputs from KaryoScope_cluster_analysis.py.
 Usage:
   python KaryoScope_cluster_plot.py \
     --cluster-analysis-prefix test_aligned \
+    --bed /path/to/pre/sample.bed /path/to/post/sample.bed \
+    --colors /path/to/KS_human_CHM13 \
     --featuresets chromosome,region,subtelomeric \
-    --bed-dirs /path/to/pre/bed /path/to/post/bed \
-    --colors-dir /path/to/colors \
-    --database KS_human_CHM13 \
     --output cluster_representatives.svg
 
 With top-clusters filtering (select top N per category):
   python KaryoScope_cluster_plot.py \
     --cluster-analysis-prefix test_aligned \
+    --bed /path/to/pre/sample.bed /path/to/post/sample.bed \
+    --colors /path/to/KS_human_CHM13 \
     --featuresets region,subtelomeric \
-    --bed-dirs /path/to/pre/bed /path/to/post/bed \
-    --colors-dir /path/to/colors \
-    --database KS_human_CHM13 \
     --output cluster_representatives.svg \
     --top-clusters "post:4,pre:2,mixed:3"
 """
@@ -264,28 +262,51 @@ def load_feature_matrix(matrix_file):
     return None
 
 
-def find_bed_directories(bed_dirs):
-    """Find sample BED directories.
+def parse_bed_paths(bed_files):
+    """Parse BED file paths to extract sample names, directories, and database.
+
+    Args:
+        bed_files: List of full paths to BED files
 
     Returns:
-        dict: sample_name -> bed_directory
+        tuple: (sample_bed_paths dict, database name)
+            - sample_bed_paths: sample_name -> bed_directory
+            - database: extracted database name (e.g., KS_human_CHM13)
     """
-    print(f"\nSearching for BED files in: {bed_dirs}")
+    print(f"\nParsing BED file paths...")
     sample_bed_paths = {}
+    database = None
 
-    for bed_dir in bed_dirs:
-        if not os.path.exists(bed_dir):
-            continue
-        for f in os.listdir(bed_dir):
-            if f.endswith('.features.bed.gz'):
-                parts = f.split('.')
-                if len(parts) >= 2:
-                    sample_name = parts[0]
-                    if sample_name not in sample_bed_paths:
-                        sample_bed_paths[sample_name] = bed_dir
-                        print(f"  Found sample: {sample_name} -> {bed_dir}")
+    for bed_path in bed_files:
+        if not os.path.exists(bed_path):
+            sys.stderr.write(f"Error: BED file not found: {bed_path}\n")
+            sys.exit(1)
 
-    return sample_bed_paths
+        bed_dir = os.path.dirname(bed_path)
+        filename = os.path.basename(bed_path)
+
+        # Expected format: {sample}.telogator.1.{database}.{featureset}.{smoothness}.KaryoScope.bed
+        # or: {sample}.telogator.1.{database}.{featureset}.{smoothness}.features.bed.gz
+        parts = filename.split('.')
+        if len(parts) >= 4:
+            sample_name = parts[0]
+            # Database is typically the 4th part (index 3)
+            db_name = parts[3]
+
+            if sample_name not in sample_bed_paths:
+                sample_bed_paths[sample_name] = bed_dir
+                print(f"  {sample_name} -> {bed_dir}")
+
+            # Use first database found, verify consistency
+            if database is None:
+                database = db_name
+            elif database != db_name:
+                sys.stderr.write(f"Warning: Inconsistent database names: {database} vs {db_name}\n")
+
+    if database:
+        print(f"  Database: {database}")
+
+    return sample_bed_paths, database
 
 
 def load_color_files(colors_dir, database, featuresets):
@@ -944,26 +965,18 @@ def parse_args():
         formatter_class=argparse.RawTextHelpFormatter)
 
     # Input/Output
-    parser.add_argument("--cluster-analysis-prefix", dest="cluster_prefix", default=None,
-                        help="Prefix from cluster_analysis.py outputs (auto-discovers files)")
-    parser.add_argument("--representatives", default=None,
-                        help="TSV file with read assignments (or auto-discovered from prefix as .read_assignments.tsv)")
-    parser.add_argument("--feature-matrix", dest="feature_matrix_file", default=None,
-                        help="NPZ file with feature matrix (or auto-discovered from prefix)")
-    parser.add_argument("--sample-metadata", dest="sample_metadata", default=None,
-                        help="TSV file with sample metadata (or auto-discovered from prefix)")
+    parser.add_argument("--cluster-analysis-prefix", dest="cluster_prefix", required=True,
+                        help="Prefix from cluster_analysis.py outputs (auto-discovers .read_assignments.tsv, .feature_matrix.npz, etc.)")
     parser.add_argument("--output", required=True,
                         help="Output SVG file path")
 
     # Data sources
+    parser.add_argument("--bed", dest="bed_files", required=True, nargs='+',
+                        help="Full paths to BED files (same files used in cluster_analysis.py)")
+    parser.add_argument("--colors", dest="colors_dir", required=True,
+                        help="Full path to colors database directory (contains {database}.{featureset}.colors.txt files)")
     parser.add_argument("--featuresets", required=True,
                         help="Comma-separated list of feature sets to plot")
-    parser.add_argument("--bed-dirs", dest="bed_dirs", required=True, nargs='+',
-                        help="Directories containing BED files (one per sample)")
-    parser.add_argument("--colors-dir", dest="colors_dir", required=True,
-                        help="Directory containing the color files")
-    parser.add_argument("--database", required=True,
-                        help="Database name (e.g., KS_human_CHM13)")
 
     # Display options
     parser.add_argument("--background", dest="background_color", default="black",
@@ -1003,23 +1016,22 @@ def main():
     args = parse_args()
 
     # --- Auto-discover files from prefix ---
-    if args.cluster_prefix:
-        prefix = args.cluster_prefix
-        if not args.representatives:
-            args.representatives = f"{prefix}.read_assignments.tsv"
-        if not args.feature_matrix_file:
-            args.feature_matrix_file = f"{prefix}.feature_matrix.npz"
-        if not args.sample_metadata:
-            args.sample_metadata = f"{prefix}.sample_metadata.tsv"
-
-        # Also check for cluster analysis file (for enrichment info)
-        cluster_analysis_file = f"{prefix}.cluster_analysis.tsv"
-    else:
-        cluster_analysis_file = None
+    prefix = args.cluster_prefix
+    representatives_file = f"{prefix}.read_assignments.tsv"
+    feature_matrix_file = f"{prefix}.feature_matrix.npz"
+    sample_metadata_file = f"{prefix}.sample_metadata.tsv"
+    cluster_analysis_file = f"{prefix}.cluster_analysis.tsv"
 
     # Verify required files exist
-    if not args.representatives or not os.path.exists(args.representatives):
-        sys.stderr.write(f"Error: Representatives file not found: {args.representatives}\n")
+    if not os.path.exists(representatives_file):
+        sys.stderr.write(f"Error: Read assignments file not found: {representatives_file}\n")
+        sys.exit(1)
+
+    # --- Parse BED paths to get sample directories and database ---
+    sample_bed_paths, database = parse_bed_paths(args.bed_files)
+
+    if not database:
+        sys.stderr.write("Error: Could not determine database from BED file paths\n")
         sys.exit(1)
 
     # --- Setup ---
@@ -1044,7 +1056,7 @@ def main():
 
     # --- Load data ---
     # Load sample metadata
-    sample_to_group, sample_colors, group_colors = load_sample_metadata(args.sample_metadata)
+    sample_to_group, sample_colors, group_colors = load_sample_metadata(sample_metadata_file)
 
     # Load cluster analysis to get enrichment info and cluster priority order
     cluster_enrichments, cluster_order = load_cluster_analysis(cluster_analysis_file)
@@ -1059,7 +1071,7 @@ def main():
 
     # Load read assignments
     cluster_reads, unique_enrichments = load_representative_reads(
-        args.representatives,
+        representatives_file,
         cluster_enrichments=cluster_enrichments,
         cluster_order=cluster_order,
         max_reps=max_reps,
@@ -1068,14 +1080,11 @@ def main():
     )
 
     # Load feature matrix
-    feature_matrix_data = load_feature_matrix(args.feature_matrix_file)
-
-    # Find BED directories
-    sample_bed_paths = find_bed_directories(args.bed_dirs)
+    feature_matrix_data = load_feature_matrix(feature_matrix_file)
 
     # Load color files
     featureset_colors, featureset_color_order = load_color_files(
-        args.colors_dir, args.database, featuresets
+        args.colors_dir, database, featuresets
     )
 
     # Get all reads we need
@@ -1088,7 +1097,7 @@ def main():
 
     # Load BED data
     read_data = load_bed_data(
-        sample_bed_paths, args.database, featuresets, args.smoothness, all_reads_needed
+        sample_bed_paths, database, featuresets, args.smoothness, all_reads_needed
     )
 
     # --- Generate colors ---
