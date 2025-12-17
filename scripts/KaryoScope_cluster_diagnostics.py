@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from matplotlib.backends.backend_pdf import PdfPages
+from scipy import stats
 
 
 def load_annotated_data(filepath):
@@ -38,7 +39,7 @@ def load_annotated_data(filepath):
 
 
 def plot_metric_by_cluster(df, metric, ax, title=None, ylabel=None):
-    """Create a box plot of a metric by cluster."""
+    """Create a box plot of a metric by cluster with Kruskal-Wallis test."""
     if metric not in df.columns:
         ax.text(0.5, 0.5, f"Column '{metric}' not found", ha='center', va='center')
         ax.set_title(title or metric)
@@ -52,14 +53,24 @@ def plot_metric_by_cluster(df, metric, ax, title=None, ylabel=None):
     sns.stripplot(data=df, x='cluster', y=metric, order=cluster_order, ax=ax,
                   color='black', alpha=0.3, size=2)
 
-    ax.set_title(title or metric)
+    # Kruskal-Wallis test
+    groups = [group[metric].dropna().values for name, group in df.groupby('cluster')]
+    groups = [g for g in groups if len(g) > 0]
+    if len(groups) >= 2:
+        stat, p_value = stats.kruskal(*groups)
+        p_str = f"p={p_value:.2e}" if p_value < 0.001 else f"p={p_value:.3f}"
+        title_text = f"{title or metric}\n(Kruskal-Wallis {p_str})"
+    else:
+        title_text = title or metric
+
+    ax.set_title(title_text)
     ax.set_ylabel(ylabel or metric)
     ax.set_xlabel('Cluster')
     ax.tick_params(axis='x', rotation=45)
 
 
 def plot_metric_by_enrichment(df, metric, ax, title=None, ylabel=None):
-    """Create a box plot of a metric by enrichment category."""
+    """Create a box plot of a metric by enrichment category with Kruskal-Wallis test."""
     if metric not in df.columns or 'enrichment' not in df.columns:
         ax.text(0.5, 0.5, f"Required columns not found", ha='center', va='center')
         ax.set_title(title or metric)
@@ -68,14 +79,24 @@ def plot_metric_by_enrichment(df, metric, ax, title=None, ylabel=None):
     sns.boxplot(data=df, x='enrichment', y=metric, ax=ax, palette='Set2', showfliers=False)
     sns.stripplot(data=df, x='enrichment', y=metric, ax=ax, color='black', alpha=0.3, size=2)
 
-    ax.set_title(title or metric)
+    # Kruskal-Wallis test
+    groups = [group[metric].dropna().values for name, group in df.groupby('enrichment')]
+    groups = [g for g in groups if len(g) > 0]
+    if len(groups) >= 2:
+        stat, p_value = stats.kruskal(*groups)
+        p_str = f"p={p_value:.2e}" if p_value < 0.001 else f"p={p_value:.3f}"
+        title_text = f"{title or metric}\n(Kruskal-Wallis {p_str})"
+    else:
+        title_text = title or metric
+
+    ax.set_title(title_text)
     ax.set_ylabel(ylabel or metric)
     ax.set_xlabel('Enrichment')
     ax.tick_params(axis='x', rotation=45)
 
 
 def plot_metric_by_sample(df, metric, ax, title=None, ylabel=None):
-    """Create a box plot of a metric by sample."""
+    """Create a box plot of a metric by sample with Kruskal-Wallis test."""
     if metric not in df.columns or 'sample' not in df.columns:
         ax.text(0.5, 0.5, f"Required columns not found", ha='center', va='center')
         ax.set_title(title or metric)
@@ -89,9 +110,49 @@ def plot_metric_by_sample(df, metric, ax, title=None, ylabel=None):
     sns.stripplot(data=df, x='sample', y=metric, order=sample_order, ax=ax,
                   color='black', alpha=0.3, size=2)
 
-    ax.set_title(title or metric)
+    # Kruskal-Wallis test
+    groups = [group[metric].dropna().values for name, group in df.groupby('sample')]
+    groups = [g for g in groups if len(g) > 0]
+    if len(groups) >= 2:
+        stat, p_value = stats.kruskal(*groups)
+        p_str = f"p={p_value:.2e}" if p_value < 0.001 else f"p={p_value:.3f}"
+        title_text = f"{title or metric}\n(Kruskal-Wallis {p_str})"
+    else:
+        title_text = title or metric
+
+    ax.set_title(title_text)
     ax.set_ylabel(ylabel or metric)
     ax.set_xlabel('Sample')
+    ax.tick_params(axis='x', rotation=45)
+
+
+def plot_metric_by_cluster_and_sample(df, metric, ax, title=None, ylabel=None):
+    """Create a box plot of a metric by cluster, colored by sample."""
+    if metric not in df.columns or 'sample' not in df.columns:
+        ax.text(0.5, 0.5, f"Required columns not found", ha='center', va='center')
+        ax.set_title(title or metric)
+        return
+
+    # Sort clusters by median value
+    cluster_order = df.groupby('cluster')[metric].median().sort_values(ascending=False).index
+
+    sns.boxplot(data=df, x='cluster', y=metric, hue='sample', order=cluster_order, ax=ax,
+                palette='tab10', showfliers=False)
+
+    # Kruskal-Wallis test (across clusters, ignoring sample)
+    groups = [group[metric].dropna().values for name, group in df.groupby('cluster')]
+    groups = [g for g in groups if len(g) > 0]
+    if len(groups) >= 2:
+        stat, p_value = stats.kruskal(*groups)
+        p_str = f"p={p_value:.2e}" if p_value < 0.001 else f"p={p_value:.3f}"
+        title_text = f"{title or metric}\n(Kruskal-Wallis {p_str})"
+    else:
+        title_text = title or metric
+
+    ax.set_title(title_text)
+    ax.set_ylabel(ylabel or metric)
+    ax.set_xlabel('Cluster')
+    ax.legend(title='Sample', bbox_to_anchor=(1.02, 1), loc='upper left', fontsize='small')
     ax.tick_params(axis='x', rotation=45)
 
 
@@ -242,8 +303,8 @@ def main():
     metrics_pdf = f"{args.output_prefix}.cluster_metrics.pdf"
 
     with PdfPages(metrics_pdf) as pdf:
-        # Page 1: Key metrics by cluster
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        # Page 1: Key metrics by cluster (3x2 grid)
+        fig, axes = plt.subplots(3, 2, figsize=(14, 14))
         fig.suptitle('Sequence Metrics by Cluster', fontsize=14, fontweight='bold')
 
         plot_metric_by_cluster(df, 'read_length', axes[0, 0],
@@ -254,14 +315,40 @@ def main():
                                title='Divergence (Error Rate) by Cluster', ylabel='Divergence')
         plot_metric_by_cluster(df, 'centroid_distance', axes[1, 1],
                                title='Centroid Distance by Cluster', ylabel='Centroid Distance')
+        plot_metric_by_cluster(df, 'mapq', axes[2, 0],
+                               title='Mapping Quality by Cluster', ylabel='MAPQ')
+        plot_metric_by_cluster(df, 'align_len', axes[2, 1],
+                               title='Alignment Length by Cluster', ylabel='Alignment Length (bp)')
 
         plt.tight_layout()
         pdf.savefig(fig, bbox_inches='tight')
         plt.close(fig)
 
-        # Page 2: Metrics by enrichment (if available)
+        # Page 2: Metrics by cluster, colored by sample (3x2 grid)
+        if 'sample' in df.columns and df['sample'].nunique() > 1:
+            fig, axes = plt.subplots(3, 2, figsize=(16, 14))
+            fig.suptitle('Sequence Metrics by Cluster (Colored by Sample)', fontsize=14, fontweight='bold')
+
+            plot_metric_by_cluster_and_sample(df, 'read_length', axes[0, 0],
+                                              title='Read Length by Cluster', ylabel='Read Length (bp)')
+            plot_metric_by_cluster_and_sample(df, 'align_fraction', axes[0, 1],
+                                              title='Alignment Fraction by Cluster', ylabel='Alignment Fraction')
+            plot_metric_by_cluster_and_sample(df, 'de', axes[1, 0],
+                                              title='Divergence by Cluster', ylabel='Divergence')
+            plot_metric_by_cluster_and_sample(df, 'centroid_distance', axes[1, 1],
+                                              title='Centroid Distance by Cluster', ylabel='Centroid Distance')
+            plot_metric_by_cluster_and_sample(df, 'mapq', axes[2, 0],
+                                              title='Mapping Quality by Cluster', ylabel='MAPQ')
+            plot_metric_by_cluster_and_sample(df, 'align_len', axes[2, 1],
+                                              title='Alignment Length by Cluster', ylabel='Alignment Length (bp)')
+
+            plt.tight_layout()
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
+
+        # Page 3: Metrics by enrichment (if available, 3x2 grid)
         if 'enrichment' in df.columns:
-            fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+            fig, axes = plt.subplots(3, 2, figsize=(12, 14))
             fig.suptitle('Sequence Metrics by Enrichment Category', fontsize=14, fontweight='bold')
 
             plot_metric_by_enrichment(df, 'read_length', axes[0, 0],
@@ -272,14 +359,18 @@ def main():
                                       title='Divergence by Enrichment', ylabel='Divergence')
             plot_metric_by_enrichment(df, 'centroid_distance', axes[1, 1],
                                       title='Centroid Distance by Enrichment', ylabel='Centroid Distance')
+            plot_metric_by_enrichment(df, 'mapq', axes[2, 0],
+                                      title='Mapping Quality by Enrichment', ylabel='MAPQ')
+            plot_metric_by_enrichment(df, 'align_len', axes[2, 1],
+                                      title='Alignment Length by Enrichment', ylabel='Alignment Length (bp)')
 
             plt.tight_layout()
             pdf.savefig(fig, bbox_inches='tight')
             plt.close(fig)
 
-        # Page 3: Metrics by sample (batch effect detection)
+        # Page 4: Metrics by sample (batch effect detection, 3x2 grid)
         if 'sample' in df.columns and df['sample'].nunique() > 1:
-            fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+            fig, axes = plt.subplots(3, 2, figsize=(12, 14))
             fig.suptitle('Sequence Metrics by Sample (Batch Effect Check)', fontsize=14, fontweight='bold')
 
             plot_metric_by_sample(df, 'read_length', axes[0, 0],
@@ -288,14 +379,18 @@ def main():
                                   title='Alignment Fraction by Sample', ylabel='Alignment Fraction')
             plot_metric_by_sample(df, 'de', axes[1, 0],
                                   title='Divergence by Sample', ylabel='Divergence')
-            plot_metric_by_sample(df, 'mapq', axes[1, 1],
+            plot_metric_by_sample(df, 'centroid_distance', axes[1, 1],
+                                  title='Centroid Distance by Sample', ylabel='Centroid Distance')
+            plot_metric_by_sample(df, 'mapq', axes[2, 0],
                                   title='Mapping Quality by Sample', ylabel='MAPQ')
+            plot_metric_by_sample(df, 'align_len', axes[2, 1],
+                                  title='Alignment Length by Sample', ylabel='Alignment Length (bp)')
 
             plt.tight_layout()
             pdf.savefig(fig, bbox_inches='tight')
             plt.close(fig)
 
-        # Page 4: Correlation heatmap and cluster sizes
+        # Page 5: Correlation heatmap and cluster sizes
         fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
         metrics = ['read_length', 'centroid_distance', 'mapq', 'de', 'align_len', 'align_fraction']
