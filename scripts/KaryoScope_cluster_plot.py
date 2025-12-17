@@ -116,7 +116,7 @@ def load_cluster_analysis(cluster_analysis_file):
     return cluster_enrichments, cluster_order
 
 
-def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order=None, max_reps=None, top_clusters=None, max_clusters=None):
+def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order=None, max_reps=None, top_clusters=None, max_clusters=None, clusters=None):
     """Load read assignments from TSV file.
 
     Args:
@@ -126,6 +126,7 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
         max_reps: Maximum representatives per cluster (selects by rank, closest to centroid first)
         top_clusters: Dict of {category: n_clusters} where category is a group name or 'mixed'
         max_clusters: Maximum total clusters to include
+        clusters: List of specific cluster IDs to plot (overrides top_clusters and max_clusters)
 
     Returns:
         tuple: (cluster_reads OrderedDict, unique_enrichments set)
@@ -146,8 +147,18 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
     unique_enrichments = set(reps_df['enrichment'].unique())
     print(f"  Available enrichment categories: {sorted(unique_enrichments)}")
 
+    # Handle --clusters manual selection (overrides top_clusters and max_clusters)
+    if clusters:
+        available_clusters = set(reps_df['cluster'].unique())
+        valid_clusters = [c for c in clusters if c in available_clusters]
+        missing_clusters = [c for c in clusters if c not in available_clusters]
+        if missing_clusters:
+            print(f"  Warning: Clusters not found in data: {missing_clusters}")
+        reps_df = reps_df[reps_df['cluster'].isin(valid_clusters)]
+        print(f"  Manual cluster selection: {valid_clusters}")
+        print(f"  Total reads after selection: {len(reps_df)}")
     # Handle --top-clusters selection
-    if top_clusters:
+    elif top_clusters:
         selected_clusters = []
         for category, n_clusters in top_clusters.items():
             # Map category to enrichment label(s)
@@ -187,18 +198,22 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
     # Get unique clusters - use priority order from cluster_analysis.tsv if available
     # (sorted by: 100% enriched first, then 80%+, then by p-value)
     available_clusters = set(reps_df['cluster'].unique())
-    if cluster_order:
-        clusters = [c for c in cluster_order if c in available_clusters]
+    if clusters:
+        # Manual selection: use provided order
+        clusters_to_plot = [c for c in clusters if c in available_clusters]
+    elif cluster_order:
+        clusters_to_plot = [c for c in cluster_order if c in available_clusters]
     else:
-        clusters = list(reps_df['cluster'].unique())
+        clusters_to_plot = list(reps_df['cluster'].unique())
 
-    if max_clusters:
-        clusters = clusters[:max_clusters]
-    print(f"  Clusters to plot: {len(clusters)}")
+    # Apply max_clusters limit (only if not using manual --clusters)
+    if max_clusters and not clusters:
+        clusters_to_plot = clusters_to_plot[:max_clusters]
+    print(f"  Clusters to plot: {len(clusters_to_plot)}")
 
     # Group reads by cluster
     cluster_reads = OrderedDict()
-    for cluster_id in clusters:
+    for cluster_id in clusters_to_plot:
         cluster_data = reps_df[reps_df['cluster'] == cluster_id]
         enrichment = cluster_data['enrichment'].iloc[0]
 
@@ -1002,6 +1017,9 @@ def parse_args():
                         help="Select top N clusters per category, format: 'post:4,pre:2,mixed:3'. "
                              "Categories: group names from metadata (e.g., 'post', 'pre'), "
                              "'mixed' for clusters with no clear enrichment")
+    parser.add_argument("--clusters", dest="clusters", default=None,
+                        help="Manually specify cluster IDs to plot, comma-separated (e.g., '1,5,17,23'). "
+                             "Overrides --top-clusters and --max-clusters.")
 
     # Mode options
     parser.add_argument("--hide-brackets", dest="hide_brackets", action="store_true",
@@ -1069,6 +1087,12 @@ def main():
             key, val = part.strip().split(':')
             top_clusters[key.strip()] = int(val)
 
+    # Parse clusters if provided (manual selection)
+    clusters = None
+    if args.clusters:
+        clusters = [int(c.strip()) for c in args.clusters.split(',')]
+        print(f"Manual cluster selection: {clusters}")
+
     # Load read assignments
     cluster_reads, unique_enrichments = load_representative_reads(
         representatives_file,
@@ -1076,7 +1100,8 @@ def main():
         cluster_order=cluster_order,
         max_reps=max_reps,
         top_clusters=top_clusters,
-        max_clusters=args.max_clusters
+        max_clusters=args.max_clusters,
+        clusters=clusters
     )
 
     # Load feature matrix
