@@ -28,7 +28,6 @@ from scipy.cluster.hierarchy import linkage, dendrogram, leaves_list, fcluster, 
 from scipy.spatial.distance import pdist, squareform
 from scipy.stats import fisher_exact, chi2_contingency
 from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
-from joblib import Parallel, delayed
 import matplotlib.pyplot as plt
 import matplotlib
 import matplotlib.colors as mcolors
@@ -105,8 +104,6 @@ parser.add_argument("--davies-bouldin", dest="compute_davies_bouldin",
                     help="Compute Davies-Bouldin index (not recommended, favors high k) (default: False)")
 parser.add_argument("--early-stopping", dest="early_stopping", type=int, default=15,
                     help="Stop k search if no improvement for N iterations (0 to disable) (default: 15)")
-parser.add_argument("--n-cores", dest="n_cores", type=int, default=4,
-                    help="Number of parallel cores for k evaluation (default: 4)")
 parser.add_argument("--nested", dest="nested",
                     action=argparse.BooleanOptionalAction, default=False,
                     help="Hierarchical testing: first test groups, then test samples within enriched groups (default: False)")
@@ -835,7 +832,7 @@ read_names_arr = np.array(read_names)
 read_groups_arr = np.array([read_to_group[r] for r in read_names])
 
 # Fast enrichment check for k-optimization (returns enrichment type and max purity)
-def fast_enrichment_check(cluster_mask, read_groups, group_totals, control_grp, all_grps):
+def fast_enrichment_check(cluster_mask, read_groups, group_totals_dict, control_grp, all_grps):
     """Fast enrichment calculation for k-optimization loop.
 
     Returns: (enrichment_label, max_purity) where max_purity is the highest group percentage.
@@ -856,7 +853,7 @@ def fast_enrichment_check(cluster_mask, read_groups, group_totals, control_grp, 
         other_grp = [g for g in all_grps if g != control_grp][0]
 
         # Quick significance check using binomial proportion
-        expected_ctrl = group_totals[control_grp] / sum(group_totals.values())
+        expected_ctrl = group_totals_dict[control_grp] / sum(group_totals_dict.values())
         if ctrl_pct > expected_ctrl + 0.15:  # >15% enrichment threshold for speed
             return f"{control_grp}-enriched", max_purity
         elif ctrl_pct < expected_ctrl - 0.15:
@@ -871,11 +868,14 @@ if args.n_clusters is None:
     k_range = list(range(args.min_k, max_k_limit))
     n_samples = len(read_names)
 
-    print(f"Testing cluster counts from {min(k_range)} to {max(k_range)} ({len(k_range)} values, {args.n_cores} cores)...")
+    print(f"Testing cluster counts from {min(k_range)} to {max(k_range)} ({len(k_range)} values)...")
 
-    # Define evaluation function for a single k value
-    def evaluate_k(k):
-        """Evaluate clustering quality metrics for a given k."""
+    # Sequential evaluation with early stopping
+    cluster_stats = []
+    best_composite = -1
+    no_improvement_count = 0
+
+    for k in k_range:
         labels = fcluster(linkage_matrix, k, criterion='maxclust')
         labels_arr = np.array(labels)
 
@@ -909,7 +909,8 @@ if args.n_clusters is None:
         for cluster_id in range(1, k + 1):
             cluster_mask = labels_arr == cluster_id
             if cluster_mask.sum() >= args.min_cluster_size:
-                enrich, purity = fast_enrichment_check(cluster_mask, read_groups_arr, group_totals, control_group, all_groups)
+                enrich, purity = fast_enrichment_check(cluster_mask, read_groups_arr,
+                                                       group_totals, control_group, all_groups)
                 enrichments.append(enrich)
                 purities.append(purity)
 
@@ -936,7 +937,7 @@ if args.n_clusters is None:
                           0.2 * strong_ratio +
                           0.2 * perfect_ratio)
 
-        return {
+        stats = {
             'k': k,
             'silhouette': silhouette,
             'calinski_harabasz': calinski_harabasz,
@@ -952,61 +953,18 @@ if args.n_clusters is None:
             **{f'{g}_enriched': group_enriched_counts.get(g, 0) for g in all_groups},
             'mixed': mixed
         }
+        cluster_stats.append(stats)
 
-    # Parallel evaluation with early stopping
-    if args.early_stopping > 0 and args.n_cores == 1:
-        # Sequential with early stopping
-        cluster_stats = []
-        best_composite = -1
-        no_improvement_count = 0
+        # Early stopping check
+        if stats['composite_score'] > best_composite:
+            best_composite = stats['composite_score']
+            no_improvement_count = 0
+        else:
+            no_improvement_count += 1
 
-        for k in k_range:
-            stats = evaluate_k(k)
-            cluster_stats.append(stats)
-
-            if stats['composite_score'] > best_composite:
-                best_composite = stats['composite_score']
-                no_improvement_count = 0
-            else:
-                no_improvement_count += 1
-
-            if no_improvement_count >= args.early_stopping:
-                print(f"  Early stopping at k={k} (no improvement for {args.early_stopping} iterations)")
-                break
-    else:
-        # Parallel evaluation (early stopping works in batches)
-        batch_size = args.n_cores * 3  # Process in batches for early stopping
-
-        cluster_stats = []
-        best_composite = -1
-        no_improvement_count = 0
-        k_idx = 0
-
-        while k_idx < len(k_range):
-            # Get next batch of k values
-            batch_k = k_range[k_idx:k_idx + batch_size]
-
-            # Evaluate batch in parallel
-            batch_results = Parallel(n_jobs=args.n_cores)(
-                delayed(evaluate_k)(k) for k in batch_k
-            )
-
-            # Process results and check for early stopping
-            for stats in batch_results:
-                cluster_stats.append(stats)
-
-                if stats['composite_score'] > best_composite:
-                    best_composite = stats['composite_score']
-                    no_improvement_count = 0
-                else:
-                    no_improvement_count += 1
-
-            # Check early stopping after each batch
-            if args.early_stopping > 0 and no_improvement_count >= args.early_stopping:
-                print(f"  Early stopping at k={batch_k[-1]} (no improvement for {args.early_stopping} iterations)")
-                break
-
-            k_idx += batch_size
+        if args.early_stopping > 0 and no_improvement_count >= args.early_stopping:
+            print(f"  Early stopping at k={k} (no improvement for {args.early_stopping} iterations)")
+            break
 
     # Save cluster analysis
     stats_df = pd.DataFrame(cluster_stats)
