@@ -1,0 +1,324 @@
+#!/usr/bin/env python3
+"""
+KaryoScope Cluster Diagnostics
+
+Creates diagnostic plots comparing clusters across various metrics from
+annotated sequence data.
+
+Usage:
+  python KaryoScope_cluster_diagnostics.py \
+    --annotated analysis.read_assignments.annotated.tsv \
+    --output-prefix analysis_diagnostics
+
+Generates:
+  - {prefix}.cluster_metrics.pdf: Box/violin plots of metrics by cluster
+  - {prefix}.cluster_composition.pdf: Sample/group composition per cluster
+  - {prefix}.cluster_summary.tsv: Summary statistics per cluster
+"""
+
+import argparse
+import os
+import sys
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+from matplotlib.backends.backend_pdf import PdfPages
+
+
+def load_annotated_data(filepath):
+    """Load annotated sequence data."""
+    print(f"Loading annotated data: {filepath}")
+    df = pd.read_csv(filepath, sep='\t')
+    print(f"  Total sequences: {len(df)}")
+    print(f"  Columns: {', '.join(df.columns)}")
+    print(f"  Clusters: {df['cluster'].nunique()}")
+    return df
+
+
+def plot_metric_by_cluster(df, metric, ax, title=None, ylabel=None):
+    """Create a box plot of a metric by cluster."""
+    if metric not in df.columns:
+        ax.text(0.5, 0.5, f"Column '{metric}' not found", ha='center', va='center')
+        ax.set_title(title or metric)
+        return
+
+    # Sort clusters by median value
+    cluster_order = df.groupby('cluster')[metric].median().sort_values(ascending=False).index
+
+    sns.boxplot(data=df, x='cluster', y=metric, order=cluster_order, ax=ax,
+                palette='viridis', showfliers=False)
+    sns.stripplot(data=df, x='cluster', y=metric, order=cluster_order, ax=ax,
+                  color='black', alpha=0.3, size=2)
+
+    ax.set_title(title or metric)
+    ax.set_ylabel(ylabel or metric)
+    ax.set_xlabel('Cluster')
+    ax.tick_params(axis='x', rotation=45)
+
+
+def plot_metric_by_enrichment(df, metric, ax, title=None, ylabel=None):
+    """Create a box plot of a metric by enrichment category."""
+    if metric not in df.columns or 'enrichment' not in df.columns:
+        ax.text(0.5, 0.5, f"Required columns not found", ha='center', va='center')
+        ax.set_title(title or metric)
+        return
+
+    sns.boxplot(data=df, x='enrichment', y=metric, ax=ax, palette='Set2', showfliers=False)
+    sns.stripplot(data=df, x='enrichment', y=metric, ax=ax, color='black', alpha=0.3, size=2)
+
+    ax.set_title(title or metric)
+    ax.set_ylabel(ylabel or metric)
+    ax.set_xlabel('Enrichment')
+    ax.tick_params(axis='x', rotation=45)
+
+
+def plot_cluster_composition(df, group_col, ax, title):
+    """Create a stacked bar chart of cluster composition."""
+    if group_col not in df.columns:
+        ax.text(0.5, 0.5, f"Column '{group_col}' not found", ha='center', va='center')
+        ax.set_title(title)
+        return
+
+    # Calculate composition
+    composition = df.groupby(['cluster', group_col]).size().unstack(fill_value=0)
+    composition_pct = composition.div(composition.sum(axis=1), axis=0) * 100
+
+    # Sort clusters by size
+    cluster_order = df['cluster'].value_counts().index
+
+    composition_pct = composition_pct.reindex(cluster_order)
+    composition_pct.plot(kind='bar', stacked=True, ax=ax, colormap='tab10')
+
+    ax.set_title(title)
+    ax.set_ylabel('Percentage')
+    ax.set_xlabel('Cluster')
+    ax.legend(title=group_col, bbox_to_anchor=(1.02, 1), loc='upper left')
+    ax.tick_params(axis='x', rotation=45)
+
+
+def plot_cluster_sizes(df, ax):
+    """Create a bar chart of cluster sizes."""
+    cluster_sizes = df['cluster'].value_counts().sort_index()
+
+    colors = []
+    if 'enrichment' in df.columns:
+        enrichment_map = df.groupby('cluster')['enrichment'].first()
+        color_map = {'mixed': '#999999'}
+        palette = sns.color_palette('Set2', n_colors=10)
+        enrichments = df['enrichment'].unique()
+        for i, e in enumerate(enrichments):
+            if e != 'mixed' and e not in color_map:
+                color_map[e] = palette[i % len(palette)]
+        colors = [color_map.get(enrichment_map.get(c, 'mixed'), '#999999') for c in cluster_sizes.index]
+    else:
+        colors = 'steelblue'
+
+    cluster_sizes.plot(kind='bar', ax=ax, color=colors)
+    ax.set_title('Cluster Sizes')
+    ax.set_ylabel('Number of sequences')
+    ax.set_xlabel('Cluster')
+    ax.tick_params(axis='x', rotation=45)
+
+
+def plot_correlation_heatmap(df, metrics, ax):
+    """Create a correlation heatmap of numeric metrics."""
+    available_metrics = [m for m in metrics if m in df.columns]
+    if len(available_metrics) < 2:
+        ax.text(0.5, 0.5, "Not enough metrics for correlation", ha='center', va='center')
+        return
+
+    corr = df[available_metrics].corr()
+    sns.heatmap(corr, annot=True, fmt='.2f', cmap='coolwarm', center=0, ax=ax,
+                square=True, linewidths=0.5)
+    ax.set_title('Metric Correlations')
+
+
+def compute_cluster_summary(df):
+    """Compute summary statistics per cluster."""
+    numeric_cols = ['read_length', 'centroid_distance', 'mapq', 'de', 'align_len', 'align_fraction']
+    available_cols = [c for c in numeric_cols if c in df.columns]
+
+    summary_rows = []
+    for cluster in sorted(df['cluster'].unique()):
+        cluster_df = df[df['cluster'] == cluster]
+        row = {
+            'cluster': cluster,
+            'n_sequences': len(cluster_df),
+        }
+
+        # Add group/sample composition
+        if 'group' in df.columns:
+            for group in df['group'].unique():
+                row[f'{group}_count'] = (cluster_df['group'] == group).sum()
+                row[f'{group}_pct'] = (cluster_df['group'] == group).mean() * 100
+
+        # Add enrichment if available
+        if 'enrichment' in df.columns:
+            row['enrichment'] = cluster_df['enrichment'].iloc[0] if len(cluster_df) > 0 else 'unknown'
+
+        # Add numeric summaries
+        for col in available_cols:
+            row[f'{col}_mean'] = cluster_df[col].mean()
+            row[f'{col}_median'] = cluster_df[col].median()
+            row[f'{col}_std'] = cluster_df[col].std()
+
+        summary_rows.append(row)
+
+    return pd.DataFrame(summary_rows)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate diagnostic plots for cluster analysis",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+
+    parser.add_argument("--annotated", required=True,
+                        help="Annotated sequences TSV file (from KaryoScope_annotate_sequences.py)")
+    parser.add_argument("--cluster-analysis", dest="cluster_analysis", default=None,
+                        help="Cluster analysis TSV file (optional, for enrichment info)")
+    parser.add_argument("--output-prefix", dest="output_prefix", required=True,
+                        help="Output prefix for generated files")
+
+    args = parser.parse_args()
+
+    print("=" * 60)
+    print("KaryoScope Cluster Diagnostics")
+    print("=" * 60)
+
+    # Load data
+    df = load_annotated_data(args.annotated)
+
+    # Optionally load enrichment info
+    if args.cluster_analysis and os.path.exists(args.cluster_analysis):
+        print(f"\nLoading cluster analysis: {args.cluster_analysis}")
+        ca = pd.read_csv(args.cluster_analysis, sep='\t')
+        enrichment_map = dict(zip(ca['cluster_id'], ca['enrichment']))
+        df['enrichment'] = df['cluster'].map(enrichment_map).fillna('unknown')
+        print(f"  Added enrichment labels")
+
+    # Infer cluster analysis file from annotated file path if not provided
+    if 'enrichment' not in df.columns:
+        # Try to find cluster_analysis.tsv based on naming convention
+        annotated_path = args.annotated
+        if '.read_assignments.annotated.tsv' in annotated_path:
+            ca_path = annotated_path.replace('.read_assignments.annotated.tsv', '.cluster_analysis.tsv')
+            if os.path.exists(ca_path):
+                print(f"\nAuto-discovered cluster analysis: {ca_path}")
+                ca = pd.read_csv(ca_path, sep='\t')
+                enrichment_map = dict(zip(ca['cluster_id'], ca['enrichment']))
+                df['enrichment'] = df['cluster'].map(enrichment_map).fillna('unknown')
+                print(f"  Added enrichment labels")
+
+    # Set up plotting style
+    sns.set_style("whitegrid")
+    plt.rcParams['figure.dpi'] = 150
+
+    # === Page 1: Metric distributions by cluster ===
+    print("\nGenerating metric plots...")
+    metrics_pdf = f"{args.output_prefix}.cluster_metrics.pdf"
+
+    with PdfPages(metrics_pdf) as pdf:
+        # Page 1: Key metrics by cluster
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle('Sequence Metrics by Cluster', fontsize=14, fontweight='bold')
+
+        plot_metric_by_cluster(df, 'read_length', axes[0, 0],
+                               title='Read Length by Cluster', ylabel='Read Length (bp)')
+        plot_metric_by_cluster(df, 'align_fraction', axes[0, 1],
+                               title='Alignment Fraction by Cluster', ylabel='Alignment Fraction')
+        plot_metric_by_cluster(df, 'de', axes[1, 0],
+                               title='Divergence (Error Rate) by Cluster', ylabel='Divergence')
+        plot_metric_by_cluster(df, 'centroid_distance', axes[1, 1],
+                               title='Centroid Distance by Cluster', ylabel='Centroid Distance')
+
+        plt.tight_layout()
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
+
+        # Page 2: Metrics by enrichment (if available)
+        if 'enrichment' in df.columns:
+            fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+            fig.suptitle('Sequence Metrics by Enrichment Category', fontsize=14, fontweight='bold')
+
+            plot_metric_by_enrichment(df, 'read_length', axes[0, 0],
+                                      title='Read Length by Enrichment', ylabel='Read Length (bp)')
+            plot_metric_by_enrichment(df, 'align_fraction', axes[0, 1],
+                                      title='Alignment Fraction by Enrichment', ylabel='Alignment Fraction')
+            plot_metric_by_enrichment(df, 'de', axes[1, 0],
+                                      title='Divergence by Enrichment', ylabel='Divergence')
+            plot_metric_by_enrichment(df, 'centroid_distance', axes[1, 1],
+                                      title='Centroid Distance by Enrichment', ylabel='Centroid Distance')
+
+            plt.tight_layout()
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
+
+        # Page 3: Correlation heatmap and cluster sizes
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+        metrics = ['read_length', 'centroid_distance', 'mapq', 'de', 'align_len', 'align_fraction']
+        plot_correlation_heatmap(df, metrics, axes[0])
+        plot_cluster_sizes(df, axes[1])
+
+        plt.tight_layout()
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
+
+    print(f"  Saved: {metrics_pdf}")
+
+    # === Page 2: Composition plots ===
+    print("\nGenerating composition plots...")
+    composition_pdf = f"{args.output_prefix}.cluster_composition.pdf"
+
+    with PdfPages(composition_pdf) as pdf:
+        # Group composition
+        if 'group' in df.columns:
+            fig, ax = plt.subplots(figsize=(12, 6))
+            plot_cluster_composition(df, 'group', ax, 'Group Composition by Cluster')
+            plt.tight_layout()
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
+
+        # Sample composition
+        if 'sample' in df.columns:
+            fig, ax = plt.subplots(figsize=(14, 6))
+            plot_cluster_composition(df, 'sample', ax, 'Sample Composition by Cluster')
+            plt.tight_layout()
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
+
+        # Sequencing approach composition
+        if 'sequencing_approach' in df.columns:
+            fig, ax = plt.subplots(figsize=(12, 6))
+            plot_cluster_composition(df, 'sequencing_approach', ax, 'Sequencing Approach by Cluster')
+            plt.tight_layout()
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
+
+    print(f"  Saved: {composition_pdf}")
+
+    # === Summary table ===
+    print("\nGenerating summary table...")
+    summary = compute_cluster_summary(df)
+    summary_file = f"{args.output_prefix}.cluster_summary.tsv"
+    summary.to_csv(summary_file, sep='\t', index=False)
+    print(f"  Saved: {summary_file}")
+
+    print(f"\n{'=' * 60}")
+    print("Summary")
+    print("=" * 60)
+    print(f"Total sequences: {len(df)}")
+    print(f"Clusters: {df['cluster'].nunique()}")
+    if 'enrichment' in df.columns:
+        print(f"Enrichment categories: {df['enrichment'].value_counts().to_dict()}")
+    print(f"\nOutput files:")
+    print(f"  - {metrics_pdf}")
+    print(f"  - {composition_pdf}")
+    print(f"  - {summary_file}")
+
+
+if __name__ == "__main__":
+    main()
