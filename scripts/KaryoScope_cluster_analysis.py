@@ -119,10 +119,10 @@ parser.add_argument("--also-test-samples", dest="also_test_samples",
 parser.add_argument("--stratified", dest="stratified",
                     action=argparse.BooleanOptionalAction, default=False,
                     help="Report within-group sample breakdown and variance metrics (default: False)")
-parser.add_argument("--reduce-dims", dest="reduce_dims", type=int, default=None,
+parser.add_argument("--reduce-dims", dest="reduce_dims", type=int, default=1000,
                     help="Reduce matrix to N dimensions using truncated SVD before clustering.\n"
                          "Recommended for merged BED files which can create very high-dimensional matrices.\n"
-                         "Typical values: 500-1000 (default: None = no reduction)")
+                         "Set to 0 to disable reduction (default: 1000)")
 
 args = parser.parse_args()
 
@@ -833,7 +833,7 @@ print(f"Final matrix shape: {adj_matrix.shape}")
 
 # --- Optional dimensionality reduction ---
 adj_matrix_full = adj_matrix  # Keep full matrix for reference
-if args.reduce_dims is not None:
+if args.reduce_dims and args.reduce_dims > 0:
     n_samples, n_features = adj_matrix.shape
     n_components = min(args.reduce_dims, n_samples - 1, n_features)
 
