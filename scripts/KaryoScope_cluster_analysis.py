@@ -1053,7 +1053,7 @@ def fast_enrichment_check(cluster_mask, read_groups, group_totals_dict, control_
     group_counts = Counter(cluster_groups)
     total_in = len(cluster_groups)
     if total_in == 0:
-        return "Mixed", 0.0
+        return "mixed", 0.0
 
     # Calculate max purity (highest percentage from any single group)
     max_purity = max(group_counts.get(g, 0) / total_in for g in all_grps)
@@ -1070,7 +1070,7 @@ def fast_enrichment_check(cluster_mask, read_groups, group_totals_dict, control_
             return f"{control_grp}-enriched", max_purity
         elif ctrl_pct < expected_ctrl - 0.15:
             return f"{other_grp}-enriched", max_purity
-    return "Mixed", max_purity
+    return "mixed", max_purity
 
 # Calculate clustering metrics for different k values
 if args.n_clusters is None:
@@ -1126,7 +1126,7 @@ if args.n_clusters is None:
                 enrichments.append(enrich)
                 purities.append(purity)
 
-                if enrich != "Mixed":
+                if enrich != "mixed":
                     any_enriched += 1
                     if purity >= args.perfect_threshold:
                         perfect_enriched += 1
@@ -1135,7 +1135,7 @@ if args.n_clusters is None:
 
         # Count enrichments by group
         group_enriched_counts = {g: sum(1 for e in enrichments if e == f"{g}-enriched") for g in all_groups}
-        mixed = enrichments.count("Mixed")
+        mixed = enrichments.count("mixed")
 
         # Calculate enrichment ratios
         enriched_ratio = any_enriched / valid_clusters if valid_clusters > 0 else 0
@@ -1603,11 +1603,11 @@ if args.plot_circular_dendrogram:
     # Prepare annotation data for each leaf (in dendrogram order)
     leaf_samples = [read_to_sample[read_names[i]] for i in leaf_order]
     leaf_clusters = [cluster_labels[i] for i in leaf_order]
-    leaf_enrichments = [cluster_to_enrichment.get(c, 'Mixed') for c in leaf_clusters]
+    leaf_enrichments = [cluster_to_enrichment.get(c, 'mixed') for c in leaf_clusters]
 
     # Color mappings for annotations
     enrichment_colors = {f'{g}-enriched': c for g, c in group_colors.items()}
-    enrichment_colors['Mixed'] = '#CCCCCC'
+    enrichment_colors['mixed'] = '#CCCCCC'
 
     # Create figure with circular dendrogram
     fig_circ = plt.figure(figsize=(16, 14))
@@ -1699,7 +1699,7 @@ if args.plot_umap and len(read_names) > 10:
 
         # Color mappings
         enrichment_colors = {f'{g}-enriched': c for g, c in group_colors.items()}
-        enrichment_colors['Mixed'] = '#CCCCCC'
+        enrichment_colors['mixed'] = '#CCCCCC'
 
         # Generate distinct colors for clusters
         n_unique_clusters = len(set(cluster_list))
@@ -1722,7 +1722,7 @@ if args.plot_umap and len(read_names) > 10:
         point_colors_enrich = []
         for r in read_names:
             cluster = read_to_cluster[r]
-            enrich = cluster_to_enrichment.get(cluster, 'Mixed')
+            enrich = cluster_to_enrichment.get(cluster, 'mixed')
             point_colors_enrich.append(enrichment_colors.get(enrich, '#CCCCCC'))
         axes[0, 1].scatter(embedding[:, 0], embedding[:, 1], c=point_colors_enrich, s=15, alpha=0.6)
         axes[0, 1].set_title("UMAP - Colored by Cluster Enrichment")
@@ -1760,8 +1760,8 @@ if args.plot_umap and len(read_names) > 10:
             cluster_points = embedding[mask]
             centroid_x = np.mean(cluster_points[:, 0])
             centroid_y = np.mean(cluster_points[:, 1])
-            enrich = cluster_to_enrichment.get(cluster_id, 'Mixed')
-            enrich_short = enrich.replace('-enriched', '').replace('Mixed', 'M')[:4]
+            enrich = cluster_to_enrichment.get(cluster_id, 'mixed')
+            enrich_short = enrich.replace('-enriched', '').replace('mixed', 'M')[:4]
             label = f"C{cluster_id}\n({enrich_short})"
             axes[1, 1].annotate(label, (centroid_x, centroid_y),
                                fontsize=7, ha='center', va='center',
@@ -1781,7 +1781,7 @@ if args.plot_umap and len(read_names) > 10:
             'umap_2': embedding[:, 1],
             'sample': sample_list,
             'cluster': cluster_labels,
-            'enrichment': [cluster_to_enrichment.get(c, 'Mixed') for c in cluster_labels]
+            'enrichment': [cluster_to_enrichment.get(c, 'mixed') for c in cluster_labels]
         })
         umap_coords_file = f"{args.output_prefix}.umap_coordinates.tsv"
         umap_coords.to_csv(umap_coords_file, sep='\t', index=False)
@@ -1798,7 +1798,7 @@ if args.plot_umap and len(read_names) > 10:
             # Prepare data arrays
             embedding_x = embedding[:, 0]
             embedding_y = embedding[:, 1]
-            enrichment_list = [cluster_to_enrichment.get(c, 'Mixed') for c in cluster_list]
+            enrichment_list = [cluster_to_enrichment.get(c, 'mixed') for c in cluster_list]
 
             # Hover text (same for all views)
             hover_text = [f"Read: {r[:20]}...<br>Group: {g}<br>Cluster: {c}<br>Enrichment: {e}"
@@ -1823,7 +1823,7 @@ if args.plot_umap and len(read_names) > 10:
             # 2. Add traces for CLUSTER coloring
             for cluster_id in sorted(set(cluster_list)):
                 mask = np.array([c == cluster_id for c in cluster_list])
-                enrich = cluster_to_enrichment.get(cluster_id, 'Mixed')
+                enrich = cluster_to_enrichment.get(cluster_id, 'mixed')
                 fig.add_trace(go.Scatter(
                     x=embedding_x[mask],
                     y=embedding_y[mask],
@@ -1918,7 +1918,7 @@ for g in all_groups:
     enriched_label = f'{g}-enriched'
     count = sum(cluster_df['enrichment'] == enriched_label)
     print(f"  - {enriched_label}: {count}")
-print(f"  - Mixed: {sum(cluster_df['enrichment'] == 'Mixed')}")
+print(f"  - mixed: {sum(cluster_df['enrichment'] == 'mixed')}")
 print(f"\nOutput files:")
 print(f"  - {analysis_file}")
 print(f"  - {assignments_file}")
