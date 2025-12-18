@@ -200,7 +200,7 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
             enriched_labels = [e for e in unique_enrichments if e not in ('unknown',)]
             print(f"  Including all clusters (enriched + mixed)")
         else:
-            enriched_labels = [e for e in unique_enrichments if e not in ('mixed', 'Mixed', 'unknown')]
+            enriched_labels = [e for e in unique_enrichments if e not in ('mixed', 'unknown')]
             print(f"  Default: plotting enriched clusters only ({', '.join(sorted(enriched_labels))})")
         if enriched_labels:
             reps_df = reps_df[reps_df['enrichment'].isin(enriched_labels)]
@@ -426,10 +426,10 @@ def get_enrichment_colors(group_colors, unique_enrichments):
     Returns:
         dict: enrichment_label -> color
     """
-    enrichment_colors = {'Mixed': '#999999'}
+    enrichment_colors = {'mixed': '#999999'}
 
     for enrich in unique_enrichments:
-        if enrich == 'Mixed':
+        if enrich == 'mixed':
             continue
 
         # Extract group name from enrichment label (e.g., "post-enriched" -> "post")
@@ -577,7 +577,7 @@ def compute_dendrogram_order(feature_matrix_data, cluster_reads):
         # Rebuild cluster_reads with reordered reads
         cluster_reads_reordered = OrderedDict()
         cluster_reads_reordered['all'] = {
-            'enrichment': 'Mixed',
+            'enrichment': 'mixed',
             'reads': [(r, read_to_sample_map[r]) for r in reordered_reads]
         }
 
@@ -773,7 +773,7 @@ def draw_annotation_bars(d, cluster_reads, read_x_positions, read_to_original_cl
             sample_color = sample_colors.get(sample, '#999999')
             orig_cluster = read_to_original_cluster.get(read, 'unknown')
             orig_cluster_color = cluster_colors.get(orig_cluster, '#666666')
-            orig_enrichment = read_to_original_enrichment.get(read, 'Mixed')
+            orig_enrichment = read_to_original_enrichment.get(read, 'mixed')
             enrichment_color = enrichment_colors.get(orig_enrichment, '#999999')
 
             # Cluster indicator bar (top, 8px height)
@@ -882,7 +882,7 @@ def draw_top_legends(d, sample_colors, cluster_colors, read_to_original_cluster,
     # Group clusters by enrichment
     clusters_by_enrichment = defaultdict(list)
     for read, cid in read_to_original_cluster.items():
-        enrich = read_to_original_enrichment.get(read, 'Mixed')
+        enrich = read_to_original_enrichment.get(read, 'mixed')
         if cid not in clusters_by_enrichment[enrich]:
             clusters_by_enrichment[enrich].append(cid)
 
@@ -895,7 +895,7 @@ def draw_top_legends(d, sample_colors, cluster_colors, read_to_original_cluster,
 
     # Sort enrichment types for consistent ordering
     enrichment_order = sorted(clusters_by_enrichment.keys(),
-                             key=lambda x: (x == 'Mixed', x))  # Mixed last
+                             key=lambda x: (x == 'mixed', x))  # mixed last
 
     for enrich_type in enrichment_order:
         for cid in clusters_by_enrichment[enrich_type]:
