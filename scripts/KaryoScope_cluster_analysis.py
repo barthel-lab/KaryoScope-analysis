@@ -40,11 +40,8 @@ parser = argparse.ArgumentParser(
     formatter_class=argparse.RawTextHelpFormatter
 )
 parser.add_argument("--bed", required=True, nargs='+',
-                    help="Path to input BED file(s) (can be gzipped). Multiple files will be concatenated.")
-parser.add_argument("--bed2", dest="bed2", nargs='+', default=None,
-                    help="Optional second BED file(s) to merge with --bed by position overlay.\n"
-                         "Must have same number of files as --bed, in corresponding order.\n"
-                         "Creates combined feature labels (e.g., 'chr1:p_arm' from chromosome and region).")
+                    help="Path to input BED file(s) (can be gzipped). Multiple files will be concatenated.\n"
+                         "To merge multiple featuresets, use KaryoScope_merge_beds.py first.")
 parser.add_argument("--output-prefix", dest="output_prefix", required=True,
                     help="Prefix for output files")
 parser.add_argument("--sample-metadata", dest="sample_metadata", default=None,
@@ -124,8 +121,8 @@ parser.add_argument("--stratified", dest="stratified",
                     help="Report within-group sample breakdown and variance metrics (default: False)")
 parser.add_argument("--reduce-dims", dest="reduce_dims", type=int, default=None,
                     help="Reduce matrix to N dimensions using truncated SVD before clustering.\n"
-                         "Recommended for --bed2 merged mode which can create very high-dimensional matrices.\n"
-                         "Typical values: 50-200. 'auto' uses min(n_samples-1, 100) (default: None = no reduction)")
+                         "Recommended for merged BED files which can create very high-dimensional matrices.\n"
+                         "Typical values: 500-1000 (default: None = no reduction)")
 
 args = parser.parse_args()
 
@@ -162,159 +159,6 @@ def extract_sample_label(filepath):
         return parts[0]
     return basename
 
-
-def merge_beds_by_position(df1, df2, sample_label=None, sep=":"):
-    """Merge two BED DataFrames by position overlay, creating combined feature labels.
-
-    Uses pyranges for fast interval intersection. Falls back to numpy if unavailable.
-
-    Args:
-        df1: DataFrame with columns [read, start, end, feature] from first BED file
-        df2: DataFrame with columns [read, start, end, feature] from second BED file
-        sample_label: Optional sample label to add to the merged records
-        sep: Separator for combined feature labels (default: ":")
-
-    Returns:
-        DataFrame with merged intervals and combined feature labels
-
-    Example:
-        df1 (chromosome):  read1  0-100  chr1_specific
-        df2 (region):      read1  0-50   p_arm_specific
-                           read1  50-100 arm_multigroup1
-        Result:            read1  0-50   chr1_specific:p_arm_specific
-                           read1  50-100 chr1_specific:arm_multigroup1
-    """
-    try:
-        import pyranges as pr
-        return _merge_beds_pyranges(df1, df2, sample_label, sep)
-    except ImportError:
-        print("  Warning: pyranges not available, using numpy method")
-        return _merge_beds_pandas(df1, df2, sample_label, sep)
-
-
-def _merge_beds_pyranges(df1, df2, sample_label=None, sep=":"):
-    """Fast merge using pyranges join/intersect."""
-    import pyranges as pr
-
-    # Filter to common reads first
-    common_reads = set(df1['read'].unique()) & set(df2['read'].unique())
-    if not common_reads:
-        print(f"  Warning: No common reads between BED files for sample {sample_label}")
-        return pd.DataFrame(columns=['read', 'start', 'end', 'feature', 'sample'])
-
-    df1_f = df1[df1['read'].isin(common_reads)][['read', 'start', 'end', 'feature']].copy()
-    df2_f = df2[df2['read'].isin(common_reads)][['read', 'start', 'end', 'feature']].copy()
-
-    # Rename columns for pyranges (Chromosome, Start, End)
-    df1_f.columns = ['Chromosome', 'Start', 'End', 'Feature1']
-    df2_f.columns = ['Chromosome', 'Start', 'End', 'Feature2']
-
-    # Create PyRanges objects
-    pr1 = pr.PyRanges(df1_f)
-    pr2 = pr.PyRanges(df2_f)
-
-    # Join/intersect the two ranges
-    # This returns overlapping intervals with features from both
-    joined = pr1.join(pr2)
-
-    if len(joined) == 0:
-        return pd.DataFrame(columns=['read', 'start', 'end', 'feature', 'sample'])
-
-    # Convert back to DataFrame
-    result_df = joined.df
-
-    # The result has columns: Chromosome, Start, End, Feature1, Start_b, End_b, Feature2
-    # Calculate actual overlap region
-    result_df['overlap_start'] = result_df[['Start', 'Start_b']].max(axis=1)
-    result_df['overlap_end'] = result_df[['End', 'End_b']].min(axis=1)
-
-    # Keep only actual overlaps
-    result_df = result_df[result_df['overlap_end'] > result_df['overlap_start']]
-
-    # Create combined feature labels
-    result_df['feature'] = result_df['Feature1'] + sep + result_df['Feature2']
-
-    # Build final result
-    result = pd.DataFrame({
-        'read': result_df['Chromosome'],
-        'start': result_df['overlap_start'].astype(int),
-        'end': result_df['overlap_end'].astype(int),
-        'feature': result_df['feature'],
-        'sample': sample_label
-    })
-
-    return result
-
-
-def _merge_beds_pandas(df1, df2, sample_label=None, sep=":"):
-    """Efficient merge using numpy vectorized operations per-read."""
-    # Get common reads
-    common_reads = set(df1['read'].unique()) & set(df2['read'].unique())
-
-    if not common_reads:
-        print(f"  Warning: No common reads between BED files for sample {sample_label}")
-        return pd.DataFrame(columns=['read', 'start', 'end', 'feature', 'sample'])
-
-    # Filter and index by read
-    df1_f = df1[df1['read'].isin(common_reads)].copy()
-    df2_f = df2[df2['read'].isin(common_reads)].copy()
-
-    # Group by read for efficient per-read processing
-    grouped1 = {read: grp[['start', 'end', 'feature']].values for read, grp in df1_f.groupby('read')}
-    grouped2 = {read: grp[['start', 'end', 'feature']].values for read, grp in df2_f.groupby('read')}
-
-    merged_records = []
-
-    for read in common_reads:
-        intervals1 = grouped1.get(read)
-        intervals2 = grouped2.get(read)
-
-        if intervals1 is None or intervals2 is None or len(intervals1) == 0 or len(intervals2) == 0:
-            continue
-
-        # Extract starts, ends, features as numpy arrays
-        starts1 = intervals1[:, 0].astype(int)
-        ends1 = intervals1[:, 1].astype(int)
-        feats1 = intervals1[:, 2]
-
-        starts2 = intervals2[:, 0].astype(int)
-        ends2 = intervals2[:, 1].astype(int)
-        feats2 = intervals2[:, 2]
-
-        # Collect all breakpoints
-        breakpoints = np.unique(np.concatenate([starts1, ends1, starts2, ends2]))
-
-        # For each interval between breakpoints, find covering features
-        for i in range(len(breakpoints) - 1):
-            bp_start = breakpoints[i]
-            bp_end = breakpoints[i + 1]
-
-            if bp_end <= bp_start:
-                continue
-
-            midpoint = (bp_start + bp_end) / 2
-
-            # Find feature from df1 covering midpoint (vectorized)
-            mask1 = (starts1 <= midpoint) & (midpoint < ends1)
-            if not mask1.any():
-                continue
-            feat1 = feats1[mask1][0]
-
-            # Find feature from df2 covering midpoint (vectorized)
-            mask2 = (starts2 <= midpoint) & (midpoint < ends2)
-            if not mask2.any():
-                continue
-            feat2 = feats2[mask2][0]
-
-            merged_records.append({
-                'read': read,
-                'start': int(bp_start),
-                'end': int(bp_end),
-                'feature': f"{feat1}{sep}{feat2}",
-                'sample': sample_label
-            })
-
-    return pd.DataFrame(merged_records)
 
 def collapse_small_clusters(df, small_len_thresh, small_gap_thresh):
     """Collapse small adjacent features within each read.
@@ -765,36 +609,12 @@ print(f"\nLoading BED file(s)...")
 dfs = []
 sample_labels = []
 
-# Check if we're merging two featuresets
-if args.bed2:
-    if len(args.bed) != len(args.bed2):
-        raise ValueError(f"--bed and --bed2 must have same number of files "
-                        f"({len(args.bed)} vs {len(args.bed2)})")
-    print(f"  Merging two featuresets by position...")
-
-    for bed_file1, bed_file2 in zip(args.bed, args.bed2):
-        sample_label = extract_sample_label(bed_file1)
-        sample_labels.append(sample_label)
-        print(f"  - Merging: {bed_file1}")
-        print(f"           + {bed_file2}")
-        print(f"             (sample: {sample_label})")
-
-        # Load both BED files
-        df1 = load_bed_file(bed_file1, sample_label)
-        df2 = load_bed_file(bed_file2, sample_label)
-
-        # Merge by position
-        merged_df = merge_beds_by_position(df1, df2, sample_label)
-        print(f"             → {len(merged_df):,} merged intervals")
-        dfs.append(merged_df)
-else:
-    # Standard single featureset loading
-    for bed_file in args.bed:
-        sample_label = extract_sample_label(bed_file)
-        sample_labels.append(sample_label)
-        print(f"  - {bed_file} (sample: {sample_label})")
-        df = load_bed_file(bed_file, sample_label)
-        dfs.append(df)
+for bed_file in args.bed:
+    sample_label = extract_sample_label(bed_file)
+    sample_labels.append(sample_label)
+    print(f"  - {bed_file} (sample: {sample_label})")
+    df = load_bed_file(bed_file, sample_label)
+    dfs.append(df)
 
 in_data = pd.concat(dfs, ignore_index=True)
 read_to_sample = in_data.groupby('read')['sample'].first().to_dict()
