@@ -28,6 +28,7 @@ from scipy.cluster.hierarchy import linkage, dendrogram, leaves_list, fcluster, 
 from scipy.spatial.distance import pdist, squareform
 from scipy.stats import fisher_exact, chi2_contingency
 from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
+from sklearn.decomposition import TruncatedSVD
 import matplotlib.pyplot as plt
 import matplotlib
 import matplotlib.colors as mcolors
@@ -64,6 +65,12 @@ parser.add_argument("--min-k", dest="min_k", type=int, default=20,
                     help="Minimum number of clusters to test during auto-detection (default: 20)")
 parser.add_argument("--max-k", dest="max_k", type=int, default=100,
                     help="Maximum number of clusters to test during auto-detection (default: 100)")
+parser.add_argument("--k-selection", dest="k_selection", default="composite",
+                    choices=["composite", "silhouette", "calinski"],
+                    help="Metric for selecting optimal k:\n"
+                         "  composite: weighted combination of silhouette + enrichment (default)\n"
+                         "  silhouette: cluster cohesion (favors fewer, tighter clusters)\n"
+                         "  calinski: Calinski-Harabasz index")
 parser.add_argument("--min-cluster-size", dest="min_cluster_size", type=int, default=10,
                     help="Minimum cluster size to consider (default: 10)")
 parser.add_argument("--min-read-length", dest="min_read_length", type=int, default=10000,
@@ -115,6 +122,10 @@ parser.add_argument("--also-test-samples", dest="also_test_samples",
 parser.add_argument("--stratified", dest="stratified",
                     action=argparse.BooleanOptionalAction, default=False,
                     help="Report within-group sample breakdown and variance metrics (default: False)")
+parser.add_argument("--reduce-dims", dest="reduce_dims", type=int, default=None,
+                    help="Reduce matrix to N dimensions using truncated SVD before clustering.\n"
+                         "Recommended for --bed2 merged mode which can create very high-dimensional matrices.\n"
+                         "Typical values: 50-200. 'auto' uses min(n_samples-1, 100) (default: None = no reduction)")
 
 args = parser.parse_args()
 
@@ -1000,6 +1011,26 @@ if args.include_abundance:
 
 print(f"Final matrix shape: {adj_matrix.shape}")
 
+# --- Optional dimensionality reduction ---
+adj_matrix_full = adj_matrix  # Keep full matrix for reference
+if args.reduce_dims is not None:
+    n_samples, n_features = adj_matrix.shape
+    n_components = min(args.reduce_dims, n_samples - 1, n_features)
+
+    if n_features > n_components:
+        print(f"\n--- Reducing dimensions with truncated SVD ---")
+        print(f"  Original dimensions: {n_features}")
+        print(f"  Target dimensions: {n_components}")
+
+        svd = TruncatedSVD(n_components=n_components, random_state=42)
+        adj_matrix = svd.fit_transform(adj_matrix)
+
+        explained_var = svd.explained_variance_ratio_.sum()
+        print(f"  Explained variance: {explained_var:.1%}")
+        print(f"  Reduced matrix shape: {adj_matrix.shape}")
+    else:
+        print(f"\n--- Skipping dimensionality reduction (already at {n_features} dims) ---")
+
 # --- Hierarchical clustering ---
 print(f"\n--- Performing hierarchical clustering ---")
 dist_matrix = pdist(adj_matrix, metric='euclidean')
@@ -1235,17 +1266,28 @@ if args.n_clusters is None:
         print(f"    Davies-Bouldin:    k={best_db_k} (score={stats_df['davies_bouldin'].min():.4f})")
     print(f"    Composite:         k={best_composite_k} (score={stats_df['composite_score'].max():.4f})")
 
-    # Report enrichment stats at best composite k
-    best_row = stats_df[stats_df['k'] == best_composite_k].iloc[0]
-    print(f"\n  At k={best_composite_k}:")
+    # Select k based on chosen metric
+    if args.k_selection == "silhouette":
+        selected_k = best_silhouette_k
+        selection_metric = "silhouette"
+    elif args.k_selection == "calinski":
+        selected_k = best_ch_k
+        selection_metric = "Calinski-Harabasz"
+    else:  # composite (default)
+        selected_k = best_composite_k
+        selection_metric = "composite score"
+
+    # Report enrichment stats at selected k
+    best_row = stats_df[stats_df['k'] == selected_k].iloc[0]
+    print(f"\n  At k={selected_k}:")
     print(f"    Valid clusters:    {int(best_row['valid_clusters'])}")
     print(f"    Any enriched:      {int(best_row['any_enriched'])} ({best_row['enriched_ratio']*100:.1f}%)")
     print(f"    Strong enriched:   {int(best_row['strong_enriched'])} ({best_row['strong_ratio']*100:.1f}%)")
     print(f"    Perfect enriched:  {int(best_row['perfect_enriched'])} ({best_row['perfect_ratio']*100:.1f}%)")
 
-    print(f"\n  Using k={best_composite_k} (based on composite score)")
+    print(f"\n  Using k={selected_k} (based on {selection_metric})")
 
-    n_clusters = best_composite_k
+    n_clusters = selected_k
 else:
     n_clusters = args.n_clusters
     print(f"  Using specified k: {n_clusters}")
