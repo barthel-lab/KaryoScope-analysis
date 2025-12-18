@@ -68,8 +68,8 @@ parser.add_argument("--k-selection", dest="k_selection", default="composite",
                          "  composite: weighted combination of silhouette + enrichment (default)\n"
                          "  silhouette: cluster cohesion (favors fewer, tighter clusters)\n"
                          "  calinski: Calinski-Harabasz index")
-parser.add_argument("--min-cluster-size", dest="min_cluster_size", type=int, default=10,
-                    help="Minimum cluster size to consider (default: 10)")
+parser.add_argument("--min-cluster-size", dest="min_cluster_size", type=int, default=3,
+                    help="Minimum cluster size to consider (default: 3)")
 parser.add_argument("--min-read-length", dest="min_read_length", type=int, default=10000,
                     help="Minimum read length in bp to include (default: 10000)")
 parser.add_argument("--small-feature-quantile", dest="small_quantile", type=float, default=0.1,
@@ -1313,12 +1313,29 @@ fig, axes = plt.subplots(2, 2, figsize=(16, 14))
 from scipy.cluster.hierarchy import set_link_color_palette
 from matplotlib.patches import Patch
 
-# Color palette for clusters
-colors = plt.cm.tab20(np.linspace(0, 1, n_clusters))
-set_link_color_palette([matplotlib.colors.rgb2hex(c) for c in colors])
+# Color palette for clusters - use color + hatch combinations for many clusters
+base_colors = list(plt.cm.tab20.colors)  # 20 distinct colors
+hatches = ['', '///', '\\\\\\', '...', 'xxx', '+++', 'ooo', '---']  # 8 hatch patterns
 
-# Create cluster color map
-cluster_color_map = {c: matplotlib.colors.rgb2hex(colors[i % len(colors)]) for i, c in enumerate(sorted(set(cluster_labels)))}
+def get_cluster_style(cluster_idx):
+    """Get color and hatch pattern for a cluster index."""
+    color_idx = cluster_idx % len(base_colors)
+    hatch_idx = cluster_idx // len(base_colors)
+    color = matplotlib.colors.rgb2hex(base_colors[color_idx])
+    hatch = hatches[hatch_idx % len(hatches)]
+    return color, hatch
+
+# Create cluster color and hatch maps
+cluster_color_map = {}
+cluster_hatch_map = {}
+for i, c in enumerate(sorted(set(cluster_labels))):
+    color, hatch = get_cluster_style(i)
+    cluster_color_map[c] = color
+    cluster_hatch_map[c] = hatch
+
+# For dendrogram coloring, use just colors (hatches not supported in dendrogram)
+colors = plt.cm.tab20(np.linspace(0, 1, min(n_clusters, 20)))
+set_link_color_palette([matplotlib.colors.rgb2hex(c) for c in colors])
 
 # Create cluster to enrichment mapping
 cluster_to_enrichment = dict(zip(cluster_df['cluster_id'], cluster_df['enrichment']))
@@ -1434,15 +1451,33 @@ if args.plot_circular_dendrogram:
     ax_circ = fig_circ.add_subplot(111, polar=True)
 
     # Plot each link in polar coordinates
+    # scipy dendrogram icoord/dcoord are 4-point U-shapes: [x1, x1, x2, x2], [y1, y_merge, y_merge, y2]
+    # In polar coords, we need: radial lines (constant theta) and arcs (constant radius)
     for xcoord, ycoord, color in zip(dend_colored['icoord'], dend_colored['dcoord'], dend_colored['color_list']):
-        # Convert x coordinates to angles (0 to 2*pi)
-        theta = [2 * np.pi * x / (n_leaves * 10) for x in xcoord]
-        # Convert y (distance) to radius (invert so root is at center)
-        r = [max_dist - y + max_dist * 0.1 for y in ycoord]
-        ax_circ.plot(theta, r, color=color, linewidth=0.5)
+        # Convert to polar coordinates
+        theta1 = 2 * np.pi * xcoord[0] / (n_leaves * 10)
+        theta2 = 2 * np.pi * xcoord[3] / (n_leaves * 10)
+        r_leaf1 = max_dist - ycoord[0] + max_dist * 0.1  # bottom of left branch
+        r_leaf2 = max_dist - ycoord[3] + max_dist * 0.1  # bottom of right branch
+        r_merge = max_dist - ycoord[1] + max_dist * 0.1  # merge height (top of U)
 
-    # Calculate theta positions for leaves
-    theta_leaves = np.linspace(0, 2 * np.pi, n_leaves, endpoint=False)
+        # Draw left vertical (radial) line
+        ax_circ.plot([theta1, theta1], [r_leaf1, r_merge], color=color, linewidth=0.5)
+
+        # Draw right vertical (radial) line
+        ax_circ.plot([theta2, theta2], [r_leaf2, r_merge], color=color, linewidth=0.5)
+
+        # Draw horizontal arc at merge height
+        # Need to interpolate between theta1 and theta2 at constant radius
+        n_arc_points = max(10, int(abs(theta2 - theta1) * 20))  # more points for larger arcs
+        theta_arc = np.linspace(theta1, theta2, n_arc_points)
+        r_arc = np.full(n_arc_points, r_merge)
+        ax_circ.plot(theta_arc, r_arc, color=color, linewidth=0.5)
+
+    # Calculate theta positions for leaves - must match dendrogram icoord positions
+    # scipy dendrogram places leaves at x = 5, 15, 25, ... (i.e., 10*i + 5 for leaf i)
+    # We convert these to angles the same way as the dendrogram branches
+    theta_leaves = np.array([2 * np.pi * (10 * i + 5) / (n_leaves * 10) for i in range(n_leaves)])
 
     # Ring 1 (innermost): Sample of origin
     ring1_bottom = max_dist * 1.12
@@ -1451,12 +1486,14 @@ if args.plot_circular_dendrogram:
         ax_circ.bar(theta, ring1_height, width=2 * np.pi / n_leaves, bottom=ring1_bottom,
                     color=sample_colors.get(sample, '#999999'), alpha=0.9, edgecolor='none')
 
-    # Ring 2 (middle): Cluster number
+    # Ring 2 (middle): Cluster number - with hatching for many clusters
     ring2_bottom = max_dist * 1.20
     ring2_height = max_dist * 0.06
     for theta, cluster in zip(theta_leaves, leaf_clusters):
+        color = cluster_color_map.get(cluster, '#999999')
+        hatch = cluster_hatch_map.get(cluster, '')
         ax_circ.bar(theta, ring2_height, width=2 * np.pi / n_leaves, bottom=ring2_bottom,
-                    color=cluster_color_map.get(cluster, '#999999'), alpha=0.9, edgecolor='none')
+                    color=color, hatch=hatch, alpha=0.9, edgecolor='white', linewidth=0.1)
 
     # Ring 3 (outermost): Cluster enrichment
     ring3_bottom = max_dist * 1.28
@@ -1470,23 +1507,34 @@ if args.plot_circular_dendrogram:
     ax_circ.set_xticklabels([])
     ax_circ.grid(False)
 
-    # Add legends
-    # Sample legend (inner ring)
+    # Add legends using figure legends (more reliable for multiple legends)
+    # Sample legend (inner ring) - top right
     sample_patches = [Patch(facecolor=sample_colors[s], label=s) for s in sorted(sample_colors.keys())]
-    leg1 = ax_circ.legend(handles=sample_patches, loc='upper left', bbox_to_anchor=(1.05, 1.0), title='Sample (inner)')
+    leg1 = fig_circ.legend(handles=sample_patches, loc='upper left', bbox_to_anchor=(0.85, 0.95),
+                           title='Sample (inner)', framealpha=0.9)
 
-    # Cluster legend (middle ring)
-    cluster_patches = [Patch(facecolor=cluster_color_map[c], label=f'C{c}') for c in sorted(cluster_color_map.keys())]
-    leg2 = ax_circ.legend(handles=cluster_patches, loc='upper left', bbox_to_anchor=(1.05, 0.75),
-                          title='Cluster (middle)', ncol=2, fontsize=7)
-    ax_circ.add_artist(leg1)
-
-    # Enrichment legend (outer ring)
+    # Enrichment legend (outer ring) - below sample legend
     enrich_patches = [Patch(facecolor=enrichment_colors[e], label=e) for e in sorted(enrichment_colors.keys())]
-    leg3 = ax_circ.legend(handles=enrich_patches, loc='upper left', bbox_to_anchor=(1.05, 0.35), title='Enrichment (outer)')
-    ax_circ.add_artist(leg2)
+    n_samples = len(sample_patches)
+    enrich_y = 0.95 - (n_samples + 2) * 0.035
+    leg3 = fig_circ.legend(handles=enrich_patches, loc='upper left', bbox_to_anchor=(0.85, enrich_y),
+                           title='Enrichment (outer)', framealpha=0.9)
 
-    plt.tight_layout()
+    # Cluster legend (middle ring) - use hatches for uniqueness
+    # Use more columns to reduce rows, larger patches to show hatches clearly
+    n_enrichments = len(enrich_patches)
+    cluster_y = enrich_y - (n_enrichments + 2) * 0.035
+
+    cluster_patches = [Patch(facecolor=cluster_color_map[c], hatch=cluster_hatch_map[c],
+                             edgecolor='gray', label=f'C{c}')
+                       for c in sorted(cluster_color_map.keys())]
+    # Target ~4-5 rows max, so cols = ceil(n_clusters / 5)
+    n_cols = max(6, (len(cluster_patches) + 4) // 5)
+    leg2 = fig_circ.legend(handles=cluster_patches, loc='upper left', bbox_to_anchor=(0.85, cluster_y),
+                           title='Cluster (middle)', ncol=n_cols, fontsize=7,
+                           handlelength=2.5, handleheight=1.8, columnspacing=0.5,
+                           labelspacing=0.8, framealpha=0.9)
+
     circ_dend_file = f"{args.output_prefix}.circular_dendrogram.pdf"
     plt.savefig(circ_dend_file, dpi=150, bbox_inches='tight')
     plt.close()
