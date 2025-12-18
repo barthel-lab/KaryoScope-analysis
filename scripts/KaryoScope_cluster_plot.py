@@ -116,7 +116,7 @@ def load_cluster_analysis(cluster_analysis_file):
     return cluster_enrichments, cluster_order
 
 
-def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order=None, max_reps=None, top_clusters=None, max_clusters=None, clusters=None):
+def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order=None, max_reps=None, top_clusters=None, max_clusters=None, clusters=None, include_mixed=False):
     """Load read assignments from TSV file.
 
     Args:
@@ -194,6 +194,17 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
 
         reps_df = reps_df[reps_df['cluster'].isin(selected_clusters)]
         print(f"  Total after --top-clusters selection: {len(reps_df)}")
+    else:
+        # Default behavior: only plot enriched clusters (exclude 'mixed' and 'unknown')
+        if include_mixed:
+            enriched_labels = [e for e in unique_enrichments if e not in ('unknown',)]
+            print(f"  Including all clusters (enriched + mixed)")
+        else:
+            enriched_labels = [e for e in unique_enrichments if e not in ('mixed', 'Mixed', 'unknown')]
+            print(f"  Default: plotting enriched clusters only ({', '.join(sorted(enriched_labels))})")
+        if enriched_labels:
+            reps_df = reps_df[reps_df['enrichment'].isin(enriched_labels)]
+            print(f"  Total reads after filtering: {len(reps_df)}")
 
     # Get unique clusters - use priority order from cluster_analysis.tsv if available
     # (sorted by: 100% enriched first, then 80%+, then by p-value)
@@ -1020,6 +1031,9 @@ def parse_args():
     parser.add_argument("--clusters", dest="clusters", default=None,
                         help="Manually specify cluster IDs to plot, comma-separated (e.g., '1,5,17,23'). "
                              "Overrides --top-clusters and --max-clusters.")
+    parser.add_argument("--include-mixed", dest="include_mixed", action="store_true",
+                        help="Include 'mixed' (non-significant) clusters in default selection. "
+                             "By default, only statistically enriched clusters are plotted.")
 
     # Mode options
     parser.add_argument("--hide-brackets", dest="hide_brackets", action="store_true",
@@ -1101,7 +1115,8 @@ def main():
         max_reps=max_reps,
         top_clusters=top_clusters,
         max_clusters=args.max_clusters,
-        clusters=clusters
+        clusters=clusters,
+        include_mixed=args.include_mixed
     )
 
     # Load feature matrix
