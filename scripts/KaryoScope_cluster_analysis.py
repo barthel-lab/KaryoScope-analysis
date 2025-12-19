@@ -1287,6 +1287,7 @@ assignments.to_csv(assignments_file, sep='\t', index=False)
 print(f"  Saved read assignments to: {assignments_file}")
 
 # Save feature matrix data for cluster_plot.py (for computing subset dendrograms)
+# Save linkage method so cluster_plot can use the same method for consistent dendrograms
 matrix_file = f"{args.output_prefix}.feature_matrix.npz"
 np.savez(matrix_file,
          adj_matrix=adj_matrix,
