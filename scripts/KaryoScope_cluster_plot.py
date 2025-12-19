@@ -507,8 +507,8 @@ def generate_sample_colors(samples, existing_colors=None):
 def compute_dendrogram_order(feature_matrix_data, cluster_reads):
     """Compute dendrogram ordering for reads using original pairwise distances.
 
-    Extracts pairwise distances from the full feature matrix and performs
-    hierarchical clustering with optimal leaf ordering to minimize crossings.
+    Uses the same linkage method as cluster_analysis.py to ensure consistent
+    dendrogram distances between circular dendrogram and cluster plot.
 
     Returns:
         tuple: (reordered_cluster_reads, dendro_data, read_to_original_cluster, read_to_original_enrichment)
@@ -538,6 +538,12 @@ def compute_dendrogram_order(feature_matrix_data, cluster_reads):
         full_matrix = feature_matrix_data['adj_matrix']
         full_read_names = list(feature_matrix_data['read_names'])
 
+        # Get linkage method from cluster_analysis.py (default to 'ward' for consistency)
+        linkage_method = feature_matrix_data.get('linkage_method', 'ward')
+        if hasattr(linkage_method, 'item'):
+            linkage_method = linkage_method.item()
+        linkage_method = str(linkage_method)
+
         read_to_idx = {r: i for i, r in enumerate(full_read_names)}
         subset_indices = [read_to_idx[r] for r in all_displayed_reads if r in read_to_idx]
         subset_reads = [r for r in all_displayed_reads if r in read_to_idx]
@@ -553,8 +559,9 @@ def compute_dendrogram_order(feature_matrix_data, cluster_reads):
         subset_dist_square = full_dist_square[np.ix_(subset_indices, subset_indices)]
         subset_distances = squareform(subset_dist_square)
 
-        # Compute linkage on subset using 'average' method
-        subset_linkage = linkage(subset_distances, method='average')
+        # Compute linkage on subset using the SAME method as cluster_analysis.py
+        print(f"  Using linkage method: {linkage_method}")
+        subset_linkage = linkage(subset_distances, method=linkage_method)
 
         # Apply optimal leaf ordering to rotate branches and minimize crossings
         # This reorders leaves so that adjacent leaves are most similar
