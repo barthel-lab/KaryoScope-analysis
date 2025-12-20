@@ -269,11 +269,14 @@ def load_sample_metadata(metadata_file, sample_labels):
 
     When a metadata file is provided:
       - Uses group names exactly as specified in the file
-      - Colors are optional
+      - Colors are optional (sample colors in 'color' column)
+      - Group colors can be specified in 'group_color' column
 
     When no metadata file:
       - Each sample becomes its own group (named after the sample)
       - This allows --control-group to specify the reference
+
+    Returns: (sample_to_group, sample_to_color, group_to_color)
     """
     if metadata_file:
         # Load from file
@@ -286,13 +289,18 @@ def load_sample_metadata(metadata_file, sample_labels):
         # Build mappings
         sample_to_group = {}
         sample_to_color = {}
+        group_to_color = {}
 
         for _, row in meta_df.iterrows():
             sample = row['sample']
             # Use group if provided, otherwise use sample name as group
-            sample_to_group[sample] = row.get('group', sample) if 'group' in meta_df.columns else sample
+            group = row.get('group', sample) if 'group' in meta_df.columns else sample
+            sample_to_group[sample] = group
             if 'color' in meta_df.columns and pd.notna(row.get('color')):
                 sample_to_color[sample] = row['color']
+            # Parse explicit group colors if provided
+            if 'group_color' in meta_df.columns and pd.notna(row.get('group_color')):
+                group_to_color[group] = row['group_color']
 
         # Check all samples are covered
         missing = set(sample_labels) - set(sample_to_group.keys())
@@ -302,13 +310,13 @@ def load_sample_metadata(metadata_file, sample_labels):
             for s in missing:
                 sample_to_group[s] = s
 
-        return sample_to_group, sample_to_color
+        return sample_to_group, sample_to_color, group_to_color
 
     else:
         # No metadata file: each sample is its own group
         # This is clean and doesn't rely on text matching
         sample_to_group = {sample: sample for sample in sample_labels}
-        return sample_to_group, {}
+        return sample_to_group, {}, {}
 
 
 def generate_group_colors(groups, existing_colors=None):
@@ -650,7 +658,7 @@ if args.min_read_length > 0:
 
 # --- Load sample metadata ---
 print(f"\n--- Loading sample metadata ---")
-sample_to_group, sample_colors_from_meta = load_sample_metadata(args.sample_metadata, sample_labels)
+sample_to_group, sample_colors_from_meta, explicit_group_colors = load_sample_metadata(args.sample_metadata, sample_labels)
 
 # Determine unique groups
 all_groups = sorted(set(sample_to_group.values()))
@@ -668,23 +676,29 @@ print(f"\n  Group counts:")
 for group, count in sorted(group_totals.items()):
     print(f"    {group}: {count:,} reads")
 
-# Determine control group for two-group comparison
+# Determine control group for group-level comparisons
+# (used in two-group mode and for group-level stats in per-sample mode)
 control_group = args.control_group
+if control_group is None and len(all_groups) == 2:
+    # Default: alphabetically first group is the control/reference
+    control_group = all_groups[0]
 if args.comparison_mode == "two-group":
-    if control_group is None:
-        # Default: alphabetically first group is the control/reference
-        control_group = all_groups[0]
-        if len(all_groups) > 2:
-            print(f"  Note: {len(all_groups)} groups found, using '{control_group}' as reference.")
-            print(f"        Use --control-group to specify a different reference group.")
+    if len(all_groups) > 2:
+        print(f"  Note: {len(all_groups)} groups found, using '{control_group}' as reference.")
+        print(f"        Use --control-group to specify a different reference group.")
     print(f"  Reference group: {control_group}")
 
-# Convert sample colors to group colors (use first sample's color for each group)
+# Build group colors: explicit > derived from first sample > auto-generated
+# Start with colors derived from first sample per group
 group_colors_from_meta = {}
 for sample, color in sample_colors_from_meta.items():
     group = sample_to_group.get(sample, sample)
     if group not in group_colors_from_meta:
         group_colors_from_meta[group] = color
+# Override with explicit group colors if provided
+group_colors_from_meta.update(explicit_group_colors)
+if explicit_group_colors:
+    print(f"  Explicit group colors: {explicit_group_colors}")
 
 # Generate colors for groups
 group_colors = generate_group_colors(all_groups, group_colors_from_meta)
