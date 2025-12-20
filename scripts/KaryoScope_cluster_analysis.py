@@ -679,7 +679,7 @@ for group, count in sorted(group_totals.items()):
 # Determine control group for group-level comparisons
 # (used in two-group mode and for group-level stats in per-sample mode)
 control_group = args.control_group
-if control_group is None and len(all_groups) == 2:
+if control_group is None and len(all_groups) >= 2:
     # Default: alphabetically first group is the control/reference
     control_group = all_groups[0]
 if args.comparison_mode == "two-group":
@@ -915,18 +915,17 @@ def fast_enrichment_check(cluster_mask, read_groups, group_totals_dict, control_
     # Calculate max purity (highest percentage from any single group)
     max_purity = max(group_counts.get(g, 0) / total_in for g in all_grps)
 
-    # For two groups, use simple proportion comparison
-    if len(all_grps) == 2:
-        ctrl_count = group_counts.get(control_grp, 0)
-        ctrl_pct = ctrl_count / total_in
-        other_grp = [g for g in all_grps if g != control_grp][0]
+    # Calculate expected proportions
+    total_reads = sum(group_totals_dict.values())
+    expected_props = {g: group_totals_dict[g] / total_reads for g in all_grps}
 
-        # Quick significance check using binomial proportion
-        expected_ctrl = group_totals_dict[control_grp] / sum(group_totals_dict.values())
-        if ctrl_pct > expected_ctrl + 0.15:  # >15% enrichment threshold for speed
-            return f"{control_grp}-enriched", max_purity
-        elif ctrl_pct < expected_ctrl - 0.15:
-            return f"{other_grp}-enriched", max_purity
+    # Check if any group is significantly overrepresented (>15% above expected)
+    for grp in all_grps:
+        observed_pct = group_counts.get(grp, 0) / total_in
+        expected_pct = expected_props[grp]
+        if observed_pct > expected_pct + 0.15:
+            return f"{grp}-enriched", max_purity
+
     return "mixed", max_purity
 
 # Calculate clustering metrics for different k values
