@@ -436,12 +436,13 @@ def load_bed_data(sample_bed_paths, database, featuresets, smoothness, reads_nee
 # Helper Functions: Enrichment Handling
 # =============================================================================
 
-def get_enrichment_colors(group_colors, unique_enrichments):
-    """Generate enrichment colors based on group colors.
+def get_enrichment_colors(group_colors, unique_enrichments, sample_colors=None):
+    """Generate enrichment colors based on group or sample colors.
 
     Args:
         group_colors: Dict of group -> color from metadata
         unique_enrichments: Set of enrichment labels from data
+        sample_colors: Dict of sample -> color (for per-sample mode)
 
     Returns:
         dict: enrichment_label -> color
@@ -452,16 +453,27 @@ def get_enrichment_colors(group_colors, unique_enrichments):
         if enrich == 'mixed':
             continue
 
-        # Extract group name from enrichment label (e.g., "post-enriched" -> "post")
-        group = enrich.replace('-enriched', '')
+        # Extract group/sample name from enrichment label (e.g., "post-enriched" -> "post")
+        name = enrich.replace('-enriched', '')
 
-        # Try to find matching group color (case-insensitive)
+        # Try to find matching color (case-insensitive)
         color_found = False
-        for g, c in group_colors.items():
-            if g.lower() == group.lower():
-                enrichment_colors[enrich] = c
-                color_found = True
-                break
+
+        # First check sample_colors (for per-sample mode)
+        if sample_colors:
+            for s, c in sample_colors.items():
+                if s.lower() == name.lower():
+                    enrichment_colors[enrich] = c
+                    color_found = True
+                    break
+
+        # Then check group_colors
+        if not color_found:
+            for g, c in group_colors.items():
+                if g.lower() == name.lower():
+                    enrichment_colors[enrich] = c
+                    color_found = True
+                    break
 
         # Default colors if not found
         if not color_found:
@@ -1389,8 +1401,8 @@ def main():
     all_samples = sorted(set(sample for data in cluster_reads.values() for _, sample in data['reads']))
     sample_colors = generate_sample_colors(all_samples, sample_colors)
 
-    # Generate enrichment colors from group colors
-    enrichment_colors = get_enrichment_colors(group_colors, unique_enrichments)
+    # Generate enrichment colors from group/sample colors
+    enrichment_colors = get_enrichment_colors(group_colors, unique_enrichments, sample_colors)
 
     # --- Compute cluster-level dendrogram order if feature matrix provided ---
     cluster_dendro_data = None
