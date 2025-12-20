@@ -74,6 +74,8 @@ parser.add_argument("--min-read-length", dest="min_read_length", type=int, defau
                     help="Minimum read length in bp to include (default: 10000)")
 parser.add_argument("--small-feature-quantile", dest="small_quantile", type=float, default=0.1,
                     help="Quantile threshold for small feature collapsing (default: 0.1)")
+parser.add_argument("--exclude-features", dest="exclude_features", default=None,
+                    help="Comma-separated list of features to exclude (e.g., 'novel,unknown')")
 parser.add_argument("--linkage-method", dest="linkage_method", default="ward",
                     help="Linkage method for hierarchical clustering (default: ward)")
 parser.add_argument("--matrix-type", dest="matrix_type", default="length_weighted",
@@ -82,12 +84,12 @@ parser.add_argument("--matrix-type", dest="matrix_type", default="length_weighte
                          "  binary: 0/1 for presence/absence of transitions\n"
                          "  count: count of each transition\n"
                          "  length_weighted: transitions weighted by feature length (default: length_weighted)")
-parser.add_argument("--edges", dest="edge_mode", default="bidirectional",
+parser.add_argument("--edges", dest="edge_mode", default="symmetric",
                     choices=["directional", "bidirectional", "symmetric"],
                     help="Edge counting mode:\n"
                          "  directional: standard A->B edge counting\n"
                          "  bidirectional: A->B and B->A are both counted separately\n"
-                         "  symmetric: edges are sorted alphabetically, A->B and B->A both count as A->B (default: bidirectional)")
+                         "  symmetric: edges are sorted alphabetically, A->B and B->A both count as A->B (default: symmetric)")
 parser.add_argument("--abundance", dest="include_abundance",
                     action=argparse.BooleanOptionalAction, default=True,
                     help="Include feature abundance dimensions (default: True)")
@@ -452,14 +454,16 @@ def calculate_enrichment_per_sample(cluster_samples, sample_totals):
 
     # Fisher's exact for each sample vs rest
     p_values = {}
+    odds_ratios = {}
     for sample in samples:
         in_cluster = sample_counts.get(sample, 0)
         out_cluster = sample_totals[sample] - in_cluster
         other_in = total_in - in_cluster
         other_out = sum(sample_totals.values()) - sample_totals[sample] - other_in
 
-        _, p_val = fisher_exact([[in_cluster, other_in], [out_cluster, other_out]])
+        odds, p_val = fisher_exact([[in_cluster, other_in], [out_cluster, other_out]])
         p_values[sample] = p_val
+        odds_ratios[sample] = odds
 
     # Find most significant sample
     min_p_sample = min(p_values.keys(), key=lambda s: p_values[s])
@@ -477,7 +481,9 @@ def calculate_enrichment_per_sample(cluster_samples, sample_totals):
         'odds_ratio': np.nan,
         'p_value': min_p,
         'enrichment': enrichment,
-        'dominant_group': max(samples, key=lambda s: sample_pcts[s])
+        'dominant_group': max(samples, key=lambda s: sample_pcts[s]),
+        'all_p_values': p_values,
+        'all_odds_ratios': odds_ratios
     }
 
 
@@ -692,6 +698,23 @@ for sample in sample_labels:
         # Use group color
         group = sample_to_group.get(sample, sample)
         sample_colors[sample] = group_colors.get(group, '#999999')
+
+# --- Filter excluded features ---
+if args.exclude_features:
+    exclude_set = set(f.strip() for f in args.exclude_features.split(','))
+    print(f"\n--- Filtering excluded features ---")
+    print(f"  Excluding (component match): {sorted(exclude_set)}")
+    before_count = len(in_data)
+
+    # Component matching: filter if any colon-separated part matches exclude list
+    def has_excluded_component(feature):
+        components = feature.split(':')
+        return any(comp in exclude_set for comp in components)
+
+    mask = in_data['feature'].apply(has_excluded_component)
+    in_data = in_data[~mask]
+    print(f"  Records before filter: {before_count:,}")
+    print(f"  Records after filter: {len(in_data):,}")
 
 # --- Collapse small features ---
 small_len_thresh = in_data['length'].quantile(args.small_quantile)
@@ -1168,10 +1191,34 @@ for cluster_id in range(1, n_clusters + 1):
         'centroid_group': sample_to_group.get(read_to_sample[centroid_read], read_to_sample[centroid_read])
     }
 
-    # Add group-specific columns
-    for g in all_groups:
-        cluster_record[f'{g}_count'] = stats['group_counts'].get(g, 0)
-        cluster_record[f'{g}_pct'] = stats['group_pcts'].get(g, 0)
+    # Add group/sample-specific columns
+    if args.comparison_mode == 'per-sample':
+        # In per-sample mode, stats contains sample-level data
+        for s in sample_labels:
+            cluster_record[f'{s}_count'] = stats['group_counts'].get(s, 0)
+            cluster_record[f'{s}_pct'] = stats['group_pcts'].get(s, 0)
+            cluster_record[f'{s}_pval'] = stats['all_p_values'].get(s, 1.0)
+            cluster_record[f'{s}_odds'] = stats['all_odds_ratios'].get(s, 1.0)
+
+        # Also compute group-level stats for visualization
+        cluster_groups = [sample_to_group.get(s, s) for s in cluster_samples]
+        group_counts_cluster = Counter(cluster_groups)
+        total_in_cluster = len(cluster_samples)
+        for g in all_groups:
+            cluster_record[f'{g}_count'] = group_counts_cluster.get(g, 0)
+            cluster_record[f'{g}_pct'] = (group_counts_cluster.get(g, 0) / total_in_cluster * 100) if total_in_cluster > 0 else 0
+
+        # Also run group-level Fisher's test for comparison
+        if len(all_groups) == 2:
+            group_stats = calculate_enrichment_two_group(cluster_samples, sample_to_group, control_group, group_totals)
+            cluster_record['group_enrichment'] = group_stats['enrichment']
+            cluster_record['group_p_value'] = group_stats['p_value']
+            cluster_record['group_odds_ratio'] = group_stats['odds_ratio']
+    else:
+        # In group modes, stats contains group-level data
+        for g in all_groups:
+            cluster_record[f'{g}_count'] = stats['group_counts'].get(g, 0)
+            cluster_record[f'{g}_pct'] = stats['group_pcts'].get(g, 0)
 
     # Option A: Nested/hierarchical testing within enriched group
     if args.nested and stats['enrichment'] != 'mixed' and args.comparison_mode != 'per-sample':
@@ -1261,30 +1308,41 @@ cluster_df = cluster_df.sort_values(['enrichment', 'p_value'])
 # --- Output results ---
 print(f"\n--- Cluster Summary ---")
 
-# Build dynamic header based on groups
+# Build dynamic header based on groups or samples (per-sample mode)
+if args.comparison_mode == 'per-sample':
+    # Use sample names for columns
+    col_items = sample_labels
+else:
+    # Use group names for columns
+    col_items = all_groups
+
 header_parts = ['Cluster', 'Size']
-for g in all_groups:
-    header_parts.extend([g[:6], f'{g[:4]}%'])  # Truncate long group names
+for item in col_items:
+    header_parts.extend([item[:6], f'{item[:4]}%'])  # Truncate long names
 header_parts.extend(['P-value', 'Enrichment', 'Centroid'])
-header_fmt = '{:<8} {:<6} ' + ' '.join(['{:<6}'] * (len(all_groups) * 2)) + ' {:<10} {:<20} {:<10}'
+header_fmt = '{:<8} {:<6} ' + ' '.join(['{:<6}'] * (len(col_items) * 2)) + ' {:<10} {:<20} {:<10}'
 print(header_fmt.format(*header_parts))
-print("-" * (95 + 12 * len(all_groups)))
+print("-" * (95 + 12 * len(col_items)))
 
 for _, row in cluster_df.iterrows():
-    centroid_group = row.get('centroid_group', sample_to_group.get(row['centroid_sample'], row['centroid_sample']))
+    if args.comparison_mode == 'per-sample':
+        centroid_label = row['centroid_sample']
+    else:
+        centroid_label = row.get('centroid_group', sample_to_group.get(row['centroid_sample'], row['centroid_sample']))
+
     # Flag if centroid disagrees with enrichment
     flag = ""
-    expected_group = row['enrichment'].replace('-enriched', '') if '-enriched' in row['enrichment'] else None
-    if expected_group and centroid_group != expected_group:
+    expected_item = row['enrichment'].replace('-enriched', '') if '-enriched' in row['enrichment'] else None
+    if expected_item and centroid_label != expected_item:
         flag = " ⚠️"
 
     row_values = [row['cluster_id'], row['size']]
-    for g in all_groups:
-        row_values.append(int(row.get(f'{g}_count', 0)))
-        row_values.append(f"{row.get(f'{g}_pct', 0):.1f}")
-    row_values.extend([f"{row['p_value']:.2e}", row['enrichment'][:18], f"{centroid_group}{flag}"])
+    for item in col_items:
+        row_values.append(int(row.get(f'{item}_count', 0)))
+        row_values.append(f"{row.get(f'{item}_pct', 0):.1f}")
+    row_values.extend([f"{row['p_value']:.2e}", row['enrichment'][:18], f"{centroid_label}{flag}"])
 
-    row_fmt = '{:<8} {:<6} ' + ' '.join(['{:<6}'] * (len(all_groups) * 2)) + ' {:<10} {:<20} {:<10}'
+    row_fmt = '{:<8} {:<6} ' + ' '.join(['{:<6}'] * (len(col_items) * 2)) + ' {:<10} {:<20} {:<10}'
     print(row_fmt.format(*row_values))
 
 # Save cluster analysis
@@ -1359,7 +1417,11 @@ print(f"  Saved sample metadata to: {metadata_out_file}")
 # --- Generate visualization ---
 print(f"\n--- Generating cluster visualization ---")
 
-fig, axes = plt.subplots(2, 2, figsize=(16, 14))
+# Use 3x2 layout for per-sample mode (to show both sample and group composition)
+if args.comparison_mode == 'per-sample':
+    fig, axes = plt.subplots(3, 2, figsize=(16, 18))
+else:
+    fig, axes = plt.subplots(2, 2, figsize=(16, 14))
 from scipy.cluster.hierarchy import set_link_color_palette
 from matplotlib.patches import Patch
 
@@ -1410,8 +1472,14 @@ cluster_sizes = cluster_df['size'].values
 cluster_ids = cluster_df['cluster_id'].values
 enrichments = cluster_df['enrichment'].values
 
-# Map enrichments to colors using group_colors
+# Map enrichments to colors - use sample_colors in per-sample mode, group_colors otherwise
 def get_enrichment_color(e):
+    if args.comparison_mode == 'per-sample':
+        # Check sample colors first
+        for s, color in sample_colors.items():
+            if e == f'{s}-enriched':
+                return color
+    # Then check group colors
     for g, color in group_colors.items():
         if e == f'{g}-enriched':
             return color
@@ -1425,30 +1493,44 @@ ax2.set_title("Cluster Sizes by Enrichment")
 ax2.set_xticks(range(len(cluster_sizes)))
 ax2.set_xticklabels([f"C{c}" for c in cluster_ids], rotation=45)
 
-# Legend - dynamic based on groups
-legend_patches = [Patch(facecolor=c, label=f'{g}-enriched') for g, c in group_colors.items()]
+# Legend - dynamic based on groups or samples
+if args.comparison_mode == 'per-sample':
+    legend_patches = [Patch(facecolor=c, label=f'{s}-enriched') for s, c in sample_colors.items()]
+else:
+    legend_patches = [Patch(facecolor=c, label=f'{g}-enriched') for g, c in group_colors.items()]
 legend_patches.append(Patch(facecolor='#999999', label='Mixed'))
-ax2.legend(handles=legend_patches, loc='upper right')
+ax2.legend(handles=legend_patches, loc='upper right', fontsize=7)
 
 # 3. Group composition per cluster
 ax3 = axes[1, 0]
 x = np.arange(len(cluster_df))
-n_groups = len(all_groups)
-width = 0.8 / n_groups
 
-for i, g in enumerate(all_groups):
-    offset = (i - n_groups / 2 + 0.5) * width
-    pct_col = f'{g}_pct'
+# Use sample labels/colors in per-sample mode, group labels/colors otherwise
+if args.comparison_mode == 'per-sample':
+    comp_items = sample_labels
+    comp_colors = sample_colors
+    comp_title = "Sample Composition per Cluster"
+else:
+    comp_items = all_groups
+    comp_colors = group_colors
+    comp_title = "Group Composition per Cluster"
+
+n_comp = len(comp_items)
+width = 0.8 / n_comp
+
+for i, item in enumerate(comp_items):
+    offset = (i - n_comp / 2 + 0.5) * width
+    pct_col = f'{item}_pct'
     if pct_col in cluster_df.columns:
-        ax3.bar(x + offset, cluster_df[pct_col], width, label=g, color=group_colors[g])
+        ax3.bar(x + offset, cluster_df[pct_col], width, label=item, color=comp_colors.get(item, '#999999'))
 
 ax3.set_xlabel("Cluster")
 ax3.set_ylabel("Percentage")
-ax3.set_title("Group Composition per Cluster")
+ax3.set_title(comp_title)
 ax3.set_xticks(x)
 ax3.set_xticklabels([f"C{c}" for c in cluster_df['cluster_id']], rotation=45)
 ax3.legend()
-if n_groups == 2:
+if n_comp == 2:
     ax3.axhline(y=50, color='gray', linestyle='--', alpha=0.5)
 
 # 4. P-value distribution
@@ -1460,10 +1542,64 @@ ax4.axhline(y=-np.log10(0.05), color='red', linestyle='--', alpha=0.5, label='p=
 ax4.axhline(y=-np.log10(0.01), color='orange', linestyle='--', alpha=0.5, label='p=0.01')
 ax4.set_xlabel("Cluster")
 ax4.set_ylabel("-log10(p-value)")
-ax4.set_title("Enrichment Significance")
+ax4.set_title("Enrichment Significance (per-sample)" if args.comparison_mode == 'per-sample' else "Enrichment Significance")
 ax4.set_xticks(range(len(pvals)))
 ax4.set_xticklabels([f"C{c}" for c in cluster_df['cluster_id']], rotation=45)
 ax4.legend()
+
+# 5 & 6. Additional panels for per-sample mode: Group composition and group-level p-values
+if args.comparison_mode == 'per-sample':
+    # 5. Group composition per cluster
+    ax5 = axes[2, 0]
+    x = np.arange(len(cluster_df))
+    n_groups = len(all_groups)
+    width = 0.8 / n_groups
+
+    for i, g in enumerate(all_groups):
+        offset = (i - n_groups / 2 + 0.5) * width
+        pct_col = f'{g}_pct'
+        if pct_col in cluster_df.columns:
+            ax5.bar(x + offset, cluster_df[pct_col], width, label=g, color=group_colors.get(g, '#999999'))
+
+    ax5.set_xlabel("Cluster")
+    ax5.set_ylabel("Percentage")
+    ax5.set_title("Group Composition per Cluster")
+    ax5.set_xticks(x)
+    ax5.set_xticklabels([f"C{c}" for c in cluster_df['cluster_id']], rotation=45)
+    ax5.legend()
+    if n_groups == 2:
+        ax5.axhline(y=50, color='gray', linestyle='--', alpha=0.5)
+
+    # 6. Group-level p-values (if available)
+    ax6 = axes[2, 1]
+    if 'group_p_value' in cluster_df.columns:
+        group_pvals = cluster_df['group_p_value'].values
+        group_enrichments = cluster_df['group_enrichment'].values
+
+        def get_group_enrichment_color(e):
+            for grp, clr in group_colors.items():
+                if e == f'{grp}-enriched':
+                    return clr
+            return '#999999'
+
+        colors_group_pval = [get_group_enrichment_color(e) for e in group_enrichments]
+        ax6.bar(range(len(group_pvals)), -np.log10(group_pvals + 1e-300), color=colors_group_pval)
+        ax6.axhline(y=-np.log10(0.05), color='red', linestyle='--', alpha=0.5, label='p=0.05')
+        ax6.axhline(y=-np.log10(0.01), color='orange', linestyle='--', alpha=0.5, label='p=0.01')
+        ax6.set_xlabel("Cluster")
+        ax6.set_ylabel("-log10(p-value)")
+        ax6.set_title("Enrichment Significance (group-level)")
+        ax6.set_xticks(range(len(group_pvals)))
+        ax6.set_xticklabels([f"C{c}" for c in cluster_df['cluster_id']], rotation=45)
+
+        # Legend for group enrichment
+        group_legend_patches = [Patch(facecolor=c, label=f'{g}-enriched') for g, c in group_colors.items()]
+        group_legend_patches.append(Patch(facecolor='#999999', label='Mixed'))
+        ax6.legend(handles=group_legend_patches, loc='upper right', fontsize=7)
+    else:
+        ax6.text(0.5, 0.5, "Group-level enrichment\nnot available\n(requires 2 groups)",
+                 ha='center', va='center', fontsize=12, transform=ax6.transAxes)
+        ax6.set_axis_off()
 
 plt.tight_layout()
 plot_file = f"{args.output_prefix}.cluster_analysis.pdf"
@@ -1493,7 +1629,10 @@ if args.plot_circular_dendrogram:
     leaf_enrichments = [cluster_to_enrichment.get(c, 'mixed') for c in leaf_clusters]
 
     # Color mappings for annotations
-    enrichment_colors = {f'{g}-enriched': c for g, c in group_colors.items()}
+    if args.comparison_mode == 'per-sample':
+        enrichment_colors = {f'{s}-enriched': c for s, c in sample_colors.items()}
+    else:
+        enrichment_colors = {f'{g}-enriched': c for g, c in group_colors.items()}
     enrichment_colors['mixed'] = '#CCCCCC'
 
     # Create figure with circular dendrogram
@@ -1616,7 +1755,10 @@ if args.plot_umap and len(read_names) > 10:
         cluster_list = [read_to_cluster[r] for r in read_names]
 
         # Color mappings
-        enrichment_colors = {f'{g}-enriched': c for g, c in group_colors.items()}
+        if args.comparison_mode == 'per-sample':
+            enrichment_colors = {f'{s}-enriched': c for s, c in sample_colors.items()}
+        else:
+            enrichment_colors = {f'{g}-enriched': c for g, c in group_colors.items()}
         enrichment_colors['mixed'] = '#CCCCCC'
 
         # Generate distinct colors for clusters
@@ -1649,10 +1791,10 @@ if args.plot_umap and len(read_names) > 10:
         enrich_patches = [Patch(facecolor=c, label=e) for e, c in enrichment_colors.items()]
         axes[0, 1].legend(handles=enrich_patches, loc='upper right')
 
-        # 3. Bottom-left: Colored by cluster with cluster number labels
-        point_colors_cluster = [cluster_color_map[c] for c in cluster_list]
-        axes[1, 0].scatter(embedding[:, 0], embedding[:, 1], c=point_colors_cluster, s=15, alpha=0.6)
-        axes[1, 0].set_title("UMAP - Colored by Cluster")
+        # 3. Bottom-left: Colored by sample with cluster number labels
+        point_colors_sample = [sample_colors.get(s, '#999999') for s in sample_list]
+        axes[1, 0].scatter(embedding[:, 0], embedding[:, 1], c=point_colors_sample, s=15, alpha=0.6)
+        axes[1, 0].set_title("UMAP - Colored by Sample")
         axes[1, 0].set_xlabel("UMAP 1")
         axes[1, 0].set_ylabel("UMAP 2")
 
@@ -1666,11 +1808,12 @@ if args.plot_umap and len(read_names) > 10:
                                fontsize=8, fontweight='bold', ha='center', va='center',
                                bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7, edgecolor='gray'))
 
-        # Add enrichment legend to bottom-left panel
-        axes[1, 0].legend(handles=enrich_patches, loc='upper right')
+        # Add sample legend to bottom-left panel
+        sample_patches = [Patch(facecolor=sample_colors[s], label=s) for s in sorted(sample_colors.keys())]
+        axes[1, 0].legend(handles=sample_patches, loc='upper right', fontsize=7)
 
-        # 4. Bottom-right: Cluster numbers only (no points, just labels for clarity)
-        axes[1, 1].scatter(embedding[:, 0], embedding[:, 1], c=point_colors_cluster, s=10, alpha=0.3)
+        # 4. Bottom-right: Colored by enrichment with cluster labels
+        axes[1, 1].scatter(embedding[:, 0], embedding[:, 1], c=point_colors_enrich, s=10, alpha=0.3)
         axes[1, 1].set_title("UMAP - Cluster Labels")
         axes[1, 1].set_xlabel("UMAP 1")
         axes[1, 1].set_ylabel("UMAP 2")
@@ -1831,6 +1974,122 @@ if args.plot_umap and len(read_names) > 10:
         print("  Warning: umap-learn not installed. Skipping UMAP plot.")
         print("  Install with: pip install umap-learn")
 
+# --- Bubble Plot for Per-Sample Enrichment ---
+if args.comparison_mode == 'per-sample':
+    print(f"\n--- Generating enrichment bubble plot ---")
+
+    # Build matrix of -log10(p-values) and odds ratios for each cluster x sample
+    cluster_ids = cluster_df['cluster_id'].values
+    n_clusters = len(cluster_ids)
+    n_samples = len(sample_labels)
+
+    # Extract p-values and odds ratios matrices
+    pval_matrix = np.zeros((n_samples, n_clusters))
+    odds_matrix = np.zeros((n_samples, n_clusters))
+    pct_matrix = np.zeros((n_samples, n_clusters))
+
+    for j, cid in enumerate(cluster_ids):
+        row = cluster_df[cluster_df['cluster_id'] == cid].iloc[0]
+        for i, sample in enumerate(sample_labels):
+            pval_matrix[i, j] = row.get(f'{sample}_pval', 1.0)
+            odds_matrix[i, j] = row.get(f'{sample}_odds', 1.0)
+            pct_matrix[i, j] = row.get(f'{sample}_pct', 0.0)
+
+    # Transform p-values to -log10 (capped at 10 for visualization)
+    with np.errstate(divide='ignore'):
+        neg_log_p = -np.log10(pval_matrix)
+    neg_log_p = np.clip(neg_log_p, 0, 10)  # Cap at 10 for display
+
+    # Create figure
+    fig, axes = plt.subplots(1, 2, figsize=(max(16, n_clusters * 0.5 + 4), n_samples * 0.8 + 2))
+
+    # Left panel: Bubble plot with -log10(p) as size, odds ratio as color
+    ax1 = axes[0]
+
+    # Create bubble plot
+    for i, sample in enumerate(sample_labels):
+        for j, cid in enumerate(cluster_ids):
+            size = neg_log_p[i, j] * 50 + 10  # Scale size
+            odds = odds_matrix[i, j]
+
+            # Color by odds ratio: red = enriched (>1), blue = depleted (<1)
+            if odds > 1:
+                # Enriched: red scale
+                intensity = min(1.0, np.log2(odds) / 3)  # Log scale, cap at 8x enrichment
+                color = plt.cm.Reds(0.3 + intensity * 0.7)
+            else:
+                # Depleted: blue scale
+                intensity = min(1.0, -np.log2(odds + 0.001) / 3)
+                color = plt.cm.Blues(0.3 + intensity * 0.7)
+
+            # Add significance indicator
+            if pval_matrix[i, j] < 0.05:
+                edgecolor = 'black'
+                linewidth = 1.5
+            else:
+                edgecolor = 'gray'
+                linewidth = 0.5
+
+            ax1.scatter(j, i, s=size, c=[color], edgecolors=edgecolor, linewidths=linewidth)
+
+    ax1.set_xticks(range(n_clusters))
+    ax1.set_xticklabels([str(cid) for cid in cluster_ids], rotation=90, fontsize=8)
+    ax1.set_yticks(range(n_samples))
+    ax1.set_yticklabels(sample_labels, fontsize=10)
+    ax1.set_xlabel('Cluster ID', fontsize=11)
+    ax1.set_ylabel('Sample', fontsize=11)
+    ax1.set_title('Enrichment Bubble Plot\n(size: -log10(p), color: odds ratio)', fontsize=12)
+    ax1.set_xlim(-0.5, n_clusters - 0.5)
+    ax1.set_ylim(-0.5, n_samples - 0.5)
+    ax1.grid(True, alpha=0.3)
+
+    # Add legend for size
+    size_legend_vals = [1.3, 2, 3]  # -log10(p) values = p of 0.05, 0.01, 0.001
+    for val in size_legend_vals:
+        ax1.scatter([], [], s=val * 50 + 10, c='gray', alpha=0.5,
+                    label=f'p = {10**(-val):.3g}')
+    ax1.legend(loc='upper left', bbox_to_anchor=(1.01, 1), title='P-value', fontsize=8)
+
+    # Right panel: Heatmap of percentage
+    ax2 = axes[1]
+    im = ax2.imshow(pct_matrix, aspect='auto', cmap='YlOrRd', vmin=0, vmax=100)
+
+    # Add text annotations
+    for i in range(n_samples):
+        for j in range(n_clusters):
+            pct = pct_matrix[i, j]
+            pval = pval_matrix[i, j]
+            text_color = 'white' if pct > 50 else 'black'
+
+            # Add asterisks for significance
+            sig = ''
+            if pval < 0.001:
+                sig = '***'
+            elif pval < 0.01:
+                sig = '**'
+            elif pval < 0.05:
+                sig = '*'
+
+            ax2.text(j, i, f'{pct:.0f}{sig}', ha='center', va='center',
+                     fontsize=7, color=text_color)
+
+    ax2.set_xticks(range(n_clusters))
+    ax2.set_xticklabels([str(cid) for cid in cluster_ids], rotation=90, fontsize=8)
+    ax2.set_yticks(range(n_samples))
+    ax2.set_yticklabels(sample_labels, fontsize=10)
+    ax2.set_xlabel('Cluster ID', fontsize=11)
+    ax2.set_title('Sample Percentage per Cluster\n(* p<0.05, ** p<0.01, *** p<0.001)', fontsize=12)
+
+    # Add colorbar
+    cbar = plt.colorbar(im, ax=ax2, shrink=0.8)
+    cbar.set_label('Percentage (%)', fontsize=10)
+
+    plt.tight_layout()
+    bubble_file = f"{args.output_prefix}.enrichment_bubble.pdf"
+    plt.savefig(bubble_file, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved enrichment bubble plot: {bubble_file}")
+
 # --- Summary ---
 print(f"\n" + "=" * 60)
 print("Summary")
@@ -1838,10 +2097,16 @@ print("=" * 60)
 print(f"Total reads: {len(read_names):,}")
 print(f"Number of clusters: {n_clusters}")
 print(f"Valid clusters (size >= {args.min_cluster_size}): {len(cluster_df)}")
-for g in all_groups:
-    enriched_label = f'{g}-enriched'
-    count = sum(cluster_df['enrichment'] == enriched_label)
-    print(f"  - {enriched_label}: {count}")
+if args.comparison_mode == 'per-sample':
+    for s in sample_labels:
+        enriched_label = f'{s}-enriched'
+        count = sum(cluster_df['enrichment'] == enriched_label)
+        print(f"  - {enriched_label}: {count}")
+else:
+    for g in all_groups:
+        enriched_label = f'{g}-enriched'
+        count = sum(cluster_df['enrichment'] == enriched_label)
+        print(f"  - {enriched_label}: {count}")
 print(f"  - mixed: {sum(cluster_df['enrichment'] == 'mixed')}")
 print(f"\nOutput files:")
 print(f"  - {analysis_file}")
