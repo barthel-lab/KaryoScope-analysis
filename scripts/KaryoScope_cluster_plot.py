@@ -5,7 +5,17 @@ KaryoScope Cluster Representative Plotting
 Plots representative reads from each cluster with sample and cluster annotations.
 Designed to work with outputs from KaryoScope_cluster_analysis.py.
 
-Usage:
+Usage with auto-discovery (recommended):
+  python KaryoScope_cluster_plot.py \
+    --cluster-analysis-prefix tmp/NHA_repeat_region_composite \
+    --input-bed-prefix results \
+    --database KS_human_CHM13 \
+    --colors resources/KS_human_CHM13 \
+    --featuresets repeat,region \
+    --smoothness smoothed \
+    --output cluster_representatives.svg
+
+Usage with explicit BED paths:
   python KaryoScope_cluster_plot.py \
     --cluster-analysis-prefix test_aligned \
     --bed /path/to/pre/sample.bed /path/to/post/sample.bed \
@@ -16,8 +26,9 @@ Usage:
 With top-clusters filtering (select top N per category):
   python KaryoScope_cluster_plot.py \
     --cluster-analysis-prefix test_aligned \
-    --bed /path/to/pre/sample.bed /path/to/post/sample.bed \
-    --colors /path/to/KS_human_CHM13 \
+    --input-bed-prefix results \
+    --database KS_human_CHM13 \
+    --colors resources/KS_human_CHM13 \
     --featuresets region,subtelomeric \
     --output cluster_representatives.svg \
     --top-clusters "post:4,pre:2,mixed:3"
@@ -338,6 +349,10 @@ def parse_bed_paths(bed_files):
 def load_color_files(colors_dir, database, featuresets):
     """Load color mappings for featuresets.
 
+    Color files contain features with _specific suffix (e.g., active_specific).
+    For smoothed BED files, features don't have the suffix (e.g., active).
+    This function creates mappings for both versions.
+
     Returns:
         tuple: (featureset_colors, featureset_color_order)
     """
@@ -367,6 +382,11 @@ def load_color_files(colors_dir, database, featuresets):
                         continue
                     featureset_colors[fs][feature] = (color, 1.0)
                     featureset_color_order[fs].append(feature)
+
+                    # Also add mapping without _specific suffix for smoothed BED files
+                    if feature.endswith('_specific'):
+                        base_feature = feature[:-9]  # Remove '_specific'
+                        featureset_colors[fs][base_feature] = (color, 1.0)
 
         print(f"  {fs}: {len(featureset_color_order[fs])} colors")
 
@@ -504,95 +524,114 @@ def generate_sample_colors(samples, existing_colors=None):
 # Helper Functions: Drawing Components
 # =============================================================================
 
-def compute_dendrogram_order(feature_matrix_data, cluster_reads):
-    """Compute dendrogram ordering for reads using original pairwise distances.
+def compute_cluster_dendrogram_order(feature_matrix_data, cluster_reads):
+    """Order clusters using pre-computed cluster-level linkage from cluster_analysis.py.
 
-    Uses the same linkage method as cluster_analysis.py to ensure consistent
-    dendrogram distances between circular dendrogram and cluster plot.
+    Uses the cluster-level dendrogram (based on cluster centroid distances) to order
+    clusters, keeping all reads within each cluster grouped together.
 
     Returns:
-        tuple: (reordered_cluster_reads, dendro_data, read_to_original_cluster, read_to_original_enrichment)
-               dendro_data contains 'linkage' and 'dist_matrix' for manual drawing
+        tuple: (reordered_cluster_reads, cluster_dendro_data, read_to_original_cluster, read_to_original_enrichment)
+               cluster_dendro_data contains 'linkage' and 'cluster_order' for drawing cluster dendrogram
     """
-    from scipy.cluster.hierarchy import linkage, leaves_list, optimal_leaf_ordering
-    from scipy.spatial.distance import pdist, squareform
+    from scipy.cluster.hierarchy import leaves_list, optimal_leaf_ordering
+    from scipy.spatial.distance import squareform
 
     read_to_original_cluster = {}
     read_to_original_enrichment = {}
 
-    # Get all displayed reads
-    all_displayed_reads = []
-    read_to_sample_map = {}
-
+    # Build read mappings
     for cluster_id, data in cluster_reads.items():
         for read, sample in data['reads']:
-            all_displayed_reads.append(read)
-            read_to_sample_map[read] = sample
             read_to_original_cluster[read] = cluster_id
             read_to_original_enrichment[read] = data['enrichment']
 
-    if len(all_displayed_reads) <= 2:
+    # Check if cluster-level linkage is available
+    if 'cluster_linkage' not in feature_matrix_data:
+        print("  No cluster-level linkage found in feature matrix")
         return cluster_reads, None, read_to_original_cluster, read_to_original_enrichment
 
     try:
-        full_matrix = feature_matrix_data['adj_matrix']
-        full_read_names = list(feature_matrix_data['read_names'])
+        cluster_linkage = feature_matrix_data['cluster_linkage']
+        cluster_ids_ordered = list(feature_matrix_data['cluster_ids_ordered'])
 
-        # Get linkage method from cluster_analysis.py (default to 'ward' for consistency)
-        linkage_method = feature_matrix_data.get('linkage_method', 'ward')
-        if hasattr(linkage_method, 'item'):
-            linkage_method = linkage_method.item()
-        linkage_method = str(linkage_method)
+        # Convert to int if needed
+        cluster_ids_ordered = [int(c) for c in cluster_ids_ordered]
 
-        read_to_idx = {r: i for i, r in enumerate(full_read_names)}
-        subset_indices = [read_to_idx[r] for r in all_displayed_reads if r in read_to_idx]
-        subset_reads = [r for r in all_displayed_reads if r in read_to_idx]
+        # Get displayed cluster IDs
+        displayed_cluster_ids = set(cluster_reads.keys())
 
-        if len(subset_indices) <= 2:
+        # Find which clusters from the original linkage are being displayed
+        # Map original cluster indices to displayed ones
+        original_to_displayed_idx = {}
+        displayed_clusters_in_order = []
+        for i, cid in enumerate(cluster_ids_ordered):
+            if cid in displayed_cluster_ids:
+                original_to_displayed_idx[i] = len(displayed_clusters_in_order)
+                displayed_clusters_in_order.append(cid)
+
+        if len(displayed_clusters_in_order) <= 1:
+            print(f"  Only {len(displayed_clusters_in_order)} cluster(s) to display, skipping dendrogram")
             return cluster_reads, None, read_to_original_cluster, read_to_original_enrichment
 
-        # Compute pairwise distances on FULL matrix first
-        full_distances = pdist(full_matrix, metric='euclidean')
-        full_dist_square = squareform(full_distances)
+        # Extract subset linkage for displayed clusters
+        # We need to recompute linkage on the subset of cluster centroids
+        cluster_centroids = feature_matrix_data['cluster_centroids']
 
-        # Extract the subset distance matrix (preserves original distances)
-        subset_dist_square = full_dist_square[np.ix_(subset_indices, subset_indices)]
-        subset_distances = squareform(subset_dist_square)
+        # Get indices of displayed clusters in original centroid array
+        displayed_centroid_indices = [cluster_ids_ordered.index(cid) for cid in displayed_clusters_in_order]
+        subset_centroids = cluster_centroids[displayed_centroid_indices]
 
-        # Compute linkage on subset using the SAME method as cluster_analysis.py
-        print(f"  Using linkage method: {linkage_method}")
-        subset_linkage = linkage(subset_distances, method=linkage_method)
+        # Compute pairwise distances between displayed cluster centroids
+        from scipy.spatial.distance import pdist
+        from scipy.cluster.hierarchy import linkage
 
-        # Apply optimal leaf ordering to rotate branches and minimize crossings
-        # This reorders leaves so that adjacent leaves are most similar
-        optimized_linkage = optimal_leaf_ordering(subset_linkage, subset_distances)
+        if len(subset_centroids) > 1:
+            subset_distances = pdist(subset_centroids, metric='euclidean')
 
-        # Get leaf order from optimized linkage
-        leaf_order = leaves_list(optimized_linkage)
+            # Get linkage method
+            linkage_method = feature_matrix_data.get('linkage_method', 'ward')
+            if hasattr(linkage_method, 'item'):
+                linkage_method = linkage_method.item()
+            linkage_method = str(linkage_method)
 
-        # Reorder reads according to optimal ordering
-        reordered_reads = [subset_reads[i] for i in leaf_order]
+            # Compute linkage on subset
+            subset_linkage = linkage(subset_distances, method=linkage_method)
 
-        # Store data for manual dendrogram drawing (use optimized linkage)
-        dendro_data = {
-            'linkage': optimized_linkage,
-            'dist_matrix': subset_dist_square,
-            'reads': reordered_reads,
-            'leaf_order': leaf_order
-        }
+            # Apply optimal leaf ordering
+            optimized_linkage = optimal_leaf_ordering(subset_linkage, subset_distances)
 
-        # Rebuild cluster_reads with reordered reads
+            # Get leaf order
+            leaf_order = leaves_list(optimized_linkage)
+
+            # Reorder clusters
+            reordered_cluster_ids = [displayed_clusters_in_order[i] for i in leaf_order]
+
+            print(f"  Ordered {len(reordered_cluster_ids)} clusters using cluster-level dendrogram")
+        else:
+            reordered_cluster_ids = displayed_clusters_in_order
+            optimized_linkage = None
+            print(f"  Single cluster, no reordering needed")
+
+        # Rebuild cluster_reads in dendrogram order
         cluster_reads_reordered = OrderedDict()
-        cluster_reads_reordered['all'] = {
-            'enrichment': 'mixed',
-            'reads': [(r, read_to_sample_map[r]) for r in reordered_reads]
+        for cid in reordered_cluster_ids:
+            cluster_reads_reordered[cid] = cluster_reads[cid]
+
+        # Store data for drawing cluster dendrogram
+        # leaf_order maps: display_position -> original_linkage_index
+        # So leaf_order[0] is the linkage index of the leftmost cluster
+        cluster_dendro_data = {
+            'linkage': optimized_linkage,
+            'cluster_order': reordered_cluster_ids,
+            'n_clusters': len(reordered_cluster_ids),
+            'leaf_order': leaf_order  # Maps display position to linkage index
         }
 
-        print(f"  Reordered {len(reordered_reads)} reads according to dendrogram (optimal leaf ordering)")
-        return cluster_reads_reordered, dendro_data, read_to_original_cluster, read_to_original_enrichment
+        return cluster_reads_reordered, cluster_dendro_data, read_to_original_cluster, read_to_original_enrichment
 
     except Exception as e:
-        print(f"  Warning: Could not compute dendrogram order: {e}")
+        print(f"  Warning: Could not compute cluster dendrogram order: {e}")
         import traceback
         traceback.print_exc()
         return cluster_reads, None, read_to_original_cluster, read_to_original_enrichment
@@ -714,9 +753,148 @@ def draw_dendrogram(d, dendro_data, read_x_positions, displayed_reads,
     print(f"  Drew dendrogram for {n_leaves} reads ({n_branches} branches)")
 
 
+def draw_cluster_dendrogram(d, cluster_dendro_data, cluster_x_start, cluster_x_end,
+                            top_margin, dendrogram_height, background_color):
+    """Draw cluster-level dendrogram using linkage matrix based on cluster centroids.
+
+    This draws a dendrogram showing how clusters relate to each other,
+    with branches connecting to the center of each cluster's read group.
+
+    Key insight: The linkage matrix indices refer to the ORIGINAL order before
+    optimal_leaf_ordering. We need to map these to DISPLAY positions using leaf_order.
+    leaf_order[display_pos] = original_linkage_index
+    """
+    if cluster_dendro_data is None or cluster_dendro_data.get('linkage') is None:
+        return
+
+    linkage_matrix = cluster_dendro_data['linkage']
+    cluster_order = cluster_dendro_data['cluster_order']  # Reordered cluster IDs for display
+    leaf_order = cluster_dendro_data.get('leaf_order')  # Maps display_pos -> linkage_index
+    n_clusters = len(cluster_order)
+
+    if n_clusters <= 1 or len(linkage_matrix) == 0:
+        return
+
+    # Base Y position (bottom of dendrogram, where cluster leaves attach)
+    dendro_base_y = top_margin + 20
+
+    # Find max distance in linkage for scaling
+    max_distance = linkage_matrix[:, 2].max() if len(linkage_matrix) > 0 else 1
+    max_distance = max(max_distance, 1)
+
+    def distance_to_y(dist):
+        """Convert distance to Y pixel coordinate (higher distance = higher up)."""
+        return dendro_base_y - (dist / max_distance) * (dendrogram_height - 15)
+
+    line_color = '#AAAAAA' if background_color == 'black' else '#444444'
+
+    # Build mapping from linkage index to display x-center
+    # cluster_order[i] is the cluster_id at display position i
+    # leaf_order[i] is the linkage index that should be at display position i
+    # So: linkage_index_to_display_pos[leaf_order[i]] = i
+    linkage_idx_to_display_pos = {}
+    if leaf_order is not None:
+        for display_pos, linkage_idx in enumerate(leaf_order):
+            linkage_idx_to_display_pos[linkage_idx] = display_pos
+    else:
+        # No reordering - identity mapping
+        for i in range(n_clusters):
+            linkage_idx_to_display_pos[i] = i
+
+    # Compute x center for each display position
+    display_pos_x_center = {}
+    for display_pos, cid in enumerate(cluster_order):
+        x_start = cluster_x_start.get(cid, 0)
+        x_end = cluster_x_end.get(cid, 0)
+        display_pos_x_center[display_pos] = (x_start + x_end) / 2
+
+    # Recursively compute the x-center for each node based on ALL leaves underneath
+    # Node indices in linkage: 0 to n-1 are leaves, n to 2n-2 are internal nodes
+    node_x_center = {}
+    node_height = {}
+    node_display_positions = {}  # Track which display positions are under each node
+
+    def get_node_info(node_idx):
+        """Recursively get x-center, height, and display positions for a node."""
+        if node_idx in node_x_center:
+            return node_x_center[node_idx], node_height[node_idx], node_display_positions[node_idx]
+
+        if node_idx < n_clusters:
+            # Leaf node - map linkage index to display position
+            display_pos = linkage_idx_to_display_pos.get(node_idx)
+            if display_pos is None:
+                return None, 0, []
+            x = display_pos_x_center.get(display_pos, 0)
+            node_x_center[node_idx] = x
+            node_height[node_idx] = 0
+            node_display_positions[node_idx] = [display_pos]
+            return x, 0, [display_pos]
+
+        # Internal node - get from linkage matrix
+        row_idx = node_idx - n_clusters
+        if row_idx >= len(linkage_matrix):
+            return None, 0, []
+
+        idx1, idx2, dist, count = linkage_matrix[row_idx]
+        idx1, idx2 = int(idx1), int(idx2)
+
+        x1, h1, positions1 = get_node_info(idx1)
+        x2, h2, positions2 = get_node_info(idx2)
+
+        if x1 is None or x2 is None:
+            return None, dist, []
+
+        # Combine all display positions and compute center as mean of their x-positions
+        all_positions = positions1 + positions2
+        x_center = sum(display_pos_x_center[pos] for pos in all_positions) / len(all_positions)
+
+        node_x_center[node_idx] = x_center
+        node_height[node_idx] = dist
+        node_display_positions[node_idx] = all_positions
+
+        return x_center, dist, all_positions
+
+    # First pass: compute all node info
+    root_idx = n_clusters + len(linkage_matrix) - 1
+    get_node_info(root_idx)
+
+    # Second pass: draw the dendrogram
+    # Draw vertical lines from each child up to the merge height,
+    # then a horizontal line connecting them at the merge height
+    for row_idx, (idx1, idx2, dist, count) in enumerate(linkage_matrix):
+        idx1, idx2 = int(idx1), int(idx2)
+
+        x1 = node_x_center.get(idx1)
+        x2 = node_x_center.get(idx2)
+        h1 = node_height.get(idx1, 0)
+        h2 = node_height.get(idx2, 0)
+
+        if x1 is None or x2 is None:
+            continue
+
+        # Y coordinates
+        y_bottom_left = distance_to_y(h1)
+        y_bottom_right = distance_to_y(h2)
+        y_top = distance_to_y(dist)
+
+        # Draw vertical lines from each child's x-position up to merge height
+        # Then horizontal line connecting at merge height
+        d.append(draw.Line(x1, y_bottom_left, x1, y_top, stroke=line_color, stroke_width=2))
+        d.append(draw.Line(x2, y_bottom_right, x2, y_top, stroke=line_color, stroke_width=2))
+        d.append(draw.Line(x1, y_top, x2, y_top, stroke=line_color, stroke_width=2))
+
+    n_branches = len(linkage_matrix)
+    print(f"  Drew cluster dendrogram for {n_clusters} clusters ({n_branches} branches)")
+
+
 def draw_cluster_brackets(d, cluster_reads, cluster_x_start, cluster_x_end,
-                          enrichment_colors, top_margin, text_color):
-    """Draw cluster brackets and labels."""
+                          enrichment_colors, read_heights, label_height, text_color):
+    """Draw cluster brackets and labels below the feature bars (inverted, pointing up).
+
+    Args:
+        read_heights: Dict of read -> (min_y, max_y, x_start, total_width) for y-positioning
+        label_height: Height of rotated featureset labels below bars
+    """
     for cluster_id, data in cluster_reads.items():
         if cluster_id == 'all':  # Skip when in dendrogram mode
             continue
@@ -726,22 +904,34 @@ def draw_cluster_brackets(d, cluster_reads, cluster_x_start, cluster_x_end,
         enrichment = data['enrichment']
         color = enrichment_colors.get(enrichment, '#999999')
 
-        bracket_y = top_margin - 10
-        d.append(draw.Line(x_start, bracket_y, x_end, bracket_y, stroke=color, stroke_width=3))
-        d.append(draw.Line(x_start, bracket_y, x_start, bracket_y + 8, stroke=color, stroke_width=2))
-        d.append(draw.Line(x_end, bracket_y, x_end, bracket_y + 8, stroke=color, stroke_width=2))
+        # Find the max_y of the longest read in this cluster
+        cluster_max_y = 0
+        for read, sample in data['reads']:
+            if read in read_heights:
+                _, max_y, _, _ = read_heights[read]
+                cluster_max_y = max(cluster_max_y, max_y)
 
+        # Position bracket below this cluster's feature labels
+        # Labels start at max_y + 5 and extend label_height pixels down
+        bracket_y = cluster_max_y + 5 + label_height
+
+        # Draw inverted bracket (horizontal line at bottom, vertical lines pointing up)
+        d.append(draw.Line(x_start, bracket_y, x_end, bracket_y, stroke=color, stroke_width=3))
+        d.append(draw.Line(x_start, bracket_y, x_start, bracket_y - 8, stroke=color, stroke_width=2))
+        d.append(draw.Line(x_end, bracket_y, x_end, bracket_y - 8, stroke=color, stroke_width=2))
+
+        # Labels below the bracket
         label_x = (x_start + x_end) / 2
         d.append(draw.Text(
-            f"Cluster {cluster_id}",
-            font_size=10, x=label_x, y=bracket_y - 15,
+            f"c{cluster_id}",
+            font_size=10, x=label_x, y=bracket_y + 15,
             fill=color, font_family='sans-serif',
             text_anchor='middle', font_weight='bold'
         ))
 
         d.append(draw.Text(
             enrichment,
-            font_size=8, x=label_x, y=bracket_y - 3,
+            font_size=8, x=label_x, y=bracket_y + 27,
             fill=color, font_family='sans-serif', text_anchor='middle'
         ))
 
@@ -871,13 +1061,16 @@ def draw_top_legends(d, sample_colors, cluster_colors, read_to_original_cluster,
         fill=text_color, font_family='sans-serif', font_weight='bold'
     ))
 
-    for i, (sample, color) in enumerate(sample_colors.items()):
-        item_x = legend_x + 60 + i * 100
+    # Calculate spacing based on sample name lengths (font_size=9, ~5.5px per char)
+    item_x = legend_x + 60
+    for sample, color in sample_colors.items():
         d.append(draw.Rectangle(item_x, current_y - 8, 12, 12, fill=color))
         d.append(draw.Text(
             sample, font_size=9, x=item_x + 16, y=current_y,
             fill=text_color, font_family='sans-serif'
         ))
+        # Move to next position: box(12) + gap(4) + text width + padding(15)
+        item_x += 12 + 4 + len(sample) * 5.5 + 15
 
     # --- Cluster legend (row 2) ---
     current_y += row_height
@@ -1004,8 +1197,13 @@ def parse_args():
                         help="Output SVG file path")
 
     # Data sources
-    parser.add_argument("--bed", dest="bed_files", required=True, nargs='+',
-                        help="Full paths to BED files (same files used in cluster_analysis.py)")
+    parser.add_argument("--bed", dest="bed_files", nargs='+',
+                        help="Full paths to BED files. If not provided, uses --input-bed-prefix to auto-discover.")
+    parser.add_argument("--input-bed-prefix", dest="input_bed_prefix",
+                        help="Base directory for auto-discovery of BED files (e.g., 'results'). "
+                             "Structure: {prefix}/{sample}/telogator/1/KaryoScope/{database}/")
+    parser.add_argument("--database", dest="database",
+                        help="Database name (e.g., KS_human_CHM13). Auto-detected from --bed paths if not provided.")
     parser.add_argument("--colors", dest="colors_dir", required=True,
                         help="Full path to colors database directory (contains {database}.{featureset}.colors.txt files)")
     parser.add_argument("--featuresets", required=True,
@@ -1045,6 +1243,8 @@ def parse_args():
     # Mode options
     parser.add_argument("--hide-brackets", dest="hide_brackets", action="store_true",
                         help="Hide cluster brackets and labels (cleaner dendrogram view)")
+    parser.add_argument("--no-reorder", dest="no_reorder", action="store_true",
+                        help="Disable dendrogram reordering - keep reads grouped by cluster")
     parser.add_argument("--max-reps-per-cluster", dest="max_reps", type=int, default=3,
                         help="Maximum representatives per cluster (default: 3)")
 
@@ -1067,11 +1267,48 @@ def main():
         sys.exit(1)
 
     # --- Parse BED paths to get sample directories and database ---
-    sample_bed_paths, database = parse_bed_paths(args.bed_files)
+    if args.bed_files:
+        # Use explicit BED file paths
+        sample_bed_paths, database = parse_bed_paths(args.bed_files)
+        if not database:
+            sys.stderr.write("Error: Could not determine database from BED file paths\n")
+            sys.exit(1)
+    elif args.input_bed_prefix:
+        # Auto-discover from sample metadata + input prefix
+        if not args.database:
+            sys.stderr.write("Error: --database is required when using --input-bed-prefix\n")
+            sys.exit(1)
+        database = args.database
 
-    if not database:
-        sys.stderr.write("Error: Could not determine database from BED file paths\n")
+        # Load sample names from metadata
+        if not os.path.exists(sample_metadata_file):
+            sys.stderr.write(f"Error: Sample metadata file not found: {sample_metadata_file}\n")
+            sys.exit(1)
+
+        meta_df = pd.read_csv(sample_metadata_file, sep='\t')
+        sample_names = meta_df['sample'].tolist()
+
+        # Build sample_bed_paths from input prefix
+        sample_bed_paths = {}
+        print(f"\nAuto-discovering BED paths from --input-bed-prefix...")
+        for sample in sample_names:
+            bed_dir = os.path.join(args.input_bed_prefix, sample, 'telogator', '1', 'KaryoScope', database)
+            if os.path.exists(bed_dir):
+                sample_bed_paths[sample] = bed_dir
+                print(f"  {sample} -> {bed_dir}")
+            else:
+                print(f"  Warning: Directory not found for {sample}: {bed_dir}")
+
+        if not sample_bed_paths:
+            sys.stderr.write("Error: No valid BED directories found\n")
+            sys.exit(1)
+    else:
+        sys.stderr.write("Error: Either --bed or --input-bed-prefix is required\n")
         sys.exit(1)
+
+    # Override database if explicitly provided
+    if args.database:
+        database = args.database
 
     # --- Setup ---
     background_color = args.background_color
@@ -1155,16 +1392,16 @@ def main():
     # Generate enrichment colors from group colors
     enrichment_colors = get_enrichment_colors(group_colors, unique_enrichments)
 
-    # --- Compute dendrogram order if feature matrix provided ---
-    dendrogram_computed = False
-    dendro_result = None
+    # --- Compute cluster-level dendrogram order if feature matrix provided ---
+    cluster_dendro_data = None
     read_to_original_cluster = {}
     read_to_original_enrichment = {}
 
-    if feature_matrix_data is not None:
-        cluster_reads, dendro_result, read_to_original_cluster, read_to_original_enrichment = \
-            compute_dendrogram_order(feature_matrix_data, cluster_reads)
-        dendrogram_computed = dendro_result is not None
+    if feature_matrix_data is not None and not args.no_reorder:
+        cluster_reads, cluster_dendro_data, read_to_original_cluster, read_to_original_enrichment = \
+            compute_cluster_dendrogram_order(feature_matrix_data, cluster_reads)
+    elif args.no_reorder:
+        print("  Dendrogram reordering disabled (--no-reorder)")
 
     # If not reordered, build mappings
     if not read_to_original_cluster:
@@ -1180,7 +1417,8 @@ def main():
     # --- Calculate positions ---
     group_width = (args.bar_width * num_featuresets) + (args.bar_spacing * (num_featuresets - 1))
     left_margin = 150
-    dendrogram_height = 100 if feature_matrix_data is not None else 0
+    # Only show dendrogram space if we have cluster dendrogram data
+    dendrogram_height = 100 if cluster_dendro_data is not None else 0
     bracket_height = 0 if args.hide_brackets else 50
     top_margin = 100 + dendrogram_height + bracket_height
 
@@ -1290,21 +1528,18 @@ def main():
     d.append(draw.Rectangle(0, 0, image_width, image_height, fill=background_color))
 
     # --- Draw components ---
-    # Dendrogram header
-    if dendrogram_computed and dendro_result is not None:
-        displayed_reads = []
-        for cluster_id, data in cluster_reads.items():
-            for read, sample in data['reads']:
-                if read in read_x_positions:
-                    displayed_reads.append(read)
+    # Cluster-level dendrogram header
+    if cluster_dendro_data is not None:
+        draw_cluster_dendrogram(d, cluster_dendro_data, cluster_x_start, cluster_x_end,
+                                top_margin, dendrogram_height, background_color)
 
-        draw_dendrogram(d, dendro_result, read_x_positions, displayed_reads,
-                       group_width, top_margin, dendrogram_height, background_color)
-
-    # Cluster brackets
+    # Cluster brackets - positioned below feature labels per cluster
+    # Calculate label height: longest featureset name × font_size (~4.5px per char for font_size=6)
+    longest_label = max((len(fs_display_names.get(fs, fs)) for fs in featuresets), default=10)
+    label_height = longest_label * 4.5  # font_size=6, tight fit
     if not args.hide_brackets:
         draw_cluster_brackets(d, cluster_reads, cluster_x_start, cluster_x_end,
-                             enrichment_colors, top_margin, text_color)
+                             enrichment_colors, read_heights, label_height, text_color)
 
     # Annotation bars
     draw_annotation_bars(d, cluster_reads, read_x_positions, read_to_original_cluster,
