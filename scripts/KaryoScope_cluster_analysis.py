@@ -1213,6 +1213,47 @@ for cluster_id in range(1, n_clusters + 1):
 
     cluster_analysis.append(cluster_record)
 
+# --- Compute cluster-level dendrogram ---
+# This creates a dendrogram showing how clusters relate to each other
+# based on their centroid feature vectors
+print(f"\n--- Computing cluster-level dendrogram ---")
+
+from scipy.cluster.hierarchy import linkage as scipy_linkage
+from scipy.spatial.distance import pdist
+
+# Get unique cluster IDs (excluding noise cluster -1)
+cluster_ids_ordered = sorted([c for c in set(cluster_labels) if c != -1])
+
+# Compute cluster centroids efficiently
+# Pre-compute cluster masks to avoid repeated boolean operations
+if len(cluster_ids_ordered) > 0:
+    n_clusters_valid = len(cluster_ids_ordered)
+    n_features = adj_matrix.shape[1]
+
+    # Pre-compute indices for each cluster (faster than repeated boolean masking)
+    cluster_indices = {cid: np.where(cluster_labels == cid)[0] for cid in cluster_ids_ordered}
+
+    # Compute centroids using pre-computed indices
+    cluster_centroids = np.zeros((n_clusters_valid, n_features), dtype=adj_matrix.dtype)
+    for i, cid in enumerate(cluster_ids_ordered):
+        indices = cluster_indices[cid]
+        cluster_centroids[i] = adj_matrix[indices].mean(axis=0)
+
+    print(f"  Computed centroids for {len(cluster_ids_ordered)} clusters")
+else:
+    cluster_centroids = np.array([])
+    print(f"  No valid clusters for centroid computation")
+
+# Compute pairwise distances between cluster centroids
+if len(cluster_centroids) > 1:
+    cluster_distances = pdist(cluster_centroids, metric='euclidean')
+    # Compute hierarchical linkage on clusters
+    cluster_linkage = scipy_linkage(cluster_distances, method=args.linkage_method)
+    print(f"  Computed cluster-level linkage using '{args.linkage_method}' method")
+else:
+    cluster_linkage = None
+    print(f"  Only 1 cluster, skipping linkage computation")
+
 # Sort by enrichment type and p-value
 cluster_df = pd.DataFrame(cluster_analysis)
 cluster_df = cluster_df.sort_values(['enrichment', 'p_value'])
@@ -1286,15 +1327,23 @@ assignments_file = f"{args.output_prefix}.read_assignments.tsv"
 assignments.to_csv(assignments_file, sep='\t', index=False)
 print(f"  Saved read assignments to: {assignments_file}")
 
-# Save feature matrix data for cluster_plot.py (for computing subset dendrograms)
-# Save linkage method so cluster_plot can use the same method for consistent dendrograms
+# Save feature matrix data for cluster_plot.py
+# Includes cluster-level linkage for drawing cluster dendrograms
 matrix_file = f"{args.output_prefix}.feature_matrix.npz"
-np.savez(matrix_file,
-         adj_matrix=adj_matrix,
-         read_names=np.array(read_names),
-         cluster_labels=cluster_labels,
-         linkage_method=args.linkage_method)
+save_dict = {
+    'adj_matrix': adj_matrix,
+    'read_names': np.array(read_names),
+    'cluster_labels': cluster_labels,
+    'linkage_method': args.linkage_method,
+    'cluster_ids_ordered': np.array(cluster_ids_ordered),
+    'cluster_centroids': cluster_centroids,
+}
+if cluster_linkage is not None:
+    save_dict['cluster_linkage'] = cluster_linkage
+np.savez(matrix_file, **save_dict)
 print(f"  Saved feature matrix to: {matrix_file}")
+if cluster_linkage is not None:
+    print(f"    Includes cluster-level linkage ({len(cluster_ids_ordered)} clusters)")
 
 # Save sample metadata for cluster_plot.py
 metadata_out_file = f"{args.output_prefix}.sample_metadata.tsv"
@@ -1617,6 +1666,9 @@ if args.plot_umap and len(read_names) > 10:
                                fontsize=8, fontweight='bold', ha='center', va='center',
                                bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7, edgecolor='gray'))
 
+        # Add enrichment legend to bottom-left panel
+        axes[1, 0].legend(handles=enrich_patches, loc='upper right')
+
         # 4. Bottom-right: Cluster numbers only (no points, just labels for clarity)
         axes[1, 1].scatter(embedding[:, 0], embedding[:, 1], c=point_colors_cluster, s=10, alpha=0.3)
         axes[1, 1].set_title("UMAP - Cluster Labels")
@@ -1636,6 +1688,9 @@ if args.plot_umap and len(read_names) > 10:
                                fontsize=7, ha='center', va='center',
                                bbox=dict(boxstyle='round,pad=0.2', facecolor=enrichment_colors.get(enrich, '#CCCCCC'),
                                         alpha=0.8, edgecolor='gray'))
+
+        # Add enrichment legend to bottom-right panel
+        axes[1, 1].legend(handles=enrich_patches, loc='upper right')
 
         plt.tight_layout()
         umap_file = f"{args.output_prefix}.umap.pdf"
