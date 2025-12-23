@@ -473,14 +473,19 @@ def calculate_enrichment_per_sample(cluster_samples, sample_totals):
         p_values[sample] = p_val
         odds_ratios[sample] = odds
 
-    # Find most significant sample
-    min_p_sample = min(p_values.keys(), key=lambda s: p_values[s])
-    min_p = p_values[min_p_sample]
+    # Find most significant ENRICHED sample (p < 0.05 AND odds > 1)
+    # Bug fix: previously picked min p-value without checking if enriched or depleted
+    enriched_samples = {s: p for s, p in p_values.items() if p < 0.05 and odds_ratios[s] > 1}
 
-    # Enrichment label
-    if min_p < 0.05:
+    if enriched_samples:
+        # Pick the most significant enriched sample
+        min_p_sample = min(enriched_samples.keys(), key=lambda s: enriched_samples[s])
+        min_p = enriched_samples[min_p_sample]
         enrichment = f"{min_p_sample}-enriched"
     else:
+        # No significant enrichment - find min p-value for reporting
+        min_p_sample = min(p_values.keys(), key=lambda s: p_values[s])
+        min_p = p_values[min_p_sample]
         enrichment = "mixed"
 
     return {
@@ -636,22 +641,50 @@ read_to_sample = in_data.groupby('read')['sample'].first().to_dict()
 print(f"\nTotal records: {len(in_data):,}")
 print(f"Unique reads: {in_data['read'].nunique():,}")
 
-# Calculate read lengths
+# Calculate feature lengths
 in_data['length'] = in_data['end'] - in_data['start']
-read_lengths = in_data.groupby('read').agg({'start': 'min', 'end': 'max'})
-read_lengths['read_length'] = read_lengths['end'] - read_lengths['start']
-read_length_dict = read_lengths['read_length'].to_dict()
 
-# --- Filter by minimum read length ---
+# --- Filter excluded features BEFORE read length filtering ---
+# This ensures read length is calculated on remaining annotated sequence
+if args.exclude_features:
+    exclude_set = set(f.strip() for f in args.exclude_features.split(','))
+    print(f"\n--- Filtering excluded features ---")
+    print(f"  Excluding (component match): {sorted(exclude_set)}")
+    before_count = len(in_data)
+    before_reads = in_data['read'].nunique()
+
+    # Component matching: filter if any colon-separated part matches exclude list
+    def has_excluded_component(feature):
+        components = feature.split(':')
+        return any(comp in exclude_set for comp in components)
+
+    mask = in_data['feature'].apply(has_excluded_component)
+    in_data = in_data[~mask]
+
+    # Remove reads that have no remaining features after exclusion
+    reads_with_features = set(in_data['read'].unique())
+    read_to_sample = {r: s for r, s in read_to_sample.items() if r in reads_with_features}
+
+    print(f"  Records before filter: {before_count:,}")
+    print(f"  Records after filter: {len(in_data):,}")
+    print(f"  Reads before filter: {before_reads:,}")
+    print(f"  Reads after filter: {len(reads_with_features):,}")
+
+# Calculate annotated length per read (sum of remaining feature lengths)
+# This is the total annotated sequence, not the span from start to end
+read_lengths = in_data.groupby('read')['length'].sum()
+read_length_dict = read_lengths.to_dict()
+
+# --- Filter by minimum annotated length ---
 if args.min_read_length > 0:
-    print(f"\n--- Filtering reads by length ---")
+    print(f"\n--- Filtering reads by annotated length ---")
     reads_before = in_data['read'].nunique()
     valid_reads = set(r for r, l in read_length_dict.items() if l >= args.min_read_length)
     in_data = in_data[in_data['read'].isin(valid_reads)]
     read_to_sample = {r: s for r, s in read_to_sample.items() if r in valid_reads}
     read_length_dict = {r: l for r, l in read_length_dict.items() if r in valid_reads}
     reads_after = in_data['read'].nunique()
-    print(f"  Minimum read length: {args.min_read_length:,} bp")
+    print(f"  Minimum annotated length: {args.min_read_length:,} bp")
     print(f"  Reads before filter: {reads_before:,}")
     print(f"  Reads after filter: {reads_after:,}")
     print(f"  Reads removed: {reads_before - reads_after:,}")
@@ -712,23 +745,6 @@ for sample in sample_labels:
         # Use group color
         group = sample_to_group.get(sample, sample)
         sample_colors[sample] = group_colors.get(group, '#999999')
-
-# --- Filter excluded features ---
-if args.exclude_features:
-    exclude_set = set(f.strip() for f in args.exclude_features.split(','))
-    print(f"\n--- Filtering excluded features ---")
-    print(f"  Excluding (component match): {sorted(exclude_set)}")
-    before_count = len(in_data)
-
-    # Component matching: filter if any colon-separated part matches exclude list
-    def has_excluded_component(feature):
-        components = feature.split(':')
-        return any(comp in exclude_set for comp in components)
-
-    mask = in_data['feature'].apply(has_excluded_component)
-    in_data = in_data[~mask]
-    print(f"  Records before filter: {before_count:,}")
-    print(f"  Records after filter: {len(in_data):,}")
 
 # --- Collapse small features ---
 small_len_thresh = in_data['length'].quantile(args.small_quantile)
