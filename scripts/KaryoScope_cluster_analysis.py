@@ -60,21 +60,22 @@ parser.add_argument("--n-clusters", dest="n_clusters", type=int, default=None,
                     help="Number of clusters to cut tree into (default: auto-determine)")
 parser.add_argument("--min-k", dest="min_k", type=int, default=20,
                     help="Minimum number of clusters to test during auto-detection (default: 20)")
-parser.add_argument("--max-k", dest="max_k", type=int, default=100,
-                    help="Maximum number of clusters to test during auto-detection (default: 100)")
-parser.add_argument("--k-selection", dest="k_selection", default="composite",
+parser.add_argument("--max-k", dest="max_k", type=int, default=200,
+                    help="Maximum number of clusters to test during auto-detection (default: 200)")
+parser.add_argument("--k-selection", dest="k_selection", default="composite-knee",
                     choices=["composite", "silhouette", "calinski", "composite-knee"],
                     help="Metric for selecting optimal k:\n"
-                         "  composite: max weighted combination of silhouette + enrichment (default)\n"
+                         "  composite: max weighted combination of silhouette + enrichment\n"
                          "  silhouette: cluster cohesion (favors fewer, tighter clusters)\n"
                          "  calinski: Calinski-Harabasz index\n"
-                         "  composite-knee: knee/elbow of composite score curve (diminishing returns)")
+                         "  composite-knee: knee/elbow of composite score curve (default, diminishing returns)")
 parser.add_argument("--min-cluster-size", dest="min_cluster_size", type=int, default=3,
                     help="Minimum cluster size to consider (default: 3)")
+parser.add_argument("--davies-bouldin", dest="compute_davies_bouldin",
+                    action=argparse.BooleanOptionalAction, default=False,
+                    help="Compute Davies-Bouldin index (not recommended, favors high k) (default: False)")
 parser.add_argument("--min-read-length", dest="min_read_length", type=int, default=10000,
                     help="Minimum read length in bp to include (default: 10000)")
-parser.add_argument("--small-feature-quantile", dest="small_quantile", type=float, default=0.1,
-                    help="Quantile threshold for small feature collapsing (default: 0.1)")
 parser.add_argument("--exclude-features", dest="exclude_features", default=None,
                     help="Comma-separated list of features to exclude (e.g., 'novel,unknown')")
 parser.add_argument("--linkage-method", dest="linkage_method", default="ward",
@@ -104,15 +105,15 @@ parser.add_argument("--umap-neighbors", dest="umap_neighbors", type=int, default
                     help="UMAP n_neighbors parameter (default: 25)")
 parser.add_argument("--umap-min-dist", dest="umap_min_dist", type=float, default=0.2,
                     help="UMAP min_dist parameter (default: 0.2)")
+parser.add_argument("--umap-html", dest="umap_html",
+                    action=argparse.BooleanOptionalAction, default=False,
+                    help="Generate interactive HTML UMAP with Plotly (default: False, requires plotly)")
 parser.add_argument("--perfect-threshold", dest="perfect_threshold", type=float, default=0.95,
                     help="Threshold for perfect enrichment (default: 0.95 = 95%%)")
 parser.add_argument("--strong-threshold", dest="strong_threshold", type=float, default=0.80,
                     help="Threshold for strong enrichment (default: 0.80 = 80%%)")
-parser.add_argument("--davies-bouldin", dest="compute_davies_bouldin",
-                    action=argparse.BooleanOptionalAction, default=False,
-                    help="Compute Davies-Bouldin index (not recommended, favors high k) (default: False)")
-parser.add_argument("--early-stopping", dest="early_stopping", type=int, default=25,
-                    help="Stop k search if no improvement for N iterations (0 to disable) (default: 25)")
+parser.add_argument("--early-stopping", dest="early_stopping", type=int, default=50,
+                    help="Stop k search if no improvement for N iterations (0 to disable) (default: 50)")
 parser.add_argument("--nested", dest="nested",
                     action=argparse.BooleanOptionalAction, default=False,
                     help="Hierarchical testing: first test groups, then test samples within enriched groups (default: False)")
@@ -122,12 +123,26 @@ parser.add_argument("--also-test-samples", dest="also_test_samples",
 parser.add_argument("--stratified", dest="stratified",
                     action=argparse.BooleanOptionalAction, default=False,
                     help="Report within-group sample breakdown and variance metrics (default: False)")
-parser.add_argument("--reduce-dims", dest="reduce_dims", type=int, default=1000,
+parser.add_argument("--reduce-dims", dest="reduce_dims", type=int, default=500,
                     help="Reduce matrix to N dimensions using truncated SVD before clustering.\n"
                          "Recommended for merged BED files which can create very high-dimensional matrices.\n"
-                         "Set to 0 to disable reduction (default: 1000)")
+                         "Set to 0 to disable reduction (default: 500)")
+parser.add_argument("--dark-mode", dest="dark_mode",
+                    action=argparse.BooleanOptionalAction, default=False,
+                    help="Output diagnostic plots with dark background (default: False)")
 
 args = parser.parse_args()
+
+# --- Set up plot style ---
+if args.dark_mode:
+    plt.style.use('dark_background')
+    PLOT_BG_COLOR = '#1a1a1a'
+    PLOT_TEXT_COLOR = 'white'
+    PLOT_GRID_COLOR = '#404040'
+else:
+    PLOT_BG_COLOR = 'white'
+    PLOT_TEXT_COLOR = 'black'
+    PLOT_GRID_COLOR = '#cccccc'
 
 # --- Helper functions ---
 def load_bed_file(filepath, sample_label=None):
@@ -162,78 +177,6 @@ def extract_sample_label(filepath):
         return parts[0]
     return basename
 
-
-def collapse_small_clusters(df, small_len_thresh, small_gap_thresh):
-    """Collapse small adjacent features within each read.
-
-    Original version - slower but proven to work correctly.
-    Only collapses consecutive small features that are close together.
-    """
-    df = df.sort_values(['read', 'start']).reset_index(drop=True)
-
-    def collapse_read_features(group):
-        """Collapse small adjacent features within a single read."""
-        group = group.sort_values('start').reset_index(drop=True)
-
-        if len(group) <= 1:
-            return group
-
-        collapsed_rows = []
-        i = 0
-
-        while i < len(group):
-            row = group.iloc[i]
-
-            # If this feature is not small, keep it as-is
-            if row['length'] > small_len_thresh:
-                collapsed_rows.append({
-                    'read': row['read'],
-                    'start': row['start'],
-                    'end': row['end'],
-                    'feature': row['feature'],
-                    'length': row['length']
-                })
-                i += 1
-                continue
-
-            # This feature is small - try to merge with following small features
-            merge_start = row['start']
-            merge_end = row['end']
-            features_in_merge = [row['feature']]
-
-            j = i + 1
-            while j < len(group):
-                next_row = group.iloc[j]
-                gap = next_row['start'] - merge_end
-
-                # Stop merging if gap too big or next feature not small
-                if gap > small_gap_thresh or next_row['length'] > small_len_thresh:
-                    break
-
-                # Merge this feature
-                merge_end = next_row['end']
-                features_in_merge.append(next_row['feature'])
-                j += 1
-
-            # Use mode (most common) feature for the merged region
-            feature_counts = Counter(features_in_merge)
-            mode_feature = feature_counts.most_common(1)[0][0]
-
-            collapsed_rows.append({
-                'read': row['read'],
-                'start': merge_start,
-                'end': merge_end,
-                'feature': mode_feature,
-                'length': merge_end - merge_start
-            })
-
-            i = j
-
-        return pd.DataFrame(collapsed_rows)
-
-    # Apply to each read
-    result = df.groupby('read', group_keys=False).apply(collapse_read_features)
-    return result.reset_index(drop=True)
 
 def get_edges(features, edge_mode="directional"):
     """Get edges from a list of features based on edge counting mode.
@@ -747,21 +690,12 @@ for sample in sample_labels:
         group = sample_to_group.get(sample, sample)
         sample_colors[sample] = group_colors.get(group, '#999999')
 
-# --- Collapse small features ---
-small_len_thresh = in_data['length'].quantile(args.small_quantile)
-small_gap_thresh = small_len_thresh / 2
-
-print(f"\n--- Collapsing small features ---")
-collapsed_df = collapse_small_clusters(in_data, small_len_thresh, small_gap_thresh)
-print(f"  Features before collapse: {len(in_data):,}")
-print(f"  Features after collapse: {len(collapsed_df):,}")
-
 # --- Build adjacency matrix ---
 edge_mode_str = f" [{args.edge_mode}]"
 print(f"\n--- Building adjacency matrix ({args.matrix_type}{edge_mode_str}) ---")
 
 # Get feature data per read (with lengths for weighting)
-read_feature_data = collapsed_df.groupby('read').apply(
+read_feature_data = in_data.groupby('read').apply(
     lambda x: list(zip(x['feature'], x['length']))
 ).to_dict()
 
@@ -807,7 +741,7 @@ for read_name, features in read_features.items():
     read_edges[read_name] = get_edges(features, edge_mode=args.edge_mode)
     read_weighted_edges[read_name] = get_weighted_edges(read_feature_data[read_name], edge_mode=args.edge_mode)
 
-all_features = sorted(collapsed_df['feature'].unique())
+all_features = sorted(in_data['feature'].unique())
 all_pairs = []
 if args.edge_mode == "symmetric":
     # For symmetric mode, only include A->B where A < B (alphabetically)
@@ -1059,6 +993,9 @@ if args.n_clusters is None:
 
     # Generate k-selection diagnostic plot (2x3 grid)
     fig, axes = plt.subplots(2, 3, figsize=(16, 10))
+    fig.patch.set_facecolor(PLOT_BG_COLOR)
+    for ax in axes.flat:
+        ax.set_facecolor(PLOT_BG_COLOR)
 
     # 1. Silhouette score (higher is better)
     ax1 = axes[0, 0]
@@ -1126,7 +1063,7 @@ if args.n_clusters is None:
 
     plt.tight_layout()
     k_plot_file = f"{args.output_prefix}.k_selection.pdf"
-    plt.savefig(k_plot_file, dpi=150, bbox_inches='tight')
+    plt.savefig(k_plot_file, dpi=150, bbox_inches='tight', facecolor=PLOT_BG_COLOR)
     plt.close()
     print(f"  Saved k-selection plot to: {k_plot_file}")
 
@@ -1160,6 +1097,9 @@ if args.n_clusters is None:
 
     # Generate knee diagnostic plot
     fig_knee, axes_knee = plt.subplots(2, 2, figsize=(12, 10))
+    fig_knee.patch.set_facecolor(PLOT_BG_COLOR)
+    for ax in axes_knee.flat:
+        ax.set_facecolor(PLOT_BG_COLOR)
 
     # 1. Raw composite score
     ax1 = axes_knee[0, 0]
@@ -1213,7 +1153,7 @@ if args.n_clusters is None:
 
     plt.tight_layout()
     knee_plot_file = f"{args.output_prefix}.composite_knee_diagnostic.pdf"
-    plt.savefig(knee_plot_file, dpi=150, bbox_inches='tight')
+    plt.savefig(knee_plot_file, dpi=150, bbox_inches='tight', facecolor=PLOT_BG_COLOR)
     plt.close()
     print(f"  Saved composite-knee diagnostic plot to: {knee_plot_file}")
 
@@ -1543,6 +1483,9 @@ if args.comparison_mode == 'per-sample':
     fig, axes = plt.subplots(3, 2, figsize=(16, 18))
 else:
     fig, axes = plt.subplots(2, 2, figsize=(16, 14))
+fig.patch.set_facecolor(PLOT_BG_COLOR)
+for ax in axes.flat:
+    ax.set_facecolor(PLOT_BG_COLOR)
 from scipy.cluster.hierarchy import set_link_color_palette
 from matplotlib.patches import Patch
 
@@ -1724,7 +1667,7 @@ if args.comparison_mode == 'per-sample':
 
 plt.tight_layout()
 plot_file = f"{args.output_prefix}.cluster_analysis.pdf"
-plt.savefig(plot_file, dpi=150, bbox_inches='tight')
+plt.savefig(plot_file, dpi=150, bbox_inches='tight', facecolor=PLOT_BG_COLOR)
 plt.close()
 print(f"  Saved cluster visualization to: {plot_file}")
 
@@ -1758,7 +1701,9 @@ if args.plot_circular_dendrogram:
 
     # Create figure with circular dendrogram
     fig_circ = plt.figure(figsize=(16, 14))
+    fig_circ.patch.set_facecolor(PLOT_BG_COLOR)
     ax_circ = fig_circ.add_subplot(111, polar=True)
+    ax_circ.set_facecolor(PLOT_BG_COLOR)
 
     # Plot each link in polar coordinates
     # scipy dendrogram icoord/dcoord are 4-point U-shapes: [x1, x1, x2, x2], [y1, y_merge, y_merge, y2]
@@ -1846,7 +1791,7 @@ if args.plot_circular_dendrogram:
                            labelspacing=0.8, framealpha=0.9)
 
     circ_dend_file = f"{args.output_prefix}.circular_dendrogram.pdf"
-    plt.savefig(circ_dend_file, dpi=150, bbox_inches='tight')
+    plt.savefig(circ_dend_file, dpi=150, bbox_inches='tight', facecolor=PLOT_BG_COLOR)
     plt.close()
     print(f"  Saved circular dendrogram to: {circ_dend_file}")
 
@@ -1889,6 +1834,9 @@ if args.plot_umap and len(read_names) > 10:
 
         # Create 2x2 UMAP plot (group, enrichment, cluster numbers, cluster colors)
         fig, axes = plt.subplots(2, 2, figsize=(16, 14))
+        fig.patch.set_facecolor(PLOT_BG_COLOR)
+        for ax in axes.flat:
+            ax.set_facecolor(PLOT_BG_COLOR)
 
         # 1. Top-left: Colored by group (from metadata)
         point_colors_group = [group_colors.get(g, '#999999') for g in group_list]
@@ -1920,6 +1868,8 @@ if args.plot_umap and len(read_names) > 10:
         axes[1, 0].set_ylabel("UMAP 2")
 
         # Add cluster number labels at cluster centroids
+        annotation_bg = '#333333' if args.dark_mode else 'white'
+        annotation_edge = 'white' if args.dark_mode else 'gray'
         for cluster_id in sorted(set(cluster_list)):
             mask = [c == cluster_id for c in cluster_list]
             cluster_points = embedding[mask]
@@ -1927,7 +1877,7 @@ if args.plot_umap and len(read_names) > 10:
             centroid_y = np.mean(cluster_points[:, 1])
             axes[1, 0].annotate(str(cluster_id), (centroid_x, centroid_y),
                                fontsize=8, fontweight='bold', ha='center', va='center',
-                               bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7, edgecolor='gray'))
+                               bbox=dict(boxstyle='round,pad=0.2', facecolor=annotation_bg, alpha=0.7, edgecolor=annotation_edge))
 
         # Add sample legend to bottom-left panel
         sample_patches = [Patch(facecolor=sample_colors[s], label=s) for s in sorted(sample_colors.keys())]
@@ -1951,14 +1901,14 @@ if args.plot_umap and len(read_names) > 10:
             axes[1, 1].annotate(label, (centroid_x, centroid_y),
                                fontsize=7, ha='center', va='center',
                                bbox=dict(boxstyle='round,pad=0.2', facecolor=enrichment_colors.get(enrich, '#CCCCCC'),
-                                        alpha=0.8, edgecolor='gray'))
+                                        alpha=0.8, edgecolor=annotation_edge))
 
         # Add enrichment legend to bottom-right panel
         axes[1, 1].legend(handles=enrich_patches, loc='upper right')
 
         plt.tight_layout()
         umap_file = f"{args.output_prefix}.umap.pdf"
-        plt.savefig(umap_file, dpi=150, bbox_inches='tight')
+        plt.savefig(umap_file, dpi=150, bbox_inches='tight', facecolor=PLOT_BG_COLOR)
         plt.close()
         print(f"  Saved UMAP plot: {umap_file}")
 
@@ -1975,121 +1925,122 @@ if args.plot_umap and len(read_names) > 10:
         umap_coords.to_csv(umap_coords_file, sep='\t', index=False)
         print(f"  Saved UMAP coordinates: {umap_coords_file}")
 
-        # Try to generate interactive Plotly version
-        try:
-            import plotly.graph_objects as go
-            from plotly.subplots import make_subplots
+        # Try to generate interactive Plotly version (if enabled)
+        if args.umap_html:
+            try:
+                import plotly.graph_objects as go
+                from plotly.subplots import make_subplots
 
-            # Create figure with dropdown menu for different colorings
-            fig = go.Figure()
+                # Create figure with dropdown menu for different colorings
+                fig = go.Figure()
 
-            # Prepare data arrays
-            embedding_x = embedding[:, 0]
-            embedding_y = embedding[:, 1]
-            enrichment_list = [cluster_to_enrichment.get(c, 'mixed') for c in cluster_list]
+                # Prepare data arrays
+                embedding_x = embedding[:, 0]
+                embedding_y = embedding[:, 1]
+                enrichment_list = [cluster_to_enrichment.get(c, 'mixed') for c in cluster_list]
 
-            # Hover text (same for all views)
-            hover_text = [f"Read: {r[:20]}...<br>Group: {g}<br>Cluster: {c}<br>Enrichment: {e}"
-                         for r, g, c, e in zip(read_names, group_list, cluster_list, enrichment_list)]
+                # Hover text (same for all views)
+                hover_text = [f"Read: {r[:20]}...<br>Group: {g}<br>Cluster: {c}<br>Enrichment: {e}"
+                             for r, g, c, e in zip(read_names, group_list, cluster_list, enrichment_list)]
 
-            # 1. Add traces for GROUP coloring (default view)
-            for group in sorted(set(group_list)):
-                mask = np.array([g == group for g in group_list])
-                fig.add_trace(go.Scatter(
-                    x=embedding_x[mask],
-                    y=embedding_y[mask],
-                    mode='markers',
-                    name=group,
-                    text=[hover_text[i] for i in range(len(mask)) if mask[i]],
-                    hoverinfo='text',
-                    marker=dict(size=6, color=group_colors.get(group, '#999999'), opacity=0.7),
-                    visible=True
-                ))
+                # 1. Add traces for GROUP coloring (default view)
+                for group in sorted(set(group_list)):
+                    mask = np.array([g == group for g in group_list])
+                    fig.add_trace(go.Scatter(
+                        x=embedding_x[mask],
+                        y=embedding_y[mask],
+                        mode='markers',
+                        name=group,
+                        text=[hover_text[i] for i in range(len(mask)) if mask[i]],
+                        hoverinfo='text',
+                        marker=dict(size=6, color=group_colors.get(group, '#999999'), opacity=0.7),
+                        visible=True
+                    ))
 
-            n_group_traces = len(set(group_list))
+                n_group_traces = len(set(group_list))
 
-            # 2. Add traces for CLUSTER coloring
-            for cluster_id in sorted(set(cluster_list)):
-                mask = np.array([c == cluster_id for c in cluster_list])
-                enrich = cluster_to_enrichment.get(cluster_id, 'mixed')
-                fig.add_trace(go.Scatter(
-                    x=embedding_x[mask],
-                    y=embedding_y[mask],
-                    mode='markers',
-                    name=f"C{cluster_id} ({enrich[:4]})",
-                    text=[hover_text[i] for i in range(len(mask)) if mask[i]],
-                    hoverinfo='text',
-                    marker=dict(size=6, color=cluster_color_map.get(cluster_id, '#999999'), opacity=0.7),
-                    visible=False
-                ))
+                # 2. Add traces for CLUSTER coloring
+                for cluster_id in sorted(set(cluster_list)):
+                    mask = np.array([c == cluster_id for c in cluster_list])
+                    enrich = cluster_to_enrichment.get(cluster_id, 'mixed')
+                    fig.add_trace(go.Scatter(
+                        x=embedding_x[mask],
+                        y=embedding_y[mask],
+                        mode='markers',
+                        name=f"C{cluster_id} ({enrich[:4]})",
+                        text=[hover_text[i] for i in range(len(mask)) if mask[i]],
+                        hoverinfo='text',
+                        marker=dict(size=6, color=cluster_color_map.get(cluster_id, '#999999'), opacity=0.7),
+                        visible=False
+                    ))
 
-            n_cluster_traces = len(set(cluster_list))
+                n_cluster_traces = len(set(cluster_list))
 
-            # 3. Add traces for ENRICHMENT coloring
-            for enrich in sorted(set(enrichment_list)):
-                mask = np.array([e == enrich for e in enrichment_list])
-                fig.add_trace(go.Scatter(
-                    x=embedding_x[mask],
-                    y=embedding_y[mask],
-                    mode='markers',
-                    name=enrich,
-                    text=[hover_text[i] for i in range(len(mask)) if mask[i]],
-                    hoverinfo='text',
-                    marker=dict(size=6, color=enrichment_colors.get(enrich, '#CCCCCC'), opacity=0.7),
-                    visible=False
-                ))
+                # 3. Add traces for ENRICHMENT coloring
+                for enrich in sorted(set(enrichment_list)):
+                    mask = np.array([e == enrich for e in enrichment_list])
+                    fig.add_trace(go.Scatter(
+                        x=embedding_x[mask],
+                        y=embedding_y[mask],
+                        mode='markers',
+                        name=enrich,
+                        text=[hover_text[i] for i in range(len(mask)) if mask[i]],
+                        hoverinfo='text',
+                        marker=dict(size=6, color=enrichment_colors.get(enrich, '#CCCCCC'), opacity=0.7),
+                        visible=False
+                    ))
 
-            n_enrichment_traces = len(set(enrichment_list))
+                n_enrichment_traces = len(set(enrichment_list))
 
-            # Create visibility arrays for dropdown
-            total_traces = n_group_traces + n_cluster_traces + n_enrichment_traces
+                # Create visibility arrays for dropdown
+                total_traces = n_group_traces + n_cluster_traces + n_enrichment_traces
 
-            vis_group = [True] * n_group_traces + [False] * n_cluster_traces + [False] * n_enrichment_traces
-            vis_cluster = [False] * n_group_traces + [True] * n_cluster_traces + [False] * n_enrichment_traces
-            vis_enrichment = [False] * n_group_traces + [False] * n_cluster_traces + [True] * n_enrichment_traces
+                vis_group = [True] * n_group_traces + [False] * n_cluster_traces + [False] * n_enrichment_traces
+                vis_cluster = [False] * n_group_traces + [True] * n_cluster_traces + [False] * n_enrichment_traces
+                vis_enrichment = [False] * n_group_traces + [False] * n_cluster_traces + [True] * n_enrichment_traces
 
-            # Add dropdown menu
-            fig.update_layout(
-                updatemenus=[
-                    dict(
-                        active=0,
-                        buttons=[
-                            dict(label="Color by Group",
-                                 method="update",
-                                 args=[{"visible": vis_group},
-                                       {"title": f"UMAP - Colored by Group ({len(read_names):,} reads)"}]),
-                            dict(label="Color by Cluster",
-                                 method="update",
-                                 args=[{"visible": vis_cluster},
-                                       {"title": f"UMAP - Colored by Cluster ({len(read_names):,} reads)"}]),
-                            dict(label="Color by Enrichment",
-                                 method="update",
-                                 args=[{"visible": vis_enrichment},
-                                       {"title": f"UMAP - Colored by Enrichment ({len(read_names):,} reads)"}]),
-                        ],
-                        direction="down",
-                        showactive=True,
-                        x=0.0,
-                        xanchor="left",
-                        y=1.15,
-                        yanchor="top"
-                    )
-                ],
-                title=f"UMAP - Colored by Group ({len(read_names):,} reads)",
-                xaxis_title="UMAP 1",
-                yaxis_title="UMAP 2",
-                hovermode='closest',
-                width=1000,
-                height=750,
-                legend=dict(yanchor="top", y=0.99, xanchor="left", x=1.02)
-            )
+                # Add dropdown menu
+                fig.update_layout(
+                    updatemenus=[
+                        dict(
+                            active=0,
+                            buttons=[
+                                dict(label="Color by Group",
+                                     method="update",
+                                     args=[{"visible": vis_group},
+                                           {"title": f"UMAP - Colored by Group ({len(read_names):,} reads)"}]),
+                                dict(label="Color by Cluster",
+                                     method="update",
+                                     args=[{"visible": vis_cluster},
+                                           {"title": f"UMAP - Colored by Cluster ({len(read_names):,} reads)"}]),
+                                dict(label="Color by Enrichment",
+                                     method="update",
+                                     args=[{"visible": vis_enrichment},
+                                           {"title": f"UMAP - Colored by Enrichment ({len(read_names):,} reads)"}]),
+                            ],
+                            direction="down",
+                            showactive=True,
+                            x=0.0,
+                            xanchor="left",
+                            y=1.15,
+                            yanchor="top"
+                        )
+                    ],
+                    title=f"UMAP - Colored by Group ({len(read_names):,} reads)",
+                    xaxis_title="UMAP 1",
+                    yaxis_title="UMAP 2",
+                    hovermode='closest',
+                    width=1000,
+                    height=750,
+                    legend=dict(yanchor="top", y=0.99, xanchor="left", x=1.02)
+                )
 
-            umap_html_file = f"{args.output_prefix}.umap.html"
-            fig.write_html(umap_html_file)
-            print(f"  Saved interactive UMAP: {umap_html_file}")
+                umap_html_file = f"{args.output_prefix}.umap.html"
+                fig.write_html(umap_html_file)
+                print(f"  Saved interactive UMAP: {umap_html_file}")
 
-        except ImportError:
-            print("  Note: Install plotly for interactive UMAP (pip install plotly)")
+            except ImportError:
+                print("  Note: Install plotly for interactive UMAP (pip install plotly)")
 
     except ImportError:
         print("  Warning: umap-learn not installed. Skipping UMAP plot.")
@@ -2097,7 +2048,7 @@ if args.plot_umap and len(read_names) > 10:
 
 # --- Bubble Plot for Per-Sample Enrichment ---
 if args.comparison_mode == 'per-sample':
-    print(f"\n--- Generating enrichment bubble plot ---")
+    print(f"\n--- Generating enrichment plots ---")
 
     # Build matrix of -log10(p-values) and odds ratios for each cluster x sample
     cluster_ids = cluster_df['cluster_id'].values
@@ -2121,11 +2072,10 @@ if args.comparison_mode == 'per-sample':
         neg_log_p = -np.log10(pval_matrix)
     neg_log_p = np.clip(neg_log_p, 0, 10)  # Cap at 10 for display
 
-    # Create figure
-    fig, axes = plt.subplots(1, 2, figsize=(max(16, n_clusters * 0.5 + 4), n_samples * 0.8 + 2))
-
-    # Left panel: Bubble plot with -log10(p) as size, odds ratio as color
-    ax1 = axes[0]
+    # === Plot 1: Bubble plot (enrichment significance and direction) ===
+    fig1, ax1 = plt.subplots(figsize=(max(14, n_clusters * 0.4 + 4), n_samples * 0.8 + 3))
+    fig1.patch.set_facecolor(PLOT_BG_COLOR)
+    ax1.set_facecolor(PLOT_BG_COLOR)
 
     # Create bubble plot
     for i, sample in enumerate(sample_labels):
@@ -2145,7 +2095,7 @@ if args.comparison_mode == 'per-sample':
 
             # Add significance indicator
             if pval_matrix[i, j] < 0.05:
-                edgecolor = 'black'
+                edgecolor = 'white' if args.dark_mode else 'black'
                 linewidth = 1.5
             else:
                 edgecolor = 'gray'
@@ -2154,25 +2104,34 @@ if args.comparison_mode == 'per-sample':
             ax1.scatter(j, i, s=size, c=[color], edgecolors=edgecolor, linewidths=linewidth)
 
     ax1.set_xticks(range(n_clusters))
-    ax1.set_xticklabels([str(cid) for cid in cluster_ids], rotation=90, fontsize=8)
+    ax1.set_xticklabels([str(cid) for cid in cluster_ids], rotation=90, fontsize=9)
     ax1.set_yticks(range(n_samples))
-    ax1.set_yticklabels(sample_labels, fontsize=10)
-    ax1.set_xlabel('Cluster ID', fontsize=11)
-    ax1.set_ylabel('Sample', fontsize=11)
-    ax1.set_title('Enrichment Bubble Plot\n(size: -log10(p), color: odds ratio)', fontsize=12)
+    ax1.set_yticklabels(sample_labels, fontsize=11)
+    ax1.set_xlabel('Cluster ID', fontsize=12)
+    ax1.set_ylabel('Sample', fontsize=12)
+    ax1.set_title('Enrichment Bubble Plot\n(size: -log10(p-value), color: red=enriched, blue=depleted)', fontsize=13)
     ax1.set_xlim(-0.5, n_clusters - 0.5)
     ax1.set_ylim(-0.5, n_samples - 0.5)
-    ax1.grid(True, alpha=0.3)
+    ax1.grid(True, alpha=0.3, color=PLOT_GRID_COLOR)
 
     # Add legend for size
     size_legend_vals = [1.3, 2, 3]  # -log10(p) values = p of 0.05, 0.01, 0.001
     for val in size_legend_vals:
-        ax1.scatter([], [], s=val * 50 + 10, c='gray', alpha=0.5,
+        ax1.scatter([], [], s=val * 50 + 10, c='gray', alpha=0.7,
                     label=f'p = {10**(-val):.3g}')
-    ax1.legend(loc='upper left', bbox_to_anchor=(1.01, 1), title='P-value', fontsize=8)
+    ax1.legend(loc='upper left', bbox_to_anchor=(1.01, 1), title='P-value', fontsize=9)
 
-    # Right panel: Heatmap of percentage
-    ax2 = axes[1]
+    plt.tight_layout()
+    bubble_file = f"{args.output_prefix}.enrichment_bubble.pdf"
+    plt.savefig(bubble_file, dpi=150, bbox_inches='tight', facecolor=PLOT_BG_COLOR)
+    plt.close()
+    print(f"  Saved bubble plot: {bubble_file}")
+
+    # === Plot 2: Heatmap of sample percentage per cluster ===
+    fig2, ax2 = plt.subplots(figsize=(max(14, n_clusters * 0.4 + 4), n_samples * 0.8 + 3))
+    fig2.patch.set_facecolor(PLOT_BG_COLOR)
+    ax2.set_facecolor(PLOT_BG_COLOR)
+
     im = ax2.imshow(pct_matrix, aspect='auto', cmap='YlOrRd', vmin=0, vmax=100)
 
     # Add text annotations
@@ -2192,24 +2151,25 @@ if args.comparison_mode == 'per-sample':
                 sig = '*'
 
             ax2.text(j, i, f'{pct:.0f}{sig}', ha='center', va='center',
-                     fontsize=7, color=text_color)
+                     fontsize=8, color=text_color, fontweight='bold' if sig else 'normal')
 
     ax2.set_xticks(range(n_clusters))
-    ax2.set_xticklabels([str(cid) for cid in cluster_ids], rotation=90, fontsize=8)
+    ax2.set_xticklabels([str(cid) for cid in cluster_ids], rotation=90, fontsize=9)
     ax2.set_yticks(range(n_samples))
-    ax2.set_yticklabels(sample_labels, fontsize=10)
-    ax2.set_xlabel('Cluster ID', fontsize=11)
-    ax2.set_title('Sample Percentage per Cluster\n(* p<0.05, ** p<0.01, *** p<0.001)', fontsize=12)
+    ax2.set_yticklabels(sample_labels, fontsize=11)
+    ax2.set_xlabel('Cluster ID', fontsize=12)
+    ax2.set_ylabel('Sample', fontsize=12)
+    ax2.set_title('Sample Percentage per Cluster\n(% of cluster reads from each sample; * p<0.05, ** p<0.01, *** p<0.001)', fontsize=13)
 
     # Add colorbar
     cbar = plt.colorbar(im, ax=ax2, shrink=0.8)
-    cbar.set_label('Percentage (%)', fontsize=10)
+    cbar.set_label('Percentage (%)', fontsize=11)
 
     plt.tight_layout()
-    bubble_file = f"{args.output_prefix}.enrichment_bubble.pdf"
-    plt.savefig(bubble_file, dpi=150, bbox_inches='tight')
+    pct_file = f"{args.output_prefix}.sample_percentage.pdf"
+    plt.savefig(pct_file, dpi=150, bbox_inches='tight', facecolor=PLOT_BG_COLOR)
     plt.close()
-    print(f"  Saved enrichment bubble plot: {bubble_file}")
+    print(f"  Saved percentage heatmap: {pct_file}")
 
 # --- Summary ---
 print(f"\n" + "=" * 60)
