@@ -41,6 +41,9 @@ import sys
 from collections import defaultdict, OrderedDict
 from math import floor
 
+# Capture original command line for logging
+_original_command = ' '.join(sys.argv)
+
 import drawsvg as draw
 import matplotlib
 import matplotlib.colors as mcolors
@@ -1235,8 +1238,8 @@ def parse_args():
                         help="Spacing between clusters (default: 30)")
     parser.add_argument("--ratio", type=float, default=1/300,
                         help="Ratio for scaling bp to pixels (default: 1/300)")
-    parser.add_argument("--smoothness", default="presmoothed",
-                        help="Smoothness level (default: presmoothed)")
+    parser.add_argument("--smoothness", default="smoothed",
+                        help="Smoothness level (default: smoothed)")
 
     # Filtering options
     parser.add_argument("--max-clusters", dest="max_clusters", type=int, default=None,
@@ -1259,12 +1262,43 @@ def parse_args():
                         help="Disable dendrogram reordering - keep reads grouped by cluster")
     parser.add_argument("--max-reps-per-cluster", dest="max_reps", type=int, default=3,
                         help="Maximum representatives per cluster (default: 3)")
+    parser.add_argument("--log-file", dest="log_file",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help="Save console output to {output}.log (default: True)")
 
     return parser.parse_args()
 
 
+class TeeLogger:
+    """Write to both stdout and a log file."""
+    def __init__(self, log_path):
+        self.terminal = sys.stdout
+        self.log = open(log_path, 'w')
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        self.log.flush()
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+
+    def close(self):
+        self.log.close()
+
+
 def main():
     args = parse_args()
+
+    # --- Set up logging ---
+    if args.log_file:
+        # Derive log path from output file (replace .svg with .log)
+        if args.output.endswith('.svg'):
+            log_path = args.output[:-4] + '.log'
+        else:
+            log_path = args.output + '.log'
+        sys.stdout = TeeLogger(log_path)
 
     # --- Auto-discover files from prefix ---
     prefix = args.cluster_prefix
@@ -1615,6 +1649,45 @@ def main():
     total_reads = sum(len(data['reads']) for data in cluster_reads.values())
     print(f"Total reads plotted: {total_reads}")
     print(f"\n✅ Saved to {args.output}")
+
+    # --- Print parameters table ---
+    print("\n" + "=" * 60)
+    print("Parameters")
+    print("=" * 60)
+    params = [
+        ("cluster-analysis-prefix", args.cluster_prefix),
+        ("output", args.output),
+        ("bed", f"{len(args.bed_files)} file(s)" if args.bed_files else "auto-discovered"),
+        ("input-bed-prefix", args.input_bed_prefix if args.input_bed_prefix else "N/A"),
+        ("database", database),
+        ("colors", args.colors_dir),
+        ("featuresets", args.featuresets),
+        ("background", args.background_color),
+        ("bar-width", args.bar_width),
+        ("bar-spacing", args.bar_spacing),
+        ("read-spacing", args.read_spacing),
+        ("cluster-spacing", args.cluster_spacing),
+        ("ratio", args.ratio),
+        ("smoothness", args.smoothness),
+        ("max-clusters", args.max_clusters if args.max_clusters else "None"),
+        ("top-clusters", args.top_clusters if args.top_clusters else "None"),
+        ("clusters", args.clusters if args.clusters else "None"),
+        ("include-mixed", args.include_mixed),
+        ("hide-brackets", args.hide_brackets),
+        ("no-reorder", args.no_reorder),
+        ("max-reps-per-cluster", args.max_reps),
+        ("log-file", args.log_file),
+    ]
+    print(f"{'Parameter':<25} {'Value':<35}")
+    print(f"{'-' * 25} {'-' * 35}")
+    for param, value in params:
+        print(f"{param:<25} {str(value):<35}")
+
+    # --- Print command ---
+    print("\n" + "=" * 60)
+    print("Command")
+    print("=" * 60)
+    print(_original_command)
 
 
 if __name__ == "__main__":
