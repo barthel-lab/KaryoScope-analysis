@@ -219,7 +219,9 @@ def plot_correlation_heatmap(df, metrics, ax):
 
 def compute_cluster_summary(df):
     """Compute summary statistics per cluster."""
-    numeric_cols = ['read_length', 'centroid_distance', 'mapq', 'de', 'align_len', 'align_fraction']
+    numeric_cols = ['read_length', 'centroid_distance', 'mapq', 'de', 'align_len', 'align_fraction',
+                    'primary_mapq', 'primary_de', 'primary_align_len', 'primary_align_fraction',
+                    'total_align_len', 'total_align_fraction', 'n_alignments', 'n_secondary', 'n_supplementary']
     available_cols = [c for c in numeric_cols if c in df.columns]
 
     summary_rows = []
@@ -390,10 +392,60 @@ def main():
             pdf.savefig(fig, bbox_inches='tight')
             plt.close(fig)
 
-        # Page 5: Correlation heatmap and cluster sizes
+        # Page 5: Alignment statistics by cluster (if available)
+        if 'n_alignments' in df.columns:
+            fig, axes = plt.subplots(2, 3, figsize=(16, 10))
+            fig.suptitle('Alignment Statistics by Cluster', fontsize=14, fontweight='bold')
+
+            plot_metric_by_cluster(df, 'n_alignments', axes[0, 0],
+                                   title='Number of Alignments', ylabel='Alignments per Read')
+            plot_metric_by_cluster(df, 'n_secondary', axes[0, 1],
+                                   title='Secondary Alignments', ylabel='Secondary Alignments')
+            plot_metric_by_cluster(df, 'n_supplementary', axes[0, 2],
+                                   title='Supplementary Alignments', ylabel='Supplementary Alignments')
+            plot_metric_by_cluster(df, 'primary_align_fraction', axes[1, 0],
+                                   title='Primary Alignment Fraction', ylabel='Fraction')
+            plot_metric_by_cluster(df, 'total_align_fraction', axes[1, 1],
+                                   title='Total Alignment Fraction', ylabel='Fraction')
+            # Difference between total and primary (contribution of supplementary)
+            if 'total_align_fraction' in df.columns and 'primary_align_fraction' in df.columns:
+                df['supplementary_contribution'] = df['total_align_fraction'] - df['primary_align_fraction']
+                plot_metric_by_cluster(df, 'supplementary_contribution', axes[1, 2],
+                                       title='Supplementary Contribution', ylabel='Additional Fraction')
+
+            plt.tight_layout()
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
+
+        # Page 6: Alignment statistics by sample (batch effects)
+        if 'n_alignments' in df.columns and 'sample' in df.columns and df['sample'].nunique() > 1:
+            fig, axes = plt.subplots(2, 3, figsize=(16, 10))
+            fig.suptitle('Alignment Statistics by Sample (Batch Effect Check)', fontsize=14, fontweight='bold')
+
+            plot_metric_by_sample(df, 'n_alignments', axes[0, 0],
+                                  title='Number of Alignments', ylabel='Alignments per Read')
+            plot_metric_by_sample(df, 'n_secondary', axes[0, 1],
+                                  title='Secondary Alignments', ylabel='Secondary Alignments')
+            plot_metric_by_sample(df, 'n_supplementary', axes[0, 2],
+                                  title='Supplementary Alignments', ylabel='Supplementary Alignments')
+            plot_metric_by_sample(df, 'primary_align_fraction', axes[1, 0],
+                                  title='Primary Alignment Fraction', ylabel='Fraction')
+            plot_metric_by_sample(df, 'total_align_fraction', axes[1, 1],
+                                  title='Total Alignment Fraction', ylabel='Fraction')
+            if 'supplementary_contribution' in df.columns:
+                plot_metric_by_sample(df, 'supplementary_contribution', axes[1, 2],
+                                      title='Supplementary Contribution', ylabel='Additional Fraction')
+
+            plt.tight_layout()
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
+
+        # Page 7: Correlation heatmap and cluster sizes
         fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
-        metrics = ['read_length', 'centroid_distance', 'mapq', 'de', 'align_len', 'align_fraction']
+        metrics = ['read_length', 'centroid_distance', 'primary_mapq', 'primary_de',
+                   'primary_align_fraction', 'total_align_fraction', 'n_alignments',
+                   'n_secondary', 'n_supplementary']
         plot_correlation_heatmap(df, metrics, axes[0])
         plot_cluster_sizes(df, axes[1])
 
