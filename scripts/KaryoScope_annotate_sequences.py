@@ -15,6 +15,18 @@ The script expects:
   - readnames.txt files at: {readnames_dir}/{sample}/telogator/{sample}.readnames.txt
   - stats.tsv files at: {readnames_dir}/{sample}/telogator/aligned/{sample}.CHM13.stats.tsv
 
+Added columns:
+  - sequencing_approach: From readnames.txt (e.g., "hifi", "ont")
+  - n_alignments: Total number of alignments for the read
+  - n_secondary: Number of secondary alignments (is_primary=False)
+  - n_supplementary: Number of supplementary alignments (split reads)
+  - primary_mapq: Mapping quality of primary non-supplementary alignment
+  - primary_de: Divergence of primary alignment
+  - primary_align_len: Aligned bases in primary alignment
+  - primary_align_fraction: Fraction of read aligned in primary alignment
+  - total_align_len: Sum of aligned bases across ALL alignments
+  - total_align_fraction: Total aligned / read length (can exceed 1.0 if overlapping)
+
 Join behavior:
   - Inner joins are performed: every read in read_assignments.tsv must have a
     matching entry in both readnames.txt and stats.tsv
@@ -67,6 +79,11 @@ def load_readnames(readnames_dir, samples):
 def load_stats(readnames_dir, samples, reference="CHM13"):
     """Load stats.tsv files for all samples.
 
+    Computes per-read statistics including:
+    - Primary alignment stats (mapq, de, align_len, align_fraction)
+    - Alignment counts (total, secondary, supplementary)
+    - Total aligned bases and fraction across all alignments
+
     Args:
         readnames_dir: Base directory containing sample folders
         samples: List of sample names
@@ -91,19 +108,58 @@ def load_stats(readnames_dir, samples, reference="CHM13"):
 
         total_rows = len(df)
 
-        # Filter to primary non-supplementary alignments only
-        # This gives exactly one row per read (includes unmapped reads)
-        if all(col in df.columns for col in ['is_primary', 'is_not_supplementary']):
+        # Compute per-read aggregate statistics from ALL alignments
+        if all(col in df.columns for col in ['is_primary', 'is_not_supplementary', 'align_len', 'read_len']):
+            # Count alignments by type for each read
+            agg_stats = df.groupby('read').agg(
+                n_alignments=('read', 'count'),
+                n_secondary=('is_primary', lambda x: (~x).sum()),
+                n_supplementary=('is_not_supplementary', lambda x: (~x).sum()),
+                read_len=('read_len', 'first'),  # Same for all alignments of a read
+                max_mapq=('mapq', 'max'),
+                mean_de=('de', 'mean'),
+            ).reset_index()
+
+            # For total aligned bases, only count non-secondary alignments
+            # (primary + supplementary cover non-overlapping portions of the read)
+            # Secondary alignments are alternative mappings for the same read portion
+            non_secondary = df[df['is_primary'] == True]
+            non_secondary_align = non_secondary.groupby('read').agg(
+                total_align_len=('align_len', 'sum'),
+            ).reset_index()
+
+            agg_stats = agg_stats.merge(non_secondary_align, on='read', how='left')
+            agg_stats['total_align_len'] = agg_stats['total_align_len'].fillna(0)
+
+            # Calculate total alignment fraction (primary + supplementary only)
+            agg_stats['total_align_fraction'] = agg_stats['total_align_len'] / agg_stats['read_len']
+
+            # Get primary non-supplementary alignment stats (the "main" alignment)
+            primary_df = df[
+                (df['is_primary'] == True) &
+                (df['is_not_supplementary'] == True)
+            ][['read', 'mapq', 'de', 'align_len', 'align_fraction', 'is_mapped']].copy()
+            primary_df = primary_df.rename(columns={
+                'mapq': 'primary_mapq',
+                'de': 'primary_de',
+                'align_len': 'primary_align_len',
+                'align_fraction': 'primary_align_fraction',
+                'is_mapped': 'is_mapped'
+            })
+
+            # Merge aggregate stats with primary alignment stats
+            result_df = agg_stats.merge(primary_df, on='read', how='left')
+
+            print(f"  {sample}: {len(result_df)} reads with alignment stats (from {total_rows} total alignments)")
+            all_stats.append(result_df)
+        else:
+            # Fallback: just filter to primary non-supplementary
             filtered_df = df[
                 (df['is_primary'] == True) &
                 (df['is_not_supplementary'] == True)
             ].copy()
-            print(f"  {sample}: {len(filtered_df)} primary non-supplementary alignments from stats.tsv (of {total_rows} total)")
-            df = filtered_df
-        else:
-            print(f"  {sample}: {len(df)} alignments from stats.tsv (filtering columns not found)")
-
-        all_stats.append(df)
+            print(f"  {sample}: {len(filtered_df)} primary alignments (columns for aggregate stats not found)")
+            all_stats.append(filtered_df)
 
     combined = pd.concat(all_stats, ignore_index=True)
 
@@ -133,8 +189,9 @@ def main():
                         help="Reference genome name for stats files (default: CHM13)")
     parser.add_argument("--output", "-o", required=True,
                         help="Output annotated TSV file")
-    parser.add_argument("--stats-columns", dest="stats_columns", default="mapq,de,align_len,align_fraction",
-                        help="Comma-separated list of stats columns to include (default: mapq,de,align_len,align_fraction)")
+    parser.add_argument("--stats-columns", dest="stats_columns",
+                        default="n_alignments,n_secondary,n_supplementary,primary_mapq,primary_de,primary_align_len,primary_align_fraction,total_align_len,total_align_fraction",
+                        help="Comma-separated list of stats columns to include")
 
     args = parser.parse_args()
 
@@ -240,6 +297,23 @@ def main():
     print("=" * 60)
     print(f"Total reads annotated: {len(final)}")
     print(f"Sequencing approaches: {final['sequencing_approach'].value_counts().to_dict()}")
+
+    # Alignment statistics summary
+    if 'n_alignments' in final.columns:
+        print(f"\nAlignment statistics:")
+        print(f"  Total alignments: {final['n_alignments'].sum():,}")
+        print(f"  Reads with secondary alignments: {(final['n_secondary'] > 0).sum():,} ({(final['n_secondary'] > 0).mean()*100:.1f}%)")
+        print(f"  Reads with supplementary alignments: {(final['n_supplementary'] > 0).sum():,} ({(final['n_supplementary'] > 0).mean()*100:.1f}%)")
+        print(f"  Mean alignments per read: {final['n_alignments'].mean():.2f}")
+
+    if 'primary_align_fraction' in final.columns and 'total_align_fraction' in final.columns:
+        print(f"\nAlignment coverage:")
+        print(f"  Primary alignment fraction: {final['primary_align_fraction'].mean()*100:.1f}% (mean)")
+        print(f"  Total alignment fraction: {final['total_align_fraction'].mean()*100:.1f}% (mean)")
+        multi_align = final[final['n_alignments'] > 1]
+        if len(multi_align) > 0:
+            print(f"  Multi-aligned reads coverage: {multi_align['total_align_fraction'].mean()*100:.1f}% (mean of {len(multi_align)} reads)")
+
     print(f"\nOutput saved to: {args.output}")
 
 
