@@ -63,11 +63,12 @@ parser.add_argument("--min-k", dest="min_k", type=int, default=20,
 parser.add_argument("--max-k", dest="max_k", type=int, default=100,
                     help="Maximum number of clusters to test during auto-detection (default: 100)")
 parser.add_argument("--k-selection", dest="k_selection", default="composite",
-                    choices=["composite", "silhouette", "calinski"],
+                    choices=["composite", "silhouette", "calinski", "composite-knee"],
                     help="Metric for selecting optimal k:\n"
-                         "  composite: weighted combination of silhouette + enrichment (default)\n"
+                         "  composite: max weighted combination of silhouette + enrichment (default)\n"
                          "  silhouette: cluster cohesion (favors fewer, tighter clusters)\n"
-                         "  calinski: Calinski-Harabasz index")
+                         "  calinski: Calinski-Harabasz index\n"
+                         "  composite-knee: knee/elbow of composite score curve (diminishing returns)")
 parser.add_argument("--min-cluster-size", dest="min_cluster_size", type=int, default=3,
                     help="Minimum cluster size to consider (default: 3)")
 parser.add_argument("--min-read-length", dest="min_read_length", type=int, default=10000,
@@ -1129,6 +1130,93 @@ if args.n_clusters is None:
     plt.close()
     print(f"  Saved k-selection plot to: {k_plot_file}")
 
+    # Calculate knee point (diminishing returns)
+    # Use FIXED normalization bounds to make knee detection independent of max-k
+    k_values = stats_df['k'].values
+    scores = stats_df['composite_score'].values
+
+    # Kneedle-style knee detection: normalize to observed range, find max distance from diagonal
+    # Note: knee point may vary slightly with max-k due to normalization; diagnostic plot shows this
+    k_min_obs, k_max_obs = k_values.min(), k_values.max()
+    score_min, score_max = scores.min(), scores.max()
+
+    # Normalize both to [0, 1] using observed range
+    k_norm = (k_values - k_min_obs) / (k_max_obs - k_min_obs) if k_max_obs > k_min_obs else np.zeros_like(k_values)
+    score_norm = (scores - score_min) / (score_max - score_min) if score_max > score_min else np.zeros_like(scores)
+
+    # Knee = point with maximum perpendicular distance from diagonal
+    # This is equivalent to finding where (score_norm - k_norm) is maximized
+    knee_distance = score_norm - k_norm
+
+    # Apply smoothing to reduce noise (fixed window of 15 k-values for stability)
+    window_size = 15
+    knee_smooth = pd.Series(knee_distance).rolling(window_size, center=True, min_periods=1).mean().values
+    best_knee_idx = np.argmax(knee_smooth)
+    best_knee_k = int(k_values[best_knee_idx])
+
+    # Also compute raw (unsmoothed) knee for comparison
+    best_knee_raw_idx = np.argmax(knee_distance)
+    best_knee_raw_k = int(k_values[best_knee_raw_idx])
+
+    # Generate knee diagnostic plot
+    fig_knee, axes_knee = plt.subplots(2, 2, figsize=(12, 10))
+
+    # 1. Raw composite score
+    ax1 = axes_knee[0, 0]
+    ax1.plot(k_values, scores, 'b-', linewidth=1.5)
+    ax1.axvline(x=best_knee_k, color='r', linestyle='--', label=f'Knee k={best_knee_k}')
+    ax1.set_xlabel('Number of clusters (k)')
+    ax1.set_ylabel('Composite Score')
+    ax1.set_title('1. Raw Composite Score')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    # 2. Normalized values with diagonal
+    ax2 = axes_knee[0, 1]
+    ax2.plot(k_norm, score_norm, 'b-', linewidth=1.5, label='Normalized curve')
+    ax2.plot([0, 1], [0, 1], 'k--', alpha=0.5, label='Diagonal (no improvement)')
+    knee_k_norm = k_norm[best_knee_idx]
+    knee_score_norm = score_norm[best_knee_idx]
+    ax2.scatter([knee_k_norm], [knee_score_norm], color='r', s=100, zorder=5, label=f'Knee k={best_knee_k}')
+    ax2.plot([knee_k_norm, knee_k_norm], [knee_k_norm, knee_score_norm], 'r-', linewidth=2, alpha=0.7)
+    ax2.set_xlabel(f'Normalized k (range: {int(k_min_obs)}-{int(k_max_obs)})')
+    ax2.set_ylabel('Normalized Score')
+    ax2.set_title('2. Kneedle: Observed Range Normalization')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    ax2.set_xlim(-0.05, 1.05)
+    ax2.set_ylim(-0.05, 1.05)
+
+    # 3. Composite-knee distance (raw and smoothed)
+    ax3 = axes_knee[1, 0]
+    ax3.plot(k_values, knee_distance, 'b-', alpha=0.5, label='Raw distance')
+    ax3.plot(k_values, knee_smooth, 'b-', linewidth=2, label=f'Smoothed (window={window_size})')
+    ax3.axvline(x=best_knee_k, color='r', linestyle='--', label=f'Smoothed k={best_knee_k}')
+    ax3.axvline(x=best_knee_raw_k, color='orange', linestyle=':', linewidth=2, label=f'Raw k={best_knee_raw_k}')
+    ax3.axhline(y=0, color='k', linestyle='-', alpha=0.3)
+    ax3.set_xlabel('Number of clusters (k)')
+    ax3.set_ylabel('Distance from Diagonal')
+    ax3.set_title('3. Composite-Knee Distance')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+
+    # 4. Enrichment vs k with composite-knee point
+    ax4 = axes_knee[1, 1]
+    ax4.plot(k_values, stats_df['enriched_ratio'].values * 100, 'g-', label='Any enriched %')
+    ax4.plot(k_values, stats_df['strong_ratio'].values * 100, 'orange', label='Strong (≥80%) %')
+    ax4.axvline(x=best_knee_raw_k, color='orange', linestyle=':', linewidth=2, label=f'Composite-knee k={best_knee_raw_k}')
+    ax4.set_xlabel('Number of clusters (k)')
+    ax4.set_ylabel('Enrichment Ratio (%)')
+    ax4.set_title('4. Enrichment at Composite-Knee')
+    ax4.legend()
+    ax4.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    knee_plot_file = f"{args.output_prefix}.composite_knee_diagnostic.pdf"
+    plt.savefig(knee_plot_file, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved composite-knee diagnostic plot to: {knee_plot_file}")
+
     # Find best k by each metric
     print(f"\n  Optimal k by metric:")
     print(f"    Silhouette:        k={best_silhouette_k} (score={stats_df['silhouette'].max():.4f})")
@@ -1137,6 +1225,7 @@ if args.n_clusters is None:
         best_db_k = int(stats_df.loc[stats_df['davies_bouldin'].idxmin(), 'k'])
         print(f"    Davies-Bouldin:    k={best_db_k} (score={stats_df['davies_bouldin'].min():.4f})")
     print(f"    Composite:         k={best_composite_k} (score={stats_df['composite_score'].max():.4f})")
+    print(f"    Composite-knee:    k={best_knee_raw_k} (raw), k={best_knee_k} (smoothed, window={window_size})")
 
     # Select k based on chosen metric
     if args.k_selection == "silhouette":
@@ -1145,6 +1234,9 @@ if args.n_clusters is None:
     elif args.k_selection == "calinski":
         selected_k = best_ch_k
         selection_metric = "Calinski-Harabasz"
+    elif args.k_selection == "composite-knee":
+        selected_k = best_knee_k  # Use smoothed for stability
+        selection_metric = "composite-knee (diminishing returns)"
     else:  # composite (default)
         selected_k = best_composite_k
         selection_metric = "composite score"
