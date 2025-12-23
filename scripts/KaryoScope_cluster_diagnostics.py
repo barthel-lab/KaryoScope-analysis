@@ -265,8 +265,17 @@ def main():
                         help="Cluster analysis TSV file (optional, for enrichment info)")
     parser.add_argument("--output-prefix", dest="output_prefix", required=True,
                         help="Output prefix for generated files")
+    parser.add_argument("--dark-mode", dest="dark_mode", action="store_true", default=False,
+                        help="Output plots with dark background (default: False)")
 
     args = parser.parse_args()
+
+    # Set up plot style
+    if args.dark_mode:
+        plt.style.use('dark_background')
+        sns.set_style("darkgrid")
+    else:
+        sns.set_style("whitegrid")
 
     print("=" * 60)
     print("KaryoScope Cluster Diagnostics")
@@ -297,7 +306,6 @@ def main():
                 print(f"  Added enrichment labels")
 
     # Set up plotting style
-    sns.set_style("whitegrid")
     plt.rcParams['figure.dpi'] = 150
 
     # === Page 1: Metric distributions by cluster ===
