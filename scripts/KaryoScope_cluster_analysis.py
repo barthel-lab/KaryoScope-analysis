@@ -20,9 +20,13 @@
 #   per-sample: Each sample vs all others (no groups required)
 
 import argparse
+import sys
 import gzip
 import numpy as np
 import pandas as pd
+
+# Capture original command line for logging
+_original_command = ' '.join(sys.argv)
 from collections import defaultdict, Counter
 from scipy.cluster.hierarchy import linkage, dendrogram, leaves_list, fcluster, cut_tree
 from scipy.spatial.distance import pdist, squareform
@@ -76,8 +80,8 @@ parser.add_argument("--davies-bouldin", dest="compute_davies_bouldin",
                     help="Compute Davies-Bouldin index (not recommended, favors high k) (default: False)")
 parser.add_argument("--min-read-length", dest="min_read_length", type=int, default=10000,
                     help="Minimum read length in bp to include (default: 10000)")
-parser.add_argument("--exclude-features", dest="exclude_features", default=None,
-                    help="Comma-separated list of features to exclude (e.g., 'novel,unknown')")
+parser.add_argument("--exclude-features", dest="exclude_features", default="novel,unknown,canonical_telomere_specific",
+                    help="Comma-separated list of features to exclude (default: 'novel,unknown,canonical_telomere_specific')")
 parser.add_argument("--linkage-method", dest="linkage_method", default="ward",
                     help="Linkage method for hierarchical clustering (default: ward)")
 parser.add_argument("--matrix-type", dest="matrix_type", default="length_weighted",
@@ -92,6 +96,11 @@ parser.add_argument("--edges", dest="edge_mode", default="symmetric",
                          "  directional: standard A->B edge counting\n"
                          "  bidirectional: A->B and B->A are both counted separately\n"
                          "  symmetric: edges are sorted alphabetically, A->B and B->A both count as A->B (default: symmetric)")
+parser.add_argument("--matrix-mode", dest="matrix_mode", default="layered",
+                    choices=["layered", "combined"],
+                    help="Matrix building mode for merged featuresets:\n"
+                         "  layered: split colon-separated features into layers, build matrices per layer (default)\n"
+                         "  combined: treat merged features as atomic (original approach, higher dimensionality)")
 parser.add_argument("--abundance", dest="include_abundance",
                     action=argparse.BooleanOptionalAction, default=True,
                     help="Include feature abundance dimensions (default: True)")
@@ -130,8 +139,34 @@ parser.add_argument("--reduce-dims", dest="reduce_dims", type=int, default=500,
 parser.add_argument("--dark-mode", dest="dark_mode",
                     action=argparse.BooleanOptionalAction, default=False,
                     help="Output diagnostic plots with dark background (default: False)")
+parser.add_argument("--log-file", dest="log_file",
+                    action=argparse.BooleanOptionalAction, default=True,
+                    help="Save console output to {output_prefix}.log (default: True)")
 
 args = parser.parse_args()
+
+# --- Set up logging ---
+class TeeLogger:
+    """Write to both stdout and a log file."""
+    def __init__(self, log_path):
+        self.terminal = sys.stdout
+        self.log = open(log_path, 'w')
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        self.log.flush()
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+
+    def close(self):
+        self.log.close()
+
+if args.log_file:
+    log_path = f"{args.output_prefix}.log"
+    sys.stdout = TeeLogger(log_path)
 
 # --- Set up plot style ---
 if args.dark_mode:
@@ -207,6 +242,65 @@ def get_edges(features, edge_mode="directional"):
             sorted_pair = tuple(sorted([from_feat, to_feat]))
             edges.append(sorted_pair)
     return edges
+
+
+def detect_feature_layers(features):
+    """Detect if features are merged (colon-separated) and count layers.
+
+    Args:
+        features: List of feature names
+
+    Returns:
+        n_layers: Number of layers (1 if not merged, >1 if merged)
+    """
+    # Sample some features to detect layer count
+    sample_features = list(features)[:100]
+    layer_counts = [len(f.split(':')) for f in sample_features]
+
+    # Use mode of layer counts (most features should have same structure)
+    if not layer_counts:
+        return 1
+    n_layers = max(set(layer_counts), key=layer_counts.count)
+    return n_layers
+
+
+def split_feature_into_layers(feature, n_layers):
+    """Split a merged feature into its component layers.
+
+    Args:
+        feature: Feature string (e.g., "chr7:p_arm:nonsubtelomeric")
+        n_layers: Expected number of layers
+
+    Returns:
+        List of layer components (e.g., ["chr7", "p_arm", "nonsubtelomeric"])
+    """
+    parts = feature.split(':')
+    if len(parts) == n_layers:
+        return parts
+    elif len(parts) < n_layers:
+        # Pad with 'unknown' if fewer parts than expected
+        return parts + ['unknown'] * (n_layers - len(parts))
+    else:
+        # If more parts than expected, join extra parts into last layer
+        return parts[:n_layers-1] + [':'.join(parts[n_layers-1:])]
+
+
+def get_layer_features(features_with_lengths, layer_idx, n_layers):
+    """Extract features for a specific layer from merged feature data.
+
+    Args:
+        features_with_lengths: List of (feature, length) tuples
+        layer_idx: Which layer to extract (0-indexed)
+        n_layers: Total number of layers
+
+    Returns:
+        List of (layer_feature, length) tuples
+    """
+    result = []
+    for feat, length in features_with_lengths:
+        parts = split_feature_into_layers(feat, n_layers)
+        result.append((parts[layer_idx], length))
+    return result
 
 def load_sample_metadata(metadata_file, sample_labels):
     """Load sample metadata from TSV file or auto-generate defaults.
@@ -699,23 +793,16 @@ read_feature_data = in_data.groupby('read').apply(
     lambda x: list(zip(x['feature'], x['length']))
 ).to_dict()
 
-read_features = {r: [f[0] for f in data] for r, data in read_feature_data.items()}
-read_feature_lengths = {r: {f: l for f, l in data} for r, data in read_feature_data.items()}
+read_names = sorted(read_feature_data.keys())
+
+# Detect if features are merged (colon-separated) and count layers
+all_features = sorted(in_data['feature'].unique())
+n_layers = detect_feature_layers(all_features)
+print(f"  Detected {n_layers} feature layer(s)")
 
 # Get edges with weights (length of source feature)
 def get_weighted_edges(features_with_lengths, edge_mode="directional"):
-    """Get edges with weights based on edge counting mode.
-
-    Args:
-        features_with_lengths: List of (feature_name, length) tuples in order
-        edge_mode: One of:
-            - "directional": standard A->B edge counting, weight = source length
-            - "bidirectional": A->B and B->A counted separately, reverse uses avg weight
-            - "symmetric": edges sorted alphabetically, weight = avg of both features
-
-    Returns:
-        List of (from, to, weight) tuples
-    """
+    """Get edges with weights based on edge counting mode."""
     if len(features_with_lengths) <= 1:
         return []
     edges = []
@@ -730,94 +817,243 @@ def get_weighted_edges(features_with_lengths, edge_mode="directional"):
             edges.append((from_feat, to_feat, from_len))
             edges.append((to_feat, from_feat, avg_len))
         elif edge_mode == "symmetric":
-            # Sort alphabetically so A->B and B->A both become the same edge
             sorted_pair = tuple(sorted([from_feat, to_feat]))
             edges.append((sorted_pair[0], sorted_pair[1], avg_len))
     return edges
 
-read_edges = {}
-read_weighted_edges = {}
-for read_name, features in read_features.items():
-    read_edges[read_name] = get_edges(features, edge_mode=args.edge_mode)
-    read_weighted_edges[read_name] = get_weighted_edges(read_feature_data[read_name], edge_mode=args.edge_mode)
 
-all_features = sorted(in_data['feature'].unique())
-all_pairs = []
-if args.edge_mode == "symmetric":
-    # For symmetric mode, only include A->B where A < B (alphabetically)
-    # Both A->B and B->A edges in the data will map to this single column
-    for i, f1 in enumerate(all_features):
-        for f2 in all_features[i+1:]:
-            all_pairs.append(f"{f1}->{f2}")
-else:
-    # For directional and bidirectional, include all A->B pairs
-    for f1 in all_features:
-        for f2 in all_features:
-            if f1 != f2:
+def build_layer_matrix(read_names, read_feature_data, read_length_dict, layer_idx, n_layers,
+                       edge_mode, matrix_type, include_abundance):
+    """Build edge and abundance matrices for a single layer.
+
+    Returns:
+        matrix: Combined edge + abundance matrix for this layer
+        n_edge_cols: Number of edge columns
+        n_abundance_cols: Number of abundance columns
+        layer_features: List of unique features in this layer
+    """
+    # Extract layer-specific features for each read
+    layer_read_data = {}
+    for read_name, feat_data in read_feature_data.items():
+        layer_read_data[read_name] = get_layer_features(feat_data, layer_idx, n_layers)
+
+    # Get unique features for this layer
+    layer_features_set = set()
+    for feat_data in layer_read_data.values():
+        for feat, _ in feat_data:
+            layer_features_set.add(feat)
+    layer_features = sorted(layer_features_set)
+
+    # Build edge pairs for this layer
+    layer_pairs = []
+    if edge_mode == "symmetric":
+        for i, f1 in enumerate(layer_features):
+            for f2 in layer_features[i+1:]:
+                layer_pairs.append(f"{f1}->{f2}")
+    else:
+        for f1 in layer_features:
+            for f2 in layer_features:
+                if f1 != f2:
+                    layer_pairs.append(f"{f1}->{f2}")
+
+    pair_to_idx = {pair: i for i, pair in enumerate(layer_pairs)}
+
+    # Build edge matrix
+    edge_matrix = np.zeros((len(read_names), len(layer_pairs)), dtype=np.float32)
+
+    for i, read_name in enumerate(read_names):
+        layer_data = layer_read_data[read_name]
+        read_len = read_length_dict.get(read_name, 1)
+
+        if matrix_type == "binary":
+            edges = get_edges([f for f, _ in layer_data], edge_mode=edge_mode)
+            for from_feat, to_feat in edges:
+                pair_name = f"{from_feat}->{to_feat}"
+                if pair_name in pair_to_idx:
+                    edge_matrix[i, pair_to_idx[pair_name]] = 1
+
+        elif matrix_type == "count":
+            edges = get_edges([f for f, _ in layer_data], edge_mode=edge_mode)
+            for from_feat, to_feat in edges:
+                pair_name = f"{from_feat}->{to_feat}"
+                if pair_name in pair_to_idx:
+                    edge_matrix[i, pair_to_idx[pair_name]] += 1
+
+        elif matrix_type == "length_weighted":
+            edges = get_weighted_edges(layer_data, edge_mode=edge_mode)
+            for from_feat, to_feat, weight in edges:
+                pair_name = f"{from_feat}->{to_feat}"
+                if pair_name in pair_to_idx:
+                    edge_matrix[i, pair_to_idx[pair_name]] += weight / read_len
+
+    n_edge_cols = len(layer_pairs)
+
+    # Build abundance matrix if requested
+    if include_abundance:
+        feature_to_idx = {f: i for i, f in enumerate(layer_features)}
+        abundance_matrix = np.zeros((len(read_names), len(layer_features)), dtype=np.float32)
+
+        for i, read_name in enumerate(read_names):
+            read_len = read_length_dict.get(read_name, 1)
+            layer_data = layer_read_data[read_name]
+
+            # Sum lengths per feature
+            feature_lengths = defaultdict(float)
+            for feat, length in layer_data:
+                feature_lengths[feat] += length
+
+            # Convert to proportions
+            for feat, total_len in feature_lengths.items():
+                if feat in feature_to_idx:
+                    abundance_matrix[i, feature_to_idx[feat]] = total_len / read_len
+
+        matrix = np.hstack([edge_matrix, abundance_matrix])
+        n_abundance_cols = len(layer_features)
+    else:
+        matrix = edge_matrix
+        n_abundance_cols = 0
+
+    return matrix, n_edge_cols, n_abundance_cols, layer_features
+
+
+def build_combined_matrix(read_names, read_feature_data, read_length_dict, all_features,
+                          edge_mode, matrix_type, include_abundance):
+    """Build edge and abundance matrices treating features as atomic (original approach).
+
+    This treats merged features like "chr7:p_arm:nonsubtelomeric" as single atomic features,
+    rather than splitting them into layers. Results in higher dimensionality but preserves
+    the original feature combinations.
+
+    Returns:
+        matrix: Combined edge + abundance matrix
+        n_edge_cols: Number of edge columns
+        n_abundance_cols: Number of abundance columns
+    """
+    # Build edge pairs
+    all_pairs = []
+    if edge_mode == "symmetric":
+        for i, f1 in enumerate(all_features):
+            for f2 in all_features[i+1:]:
                 all_pairs.append(f"{f1}->{f2}")
+    else:
+        for f1 in all_features:
+            for f2 in all_features:
+                if f1 != f2:
+                    all_pairs.append(f"{f1}->{f2}")
 
-read_names = sorted(read_features.keys())
-pair_to_idx = {pair: i for i, pair in enumerate(all_pairs)}
+    pair_to_idx = {pair: i for i, pair in enumerate(all_pairs)}
 
-# Build transition matrix based on matrix type
-if args.matrix_type == "binary":
-    adj_matrix = np.zeros((len(read_names), len(all_pairs)), dtype=np.float32)
+    # Build edge matrix
+    edge_matrix = np.zeros((len(read_names), len(all_pairs)), dtype=np.float32)
+
     for i, read_name in enumerate(read_names):
-        edges = read_edges[read_name]
-        for from_feat, to_feat in edges:
-            pair_name = f"{from_feat}->{to_feat}"
-            if pair_name in pair_to_idx:
-                adj_matrix[i, pair_to_idx[pair_name]] = 1
-
-elif args.matrix_type == "count":
-    adj_matrix = np.zeros((len(read_names), len(all_pairs)), dtype=np.float32)
-    for i, read_name in enumerate(read_names):
-        edges = read_edges[read_name]
-        for from_feat, to_feat in edges:
-            pair_name = f"{from_feat}->{to_feat}"
-            if pair_name in pair_to_idx:
-                adj_matrix[i, pair_to_idx[pair_name]] += 1
-
-elif args.matrix_type == "length_weighted":
-    adj_matrix = np.zeros((len(read_names), len(all_pairs)), dtype=np.float32)
-    for i, read_name in enumerate(read_names):
-        edges = read_weighted_edges[read_name]
+        feat_data = read_feature_data[read_name]
         read_len = read_length_dict.get(read_name, 1)
-        for from_feat, to_feat, weight in edges:
-            pair_name = f"{from_feat}->{to_feat}"
-            if pair_name in pair_to_idx:
-                # Normalize weight by read length
-                adj_matrix[i, pair_to_idx[pair_name]] += weight / read_len
 
-print(f"Transition matrix shape: {adj_matrix.shape}")
-print(f"Non-zero entries: {np.count_nonzero(adj_matrix):,}")
+        if matrix_type == "binary":
+            edges = get_edges([f for f, _ in feat_data], edge_mode=edge_mode)
+            for from_feat, to_feat in edges:
+                pair_name = f"{from_feat}->{to_feat}"
+                if pair_name in pair_to_idx:
+                    edge_matrix[i, pair_to_idx[pair_name]] = 1
 
-# --- Add feature abundance if requested ---
+        elif matrix_type == "count":
+            edges = get_edges([f for f, _ in feat_data], edge_mode=edge_mode)
+            for from_feat, to_feat in edges:
+                pair_name = f"{from_feat}->{to_feat}"
+                if pair_name in pair_to_idx:
+                    edge_matrix[i, pair_to_idx[pair_name]] += 1
+
+        elif matrix_type == "length_weighted":
+            edges = get_weighted_edges(feat_data, edge_mode=edge_mode)
+            for from_feat, to_feat, weight in edges:
+                pair_name = f"{from_feat}->{to_feat}"
+                if pair_name in pair_to_idx:
+                    edge_matrix[i, pair_to_idx[pair_name]] += weight / read_len
+
+    n_edge_cols = len(all_pairs)
+
+    # Build abundance matrix if requested
+    if include_abundance:
+        feature_to_idx = {f: i for i, f in enumerate(all_features)}
+        abundance_matrix = np.zeros((len(read_names), len(all_features)), dtype=np.float32)
+
+        for i, read_name in enumerate(read_names):
+            read_len = read_length_dict.get(read_name, 1)
+            feat_data = read_feature_data[read_name]
+
+            # Sum lengths per feature
+            feature_lengths = defaultdict(float)
+            for feat, length in feat_data:
+                feature_lengths[feat] += length
+
+            # Convert to proportions
+            for feat, total_len in feature_lengths.items():
+                if feat in feature_to_idx:
+                    abundance_matrix[i, feature_to_idx[feat]] = total_len / read_len
+
+        matrix = np.hstack([edge_matrix, abundance_matrix])
+        n_abundance_cols = len(all_features)
+    else:
+        matrix = edge_matrix
+        n_abundance_cols = 0
+
+    return matrix, n_edge_cols, n_abundance_cols
+
+
+# Build matrix based on selected mode
+if args.matrix_mode == "layered" and n_layers > 1:
+    # Layered mode: split colon-separated features into layers, build matrices per layer
+    print(f"  Using layered matrix mode ({n_layers} layers)")
+
+    all_layer_matrices = []
+    total_edge_cols = 0
+    total_abundance_cols = 0
+
+    for layer_idx in range(n_layers):
+        layer_matrix, n_edge, n_abund, layer_feats = build_layer_matrix(
+            read_names, read_feature_data, read_length_dict, layer_idx, n_layers,
+            args.edge_mode, args.matrix_type, args.include_abundance
+        )
+        all_layer_matrices.append(layer_matrix)
+        total_edge_cols += n_edge
+        total_abundance_cols += n_abund
+        print(f"  Layer {layer_idx + 1}: {len(layer_feats)} features, {n_edge} edge cols, {n_abund} abundance cols")
+
+    # Concatenate all layer matrices
+    adj_matrix = np.hstack(all_layer_matrices)
+
+else:
+    # Combined mode: treat merged features as atomic (original approach)
+    if n_layers > 1:
+        print(f"  Using combined matrix mode (treating {n_layers}-layer features as atomic)")
+    else:
+        print(f"  Using combined matrix mode (single featureset)")
+
+    adj_matrix, total_edge_cols, total_abundance_cols = build_combined_matrix(
+        read_names, read_feature_data, read_length_dict, all_features,
+        args.edge_mode, args.matrix_type, args.include_abundance
+    )
+    print(f"  Unique features: {len(all_features)}")
+    print(f"  Edge columns: {total_edge_cols}")
+    if args.include_abundance:
+        print(f"  Abundance columns: {total_abundance_cols}")
+
+print(f"\nTotal edge dimensions: {total_edge_cols}")
 if args.include_abundance:
-    print(f"\n--- Adding feature abundance dimensions ---")
-
-    # Calculate feature proportions per read
-    abundance_matrix = np.zeros((len(read_names), len(all_features)), dtype=np.float32)
-    feature_to_idx = {f: i for i, f in enumerate(all_features)}
-
-    for i, read_name in enumerate(read_names):
-        read_len = read_length_dict.get(read_name, 1)
-        # Sum lengths per feature
-        feature_lengths = defaultdict(float)
-        for feat, length in read_feature_data[read_name]:
-            feature_lengths[feat] += length
-
-        # Convert to proportions
-        for feat, total_len in feature_lengths.items():
-            if feat in feature_to_idx:
-                abundance_matrix[i, feature_to_idx[feat]] = total_len / read_len
-
-    # Concatenate transition matrix with abundance matrix
-    adj_matrix = np.hstack([adj_matrix, abundance_matrix])
-    print(f"Feature abundance dimensions: {len(all_features)}")
-    print(f"Combined matrix shape: {adj_matrix.shape}")
-
+    print(f"Total abundance dimensions: {total_abundance_cols}")
 print(f"Final matrix shape: {adj_matrix.shape}")
+n_nonzero = np.count_nonzero(adj_matrix)
+n_total = adj_matrix.shape[0] * adj_matrix.shape[1]
+sparsity = 1 - (n_nonzero / n_total)
+print(f"Non-zero entries: {n_nonzero:,} ({100*(1-sparsity):.2f}% dense, {100*sparsity:.2f}% sparse)")
+
+# Report feature usage statistics
+col_usage = (adj_matrix != 0).sum(axis=0)
+active_cols = (col_usage > 0).sum()
+print(f"Active features: {active_cols:,} / {adj_matrix.shape[1]:,} ({100*active_cols/adj_matrix.shape[1]:.1f}%)")
+if active_cols > 0:
+    print(f"  Reads per feature: min={col_usage[col_usage > 0].min()}, median={int(np.median(col_usage[col_usage > 0]))}, max={col_usage.max()}")
 
 # --- Optional dimensionality reduction ---
 adj_matrix_full = adj_matrix  # Keep full matrix for reference
@@ -833,8 +1069,26 @@ if args.reduce_dims and args.reduce_dims > 0:
         svd = TruncatedSVD(n_components=n_components, random_state=42)
         adj_matrix = svd.fit_transform(adj_matrix)
 
+        # Report explained variance
         explained_var = svd.explained_variance_ratio_.sum()
-        print(f"  Explained variance: {explained_var:.1%}")
+        print(f"  Total explained variance: {explained_var:.1%}")
+
+        # Report variance by component ranges
+        cumvar = np.cumsum(svd.explained_variance_ratio_)
+        var_50 = np.searchsorted(cumvar, 0.5) + 1
+        var_90 = np.searchsorted(cumvar, 0.9) + 1
+        var_95 = np.searchsorted(cumvar, 0.95) + 1
+        print(f"  Components for 50% variance: {var_50}")
+        print(f"  Components for 90% variance: {var_90}")
+        print(f"  Components for 95% variance: {var_95}")
+
+        # Report top singular values
+        top_k = min(5, len(svd.singular_values_))
+        top_sv = svd.singular_values_[:top_k]
+        top_var = svd.explained_variance_ratio_[:top_k] * 100
+        print(f"  Top {top_k} singular values: {', '.join(f'{v:.1f}' for v in top_sv)}")
+        print(f"  Top {top_k} variance %: {', '.join(f'{v:.1f}%' for v in top_var)}")
+
         print(f"  Reduced matrix shape: {adj_matrix.shape}")
     else:
         print(f"\n--- Skipping dimensionality reduction (already at {n_features} dims) ---")
@@ -1085,8 +1339,9 @@ if args.n_clusters is None:
     # This is equivalent to finding where (score_norm - k_norm) is maximized
     knee_distance = score_norm - k_norm
 
-    # Apply smoothing to reduce noise (fixed window of 15 k-values for stability)
-    window_size = 15
+    # Apply smoothing to reduce noise (window = 20% of k range for adaptive stability)
+    k_range = k_max_obs - k_min_obs
+    window_size = max(3, int(k_range * 0.2))  # At least 3 for meaningful smoothing
     knee_smooth = pd.Series(knee_distance).rolling(window_size, center=True, min_periods=1).mean().values
     best_knee_idx = np.argmax(knee_smooth)
     best_knee_k = int(k_values[best_knee_idx])
@@ -2194,6 +2449,51 @@ print(f"  - {analysis_file}")
 print(f"  - {assignments_file}")
 print(f"  - {matrix_file}")
 print(f"  - {plot_file}")
+if args.log_file:
+    print(f"  - {log_path}")
 print(f"\nNext step: Use read_assignments.tsv with KaryoScope_cluster_plot.py")
 print(f"to visualize reads from each cluster (sorted by centroid distance).")
 print(f"Use --feature-matrix with the .feature_matrix.npz file for dendrogram header.")
+
+# Print parameters table
+print(f"\n" + "=" * 60)
+print(f"Parameters")
+print(f"=" * 60)
+print(f"{'Parameter':<25} {'Value':<35}")
+print(f"{'-'*25} {'-'*35}")
+print(f"{'bed':<25} {len(args.bed)} file(s)")
+print(f"{'output-prefix':<25} {args.output_prefix}")
+print(f"{'sample-metadata':<25} {args.sample_metadata}")
+print(f"{'comparison-mode':<25} {args.comparison_mode}")
+print(f"{'control-group':<25} {args.control_group}")
+print(f"{'n-clusters':<25} {args.n_clusters}")
+print(f"{'min-k':<25} {args.min_k}")
+print(f"{'max-k':<25} {args.max_k}")
+print(f"{'k-selection':<25} {args.k_selection}")
+print(f"{'min-cluster-size':<25} {args.min_cluster_size}")
+print(f"{'min-read-length':<25} {args.min_read_length}")
+print(f"{'exclude-features':<25} {args.exclude_features}")
+print(f"{'linkage-method':<25} {args.linkage_method}")
+print(f"{'matrix-type':<25} {args.matrix_type}")
+print(f"{'edges':<25} {args.edge_mode}")
+print(f"{'matrix-mode':<25} {args.matrix_mode}")
+print(f"{'abundance':<25} {args.include_abundance}")
+print(f"{'reduce-dims':<25} {args.reduce_dims}")
+print(f"{'umap':<25} {args.plot_umap}")
+print(f"{'umap-neighbors':<25} {args.umap_neighbors}")
+print(f"{'umap-min-dist':<25} {args.umap_min_dist}")
+print(f"{'circular-dendrogram':<25} {args.plot_circular_dendrogram}")
+print(f"{'perfect-threshold':<25} {args.perfect_threshold}")
+print(f"{'strong-threshold':<25} {args.strong_threshold}")
+print(f"{'early-stopping':<25} {args.early_stopping}")
+print(f"{'nested':<25} {args.nested}")
+print(f"{'also-test-samples':<25} {args.also_test_samples}")
+print(f"{'stratified':<25} {args.stratified}")
+print(f"{'dark-mode':<25} {args.dark_mode}")
+print(f"{'log-file':<25} {args.log_file}")
+
+# Print command used
+print(f"\n" + "=" * 60)
+print(f"Command")
+print(f"=" * 60)
+print(_original_command)
