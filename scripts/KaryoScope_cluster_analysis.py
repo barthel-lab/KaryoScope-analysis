@@ -30,7 +30,7 @@ _original_command = ' '.join(sys.argv)
 from collections import defaultdict, Counter
 from scipy.cluster.hierarchy import linkage, dendrogram, leaves_list, fcluster, cut_tree
 from scipy.spatial.distance import pdist, squareform
-from scipy.stats import fisher_exact, chi2_contingency
+from scipy.stats import fisher_exact, chi2_contingency, false_discovery_control
 from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
 from sklearn.decomposition import TruncatedSVD
 import matplotlib.pyplot as plt
@@ -96,11 +96,11 @@ parser.add_argument("--edges", dest="edge_mode", default="symmetric",
                          "  directional: standard A->B edge counting\n"
                          "  bidirectional: A->B and B->A are both counted separately\n"
                          "  symmetric: edges are sorted alphabetically, A->B and B->A both count as A->B (default: symmetric)")
-parser.add_argument("--matrix-mode", dest="matrix_mode", default="layered",
+parser.add_argument("--matrix-mode", dest="matrix_mode", default="combined",
                     choices=["layered", "combined"],
                     help="Matrix building mode for merged featuresets:\n"
-                         "  layered: split colon-separated features into layers, build matrices per layer (default)\n"
-                         "  combined: treat merged features as atomic (original approach, higher dimensionality)")
+                         "  layered: split colon-separated features into layers, build matrices per layer\n"
+                         "  combined: treat merged features as atomic (default, higher dimensionality)")
 parser.add_argument("--abundance", dest="include_abundance",
                     action=argparse.BooleanOptionalAction, default=True,
                     help="Include feature abundance dimensions (default: True)")
@@ -142,6 +142,13 @@ parser.add_argument("--dark-mode", dest="dark_mode",
 parser.add_argument("--log-file", dest="log_file",
                     action=argparse.BooleanOptionalAction, default=True,
                     help="Save console output to {output_prefix}.log (default: True)")
+parser.add_argument("--fdr-threshold", dest="fdr_threshold", type=float, default=0.05,
+                    help="FDR q-value threshold for calling enrichment (default: 0.05)")
+parser.add_argument("--fdr-method", dest="fdr_method", default="bh",
+                    choices=["bh", "by"],
+                    help="FDR correction method:\n"
+                         "  bh: Benjamini-Hochberg (default, assumes independence or PRDS)\n"
+                         "  by: Benjamini-Yekutieli (more conservative, valid for any dependency)")
 
 args = parser.parse_args()
 
@@ -1617,9 +1624,41 @@ else:
     cluster_linkage = None
     print(f"  Only 1 cluster, skipping linkage computation")
 
-# Sort by enrichment type and p-value
+# Create DataFrame and apply FDR correction
 cluster_df = pd.DataFrame(cluster_analysis)
-cluster_df = cluster_df.sort_values(['enrichment', 'p_value'])
+
+# Apply FDR correction to p-values
+print(f"\n--- Applying FDR Correction (Benjamini-{'Hochberg' if args.fdr_method == 'bh' else 'Yekutieli'}) ---")
+raw_pvals = cluster_df['p_value'].values
+q_values = false_discovery_control(raw_pvals, method=args.fdr_method)
+cluster_df['q_value'] = q_values
+
+# Store original enrichment labels (based on raw p < 0.05)
+cluster_df['enrichment_raw'] = cluster_df['enrichment']
+
+# Update enrichment labels based on FDR-corrected q-values
+def update_enrichment_label(row):
+    """Update enrichment label based on q-value threshold."""
+    if row['q_value'] >= args.fdr_threshold:
+        return 'mixed'
+    # If q-value passes, keep the original enrichment direction
+    if '-enriched' in row['enrichment_raw']:
+        return row['enrichment_raw']
+    return 'mixed'
+
+cluster_df['enrichment'] = cluster_df.apply(update_enrichment_label, axis=1)
+
+# Report FDR correction impact
+n_raw_sig = (cluster_df['enrichment_raw'] != 'mixed').sum()
+n_fdr_sig = (cluster_df['enrichment'] != 'mixed').sum()
+print(f"  Raw p < 0.05: {n_raw_sig} enriched clusters")
+print(f"  FDR q < {args.fdr_threshold}: {n_fdr_sig} enriched clusters")
+if n_raw_sig > n_fdr_sig:
+    n_lost = n_raw_sig - n_fdr_sig
+    print(f"  {n_lost} cluster(s) lost significance after FDR correction")
+
+# Sort by enrichment type and q-value
+cluster_df = cluster_df.sort_values(['enrichment', 'q_value'])
 
 # --- Output results ---
 print(f"\n--- Cluster Summary ---")
@@ -1635,10 +1674,10 @@ else:
 header_parts = ['Cluster', 'Size']
 for item in col_items:
     header_parts.extend([item[:6], f'{item[:4]}%'])  # Truncate long names
-header_parts.extend(['P-value', 'Enrichment', 'Centroid'])
-header_fmt = '{:<8} {:<6} ' + ' '.join(['{:<6}'] * (len(col_items) * 2)) + ' {:<10} {:<20} {:<10}'
+header_parts.extend(['P-value', 'Q-value', 'Enrichment', 'Centroid'])
+header_fmt = '{:<8} {:<6} ' + ' '.join(['{:<6}'] * (len(col_items) * 2)) + ' {:<10} {:<10} {:<20} {:<10}'
 print(header_fmt.format(*header_parts))
-print("-" * (95 + 12 * len(col_items)))
+print("-" * (105 + 12 * len(col_items)))
 
 for _, row in cluster_df.iterrows():
     if args.comparison_mode == 'per-sample':
@@ -1656,9 +1695,9 @@ for _, row in cluster_df.iterrows():
     for item in col_items:
         row_values.append(int(row.get(f'{item}_count', 0)))
         row_values.append(f"{row.get(f'{item}_pct', 0):.1f}")
-    row_values.extend([f"{row['p_value']:.2e}", row['enrichment'][:18], f"{centroid_label}{flag}"])
+    row_values.extend([f"{row['p_value']:.2e}", f"{row['q_value']:.2e}", row['enrichment'][:18], f"{centroid_label}{flag}"])
 
-    row_fmt = '{:<8} {:<6} ' + ' '.join(['{:<6}'] * (len(col_items) * 2)) + ' {:<10} {:<20} {:<10}'
+    row_fmt = '{:<8} {:<6} ' + ' '.join(['{:<6}'] * (len(col_items) * 2)) + ' {:<10} {:<10} {:<20} {:<10}'
     print(row_fmt.format(*row_values))
 
 # Save cluster analysis
@@ -1852,17 +1891,19 @@ ax3.legend()
 if n_comp == 2:
     ax3.axhline(y=50, color='gray', linestyle='--', alpha=0.5)
 
-# 4. P-value distribution
+# 4. Q-value (FDR-corrected) distribution
 ax4 = axes[1, 1]
-pvals = cluster_df['p_value'].values
-colors_pval = [get_enrichment_color(e) for e in cluster_df['enrichment']]
-ax4.bar(range(len(pvals)), -np.log10(pvals + 1e-300), color=colors_pval)
-ax4.axhline(y=-np.log10(0.05), color='red', linestyle='--', alpha=0.5, label='p=0.05')
-ax4.axhline(y=-np.log10(0.01), color='orange', linestyle='--', alpha=0.5, label='p=0.01')
+qvals = cluster_df['q_value'].values
+colors_qval = [get_enrichment_color(e) for e in cluster_df['enrichment']]
+ax4.bar(range(len(qvals)), -np.log10(qvals + 1e-300), color=colors_qval)
+ax4.axhline(y=-np.log10(0.05), color='red', linestyle='--', alpha=0.7, label='q=0.05')
+ax4.axhline(y=-np.log10(0.10), color='orange', linestyle='--', alpha=0.5, label='q=0.10')
+if args.fdr_threshold not in (0.05, 0.10):
+    ax4.axhline(y=-np.log10(args.fdr_threshold), color='blue', linestyle='--', alpha=0.7, label=f'q={args.fdr_threshold}')
 ax4.set_xlabel("Cluster")
-ax4.set_ylabel("-log10(p-value)")
-ax4.set_title("Enrichment Significance (per-sample)" if args.comparison_mode == 'per-sample' else "Enrichment Significance")
-ax4.set_xticks(range(len(pvals)))
+ax4.set_ylabel("-log10(q-value)")
+ax4.set_title("FDR-Corrected Significance (per-sample)" if args.comparison_mode == 'per-sample' else "FDR-Corrected Significance")
+ax4.set_xticks(range(len(qvals)))
 ax4.set_xticklabels([f"C{c}" for c in cluster_df['cluster_id']], rotation=45)
 ax4.legend()
 
@@ -2301,19 +2342,21 @@ if args.plot_umap and len(read_names) > 10:
         print("  Warning: umap-learn not installed. Skipping UMAP plot.")
         print("  Install with: pip install umap-learn")
 
-# --- Bubble Plot for Per-Sample Enrichment ---
+# --- Bubble Plot for Enrichment (all modes) ---
+print(f"\n--- Generating enrichment bubble plot ---")
+
+cluster_ids = cluster_df['cluster_id'].values
+n_clusters = len(cluster_ids)
+
+# Determine rows based on comparison mode
 if args.comparison_mode == 'per-sample':
-    print(f"\n--- Generating enrichment plots ---")
+    row_labels = sample_labels
+    n_rows = len(sample_labels)
 
-    # Build matrix of -log10(p-values) and odds ratios for each cluster x sample
-    cluster_ids = cluster_df['cluster_id'].values
-    n_clusters = len(cluster_ids)
-    n_samples = len(sample_labels)
-
-    # Extract p-values and odds ratios matrices
-    pval_matrix = np.zeros((n_samples, n_clusters))
-    odds_matrix = np.zeros((n_samples, n_clusters))
-    pct_matrix = np.zeros((n_samples, n_clusters))
+    # Extract p-values and odds ratios matrices for per-sample mode
+    pval_matrix = np.zeros((n_rows, n_clusters))
+    odds_matrix = np.zeros((n_rows, n_clusters))
+    pct_matrix = np.zeros((n_rows, n_clusters))
 
     for j, cid in enumerate(cluster_ids):
         row = cluster_df[cluster_df['cluster_id'] == cid].iloc[0]
@@ -2321,110 +2364,160 @@ if args.comparison_mode == 'per-sample':
             pval_matrix[i, j] = row.get(f'{sample}_pval', 1.0)
             odds_matrix[i, j] = row.get(f'{sample}_odds', 1.0)
             pct_matrix[i, j] = row.get(f'{sample}_pct', 0.0)
+else:
+    # For two-group and multi-group modes, use groups as rows
+    row_labels = all_groups
+    n_rows = len(all_groups)
 
-    # Transform p-values to -log10 (capped at 10 for visualization)
-    with np.errstate(divide='ignore'):
-        neg_log_p = -np.log10(pval_matrix)
-    neg_log_p = np.clip(neg_log_p, 0, 10)  # Cap at 10 for display
+    # Extract percentage matrix and compute expected percentages
+    pct_matrix = np.zeros((n_rows, n_clusters))
 
-    # === Plot 1: Bubble plot (enrichment significance and direction) ===
-    fig1, ax1 = plt.subplots(figsize=(max(14, n_clusters * 0.4 + 4), n_samples * 0.8 + 3))
-    fig1.patch.set_facecolor(PLOT_BG_COLOR)
-    ax1.set_facecolor(PLOT_BG_COLOR)
+    # Calculate expected percentage for each group (based on total reads)
+    total_reads = len(read_names)
+    expected_pcts = {}
+    for g in all_groups:
+        group_total = sum(1 for s in read_to_sample.values() if sample_to_group.get(s) == g)
+        expected_pcts[g] = (group_total / total_reads * 100) if total_reads > 0 else 0
 
-    # Create bubble plot
-    for i, sample in enumerate(sample_labels):
-        for j, cid in enumerate(cluster_ids):
-            size = neg_log_p[i, j] * 50 + 10  # Scale size
-            odds = odds_matrix[i, j]
+    for j, cid in enumerate(cluster_ids):
+        row = cluster_df[cluster_df['cluster_id'] == cid].iloc[0]
+        for i, group in enumerate(all_groups):
+            pct_matrix[i, j] = row.get(f'{group}_pct', 0.0)
 
-            # Color by odds ratio: red = enriched (>1), blue = depleted (<1)
-            if odds > 1:
-                # Enriched: red scale
-                intensity = min(1.0, np.log2(odds) / 3)  # Log scale, cap at 8x enrichment
-                color = plt.cm.Reds(0.3 + intensity * 0.7)
+    # For group modes, we use overall q-value and derive enrichment from pct vs expected
+    # Create pseudo-odds based on observed/expected ratio
+    odds_matrix = np.zeros((n_rows, n_clusters))
+    pval_matrix = np.zeros((n_rows, n_clusters))
+
+    for j, cid in enumerate(cluster_ids):
+        row = cluster_df[cluster_df['cluster_id'] == cid].iloc[0]
+        cluster_qval = row.get('q_value', 1.0)
+        enrichment = row.get('enrichment', 'mixed')
+
+        for i, group in enumerate(all_groups):
+            observed_pct = pct_matrix[i, j]
+            expected_pct = expected_pcts[group]
+
+            # Compute odds ratio as observed/expected
+            if expected_pct > 0:
+                odds_matrix[i, j] = observed_pct / expected_pct
             else:
-                # Depleted: blue scale
-                intensity = min(1.0, -np.log2(odds + 0.001) / 3)
-                color = plt.cm.Blues(0.3 + intensity * 0.7)
+                odds_matrix[i, j] = 1.0
 
-            # Add significance indicator
-            if pval_matrix[i, j] < 0.05:
-                edgecolor = 'white' if args.dark_mode else 'black'
-                linewidth = 1.5
+            # Assign p-value: significant only if this group is enriched/depleted
+            if enrichment == f'{group}-enriched':
+                pval_matrix[i, j] = cluster_qval  # Use q-value for this group
+            elif enrichment != 'mixed' and observed_pct < expected_pct:
+                # This group is depleted (another group is enriched)
+                pval_matrix[i, j] = cluster_qval
             else:
-                edgecolor = 'gray'
-                linewidth = 0.5
+                pval_matrix[i, j] = 1.0  # Not significant for this group
 
-            ax1.scatter(j, i, s=size, c=[color], edgecolors=edgecolor, linewidths=linewidth)
+# Transform p-values to -log10 (capped at 10 for visualization)
+with np.errstate(divide='ignore'):
+    neg_log_p = -np.log10(pval_matrix)
+neg_log_p = np.clip(neg_log_p, 0, 10)  # Cap at 10 for display
 
-    ax1.set_xticks(range(n_clusters))
-    ax1.set_xticklabels([str(cid) for cid in cluster_ids], rotation=90, fontsize=9)
-    ax1.set_yticks(range(n_samples))
-    ax1.set_yticklabels(sample_labels, fontsize=11)
-    ax1.set_xlabel('Cluster ID', fontsize=12)
-    ax1.set_ylabel('Sample', fontsize=12)
-    ax1.set_title('Enrichment Bubble Plot\n(size: -log10(p-value), color: red=enriched, blue=depleted)', fontsize=13)
-    ax1.set_xlim(-0.5, n_clusters - 0.5)
-    ax1.set_ylim(-0.5, n_samples - 0.5)
-    ax1.grid(True, alpha=0.3, color=PLOT_GRID_COLOR)
+# === Plot 1: Bubble plot (enrichment significance and direction) ===
+fig1, ax1 = plt.subplots(figsize=(max(14, n_clusters * 0.4 + 4), n_rows * 0.8 + 3))
+fig1.patch.set_facecolor(PLOT_BG_COLOR)
+ax1.set_facecolor(PLOT_BG_COLOR)
 
-    # Add legend for size
-    size_legend_vals = [1.3, 2, 3]  # -log10(p) values = p of 0.05, 0.01, 0.001
-    for val in size_legend_vals:
-        ax1.scatter([], [], s=val * 50 + 10, c='gray', alpha=0.7,
-                    label=f'p = {10**(-val):.3g}')
-    ax1.legend(loc='upper left', bbox_to_anchor=(1.01, 1), title='P-value', fontsize=9)
+# Create bubble plot
+for i, label in enumerate(row_labels):
+    for j, cid in enumerate(cluster_ids):
+        size = neg_log_p[i, j] * 50 + 10  # Scale size
+        odds = odds_matrix[i, j]
 
-    plt.tight_layout()
-    bubble_file = f"{args.output_prefix}.enrichment_bubble.pdf"
-    plt.savefig(bubble_file, dpi=150, bbox_inches='tight', facecolor=PLOT_BG_COLOR)
-    plt.close()
-    print(f"  Saved bubble plot: {bubble_file}")
+        # Color by odds ratio: red = enriched (>1), blue = depleted (<1)
+        if odds > 1:
+            # Enriched: red scale
+            intensity = min(1.0, np.log2(odds) / 3)  # Log scale, cap at 8x enrichment
+            color = plt.cm.Reds(0.3 + intensity * 0.7)
+        else:
+            # Depleted: blue scale
+            intensity = min(1.0, -np.log2(odds + 0.001) / 3)
+            color = plt.cm.Blues(0.3 + intensity * 0.7)
 
-    # === Plot 2: Heatmap of sample percentage per cluster ===
-    fig2, ax2 = plt.subplots(figsize=(max(14, n_clusters * 0.4 + 4), n_samples * 0.8 + 3))
-    fig2.patch.set_facecolor(PLOT_BG_COLOR)
-    ax2.set_facecolor(PLOT_BG_COLOR)
+        # Add significance indicator
+        if pval_matrix[i, j] < 0.05:
+            edgecolor = 'white' if args.dark_mode else 'black'
+            linewidth = 1.5
+        else:
+            edgecolor = 'gray'
+            linewidth = 0.5
 
-    im = ax2.imshow(pct_matrix, aspect='auto', cmap='YlOrRd', vmin=0, vmax=100)
+        ax1.scatter(j, i, s=size, c=[color], edgecolors=edgecolor, linewidths=linewidth)
 
-    # Add text annotations
-    for i in range(n_samples):
-        for j in range(n_clusters):
-            pct = pct_matrix[i, j]
-            pval = pval_matrix[i, j]
-            text_color = 'white' if pct > 50 else 'black'
+ax1.set_xticks(range(n_clusters))
+ax1.set_xticklabels([str(cid) for cid in cluster_ids], rotation=90, fontsize=9)
+ax1.set_yticks(range(n_rows))
+ax1.set_yticklabels(row_labels, fontsize=11)
+ax1.set_xlabel('Cluster ID', fontsize=12)
+y_label = 'Sample' if args.comparison_mode == 'per-sample' else 'Group'
+ax1.set_ylabel(y_label, fontsize=12)
+ax1.set_title('Enrichment Bubble Plot\n(size: -log10(p-value), color: red=enriched, blue=depleted)', fontsize=13)
+ax1.set_xlim(-0.5, n_clusters - 0.5)
+ax1.set_ylim(-0.5, n_rows - 0.5)
+ax1.grid(True, alpha=0.3, color=PLOT_GRID_COLOR)
 
-            # Add asterisks for significance
-            sig = ''
-            if pval < 0.001:
-                sig = '***'
-            elif pval < 0.01:
-                sig = '**'
-            elif pval < 0.05:
-                sig = '*'
+# Add legend for size
+size_legend_vals = [1.3, 2, 3]  # -log10(p) values = p of 0.05, 0.01, 0.001
+for val in size_legend_vals:
+    ax1.scatter([], [], s=val * 50 + 10, c='gray', alpha=0.7,
+                label=f'p = {10**(-val):.3g}')
+ax1.legend(loc='upper left', bbox_to_anchor=(1.01, 1), title='P-value', fontsize=9)
 
-            ax2.text(j, i, f'{pct:.0f}{sig}', ha='center', va='center',
-                     fontsize=8, color=text_color, fontweight='bold' if sig else 'normal')
+plt.tight_layout()
+bubble_file = f"{args.output_prefix}.enrichment_bubble.pdf"
+plt.savefig(bubble_file, dpi=150, bbox_inches='tight', facecolor=PLOT_BG_COLOR)
+plt.close()
+print(f"  Saved bubble plot: {bubble_file}")
 
-    ax2.set_xticks(range(n_clusters))
-    ax2.set_xticklabels([str(cid) for cid in cluster_ids], rotation=90, fontsize=9)
-    ax2.set_yticks(range(n_samples))
-    ax2.set_yticklabels(sample_labels, fontsize=11)
-    ax2.set_xlabel('Cluster ID', fontsize=12)
-    ax2.set_ylabel('Sample', fontsize=12)
-    ax2.set_title('Sample Percentage per Cluster\n(% of cluster reads from each sample; * p<0.05, ** p<0.01, *** p<0.001)', fontsize=13)
+# === Plot 2: Heatmap of sample/group percentage per cluster ===
+fig2, ax2 = plt.subplots(figsize=(max(14, n_clusters * 0.4 + 4), n_rows * 0.8 + 3))
+fig2.patch.set_facecolor(PLOT_BG_COLOR)
+ax2.set_facecolor(PLOT_BG_COLOR)
 
-    # Add colorbar
-    cbar = plt.colorbar(im, ax=ax2, shrink=0.8)
-    cbar.set_label('Percentage (%)', fontsize=11)
+im = ax2.imshow(pct_matrix, aspect='auto', cmap='YlOrRd', vmin=0, vmax=100)
 
-    plt.tight_layout()
-    pct_file = f"{args.output_prefix}.sample_percentage.pdf"
-    plt.savefig(pct_file, dpi=150, bbox_inches='tight', facecolor=PLOT_BG_COLOR)
-    plt.close()
-    print(f"  Saved percentage heatmap: {pct_file}")
+# Add text annotations
+for i in range(n_rows):
+    for j in range(n_clusters):
+        pct = pct_matrix[i, j]
+        pval = pval_matrix[i, j]
+        text_color = 'white' if pct > 50 else 'black'
+
+        # Add asterisks for significance
+        sig = ''
+        if pval < 0.001:
+            sig = '***'
+        elif pval < 0.01:
+            sig = '**'
+        elif pval < 0.05:
+            sig = '*'
+
+        ax2.text(j, i, f'{pct:.0f}{sig}', ha='center', va='center',
+                 fontsize=8, color=text_color, fontweight='bold' if sig else 'normal')
+
+ax2.set_xticks(range(n_clusters))
+ax2.set_xticklabels([str(cid) for cid in cluster_ids], rotation=90, fontsize=9)
+ax2.set_yticks(range(n_rows))
+ax2.set_yticklabels(row_labels, fontsize=11)
+ax2.set_xlabel('Cluster ID', fontsize=12)
+ax2.set_ylabel(y_label, fontsize=12)
+pct_title = 'Sample' if args.comparison_mode == 'per-sample' else 'Group'
+ax2.set_title(f'{pct_title} Percentage per Cluster\n(% of cluster reads from each {pct_title.lower()}; * p<0.05, ** p<0.01, *** p<0.001)', fontsize=13)
+
+# Add colorbar
+cbar = plt.colorbar(im, ax=ax2, shrink=0.8)
+cbar.set_label('Percentage (%)', fontsize=11)
+
+plt.tight_layout()
+pct_file = f"{args.output_prefix}.{pct_title.lower()}_percentage.pdf"
+plt.savefig(pct_file, dpi=150, bbox_inches='tight', facecolor=PLOT_BG_COLOR)
+plt.close()
+print(f"  Saved percentage heatmap: {pct_file}")
 
 # --- Summary ---
 print(f"\n" + "=" * 60)
