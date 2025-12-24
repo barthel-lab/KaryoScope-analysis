@@ -130,7 +130,7 @@ def load_cluster_analysis(cluster_analysis_file):
     return cluster_enrichments, cluster_order
 
 
-def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order=None, max_reps=None, top_clusters=None, max_clusters=None, clusters=None, include_mixed=False):
+def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order=None, max_reps=None, top_clusters=None, max_clusters=None, clusters=None, include_mixed=False, reads_file=None):
     """Load read assignments from TSV file.
 
     Args:
@@ -141,6 +141,7 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
         top_clusters: Dict of {category: n_clusters} where category is a group name or 'mixed'
         max_clusters: Maximum total clusters to include
         clusters: List of specific cluster IDs to plot (overrides top_clusters and max_clusters)
+        reads_file: Path to file with read names to include (one per line)
 
     Returns:
         tuple: (cluster_reads OrderedDict, unique_enrichments set)
@@ -148,6 +149,13 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
     print(f"\nLoading read assignments from: {reps_file}")
     reps_df = pd.read_csv(reps_file, sep='\t')
     print(f"  Total reads: {len(reps_df)}")
+
+    # Filter by reads file if provided
+    if reads_file:
+        with open(reads_file, 'r') as f:
+            allowed_reads = set(line.strip() for line in f if line.strip())
+        reps_df = reps_df[reps_df['read'].isin(allowed_reads)]
+        print(f"  After reads filter: {len(reps_df)} reads (from {len(allowed_reads)} in file)")
 
     # Merge enrichment info from cluster_analysis.tsv
     if cluster_enrichments:
@@ -1221,8 +1229,8 @@ def parse_args():
                         help="Database name (e.g., KS_human_CHM13). Auto-detected from --bed paths if not provided.")
     parser.add_argument("--colors", dest="colors_dir", required=True,
                         help="Full path to colors database directory (contains {database}.{featureset}.colors.txt files)")
-    parser.add_argument("--featuresets", required=True,
-                        help="Comma-separated list of feature sets to plot")
+    parser.add_argument("--featuresets", default="chromosome,subtelomeric,region",
+                        help="Comma-separated list of feature sets to plot (default: chromosome,subtelomeric,region)")
 
     # Display options
     parser.add_argument("--background", dest="background_color", default="black",
@@ -1254,14 +1262,17 @@ def parse_args():
     parser.add_argument("--include-mixed", dest="include_mixed", action="store_true",
                         help="Include 'mixed' (non-significant) clusters in default selection. "
                              "By default, only statistically enriched clusters are plotted.")
+    parser.add_argument("--reads-file", dest="reads_file", default=None,
+                        help="File containing read names to include (one per line). "
+                             "Only these reads will be plotted.")
 
     # Mode options
     parser.add_argument("--hide-brackets", dest="hide_brackets", action="store_true",
                         help="Hide cluster brackets and labels (cleaner dendrogram view)")
     parser.add_argument("--no-reorder", dest="no_reorder", action="store_true",
                         help="Disable dendrogram reordering - keep reads grouped by cluster")
-    parser.add_argument("--max-reps-per-cluster", dest="max_reps", type=int, default=3,
-                        help="Maximum representatives per cluster (default: 3)")
+    parser.add_argument("--n-per-cluster", dest="max_reps", type=int, default=5,
+                        help="Number of sequences per cluster (default: 5)")
     parser.add_argument("--log-file", dest="log_file",
                         action=argparse.BooleanOptionalAction, default=True,
                         help="Save console output to {output}.log (default: True)")
@@ -1406,7 +1417,8 @@ def main():
         top_clusters=top_clusters,
         max_clusters=args.max_clusters,
         clusters=clusters,
-        include_mixed=args.include_mixed
+        include_mixed=args.include_mixed,
+        reads_file=args.reads_file
     )
 
     # Load feature matrix
@@ -1675,7 +1687,7 @@ def main():
         ("include-mixed", args.include_mixed),
         ("hide-brackets", args.hide_brackets),
         ("no-reorder", args.no_reorder),
-        ("max-reps-per-cluster", args.max_reps),
+        ("n-per-cluster", args.max_reps),
         ("log-file", args.log_file),
     ]
     print(f"{'Parameter':<25} {'Value':<35}")
