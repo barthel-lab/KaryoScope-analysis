@@ -1052,6 +1052,25 @@ def draw_feature_bars(d, drawing_data, featuresets, bar_width, read_heights, num
             ))
 
 
+def abbreviate_read_name(read_name, max_len=12):
+    """Abbreviate read name to a unique, short identifier.
+
+    Handles different read name formats:
+    - PacBio HiFi: m84132_240112_213928_s2/201131976/ccs -> 201131976
+    - ONT: uuid format -> first 8 chars
+    - Generic: first max_len chars
+    """
+    # PacBio format: movie/zmw/ccs or movie/zmw/subread
+    if '/' in read_name:
+        parts = read_name.split('/')
+        if len(parts) >= 2:
+            # Return the ZMW number (second part)
+            return parts[1][:max_len]
+
+    # Default: first max_len characters
+    return read_name[:max_len]
+
+
 def draw_read_labels(d, cluster_reads, read_x_positions, group_width, top_margin, text_color):
     """Draw read ID labels above the annotation bars, rotated 90 degrees."""
     for cluster_id, data in cluster_reads.items():
@@ -1062,7 +1081,7 @@ def draw_read_labels(d, cluster_reads, read_x_positions, group_width, top_margin
             base_x = read_x_positions[read]
             label_x = base_x + group_width / 2
             label_y = top_margin - 5  # Position above annotation bars
-            short_id = read[:8]
+            short_id = abbreviate_read_name(read)
 
             d.append(draw.Text(
                 short_id, font_size=5, x=label_x, y=label_y,
