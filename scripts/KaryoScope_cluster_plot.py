@@ -35,6 +35,7 @@ With top-clusters filtering (select top N per category):
 """
 
 import argparse
+import glob
 import gzip
 import os
 import sys
@@ -49,6 +50,105 @@ import matplotlib
 import matplotlib.colors as mcolors
 import numpy as np
 import pandas as pd
+
+
+# =============================================================================
+# Command Line Arguments
+# =============================================================================
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Generate KaryoScope SVG for cluster representative reads.",
+        formatter_class=argparse.RawTextHelpFormatter)
+
+    # Input/Output
+    parser.add_argument("--cluster-analysis-prefix", dest="cluster_prefix", required=True,
+                        help="Prefix from cluster_analysis.py outputs (auto-discovers .read_assignments.tsv, .feature_matrix.npz, etc.)")
+    parser.add_argument("--output", required=True,
+                        help="Output SVG file path")
+
+    # Data sources
+    parser.add_argument("--bed", dest="bed_files", nargs='+',
+                        help="Full paths to BED files. If not provided, uses --input-bed-prefix to auto-discover.")
+    parser.add_argument("--input-bed-prefix", dest="input_bed_prefix",
+                        help="Base directory for auto-discovery of BED files (e.g., 'results'). "
+                             "Structure: {prefix}/{sample}/telogator/1/KaryoScope/{database}/")
+    parser.add_argument("--database", dest="database",
+                        help="Database name (e.g., KS_human_CHM13). Auto-detected from --bed paths if not provided.")
+    parser.add_argument("--colors", dest="colors_dir", required=True,
+                        help="Full path to colors database directory (contains {database}.{featureset}.colors.txt files)")
+    parser.add_argument("--featuresets", default="chromosome,subtelomeric,region",
+                        help="Comma-separated list of feature sets to plot (default: chromosome,subtelomeric,region)")
+    parser.add_argument("--custom-beds", dest="custom_beds", nargs='+', metavar="NAME:PATH",
+                        help="Custom BED files to add as feature tracks. Format: 'featureset_name:/path/to/file.bed'. "
+                             "These are added after standard featuresets. Requires matching color file in --colors dir.")
+    parser.add_argument("--density-featuresets", dest="density_featuresets", default=None,
+                        help="Comma-separated list of featuresets to render as density tracks (e.g., 'fiberseq_m6A,fiberseq_5mC'). "
+                             "Small features in these tracks are binned and colored by density level.")
+    parser.add_argument("--density-bin-size", dest="density_bin_size", type=int, default=300,
+                        help="Bin size in bp for density computation (default: 300)")
+    parser.add_argument("--density-line-plot", dest="density_line_plot", default=None,
+                        help="Combine multiple featuresets into one track as overlaid density line plots. "
+                             "Format: 'fiberseq_m6A:fiberseq_5mC'. Uses --density-bin-size for binning. "
+                             "Lines are colored by the first color in each featureset's color file.")
+    parser.add_argument("--rect-plot", dest="rect_plot", default=None,
+                        help="Combine multiple featuresets into one track as stacked rectangles (exact calls). "
+                             "Format: 'fiberseq_FIRE:fiberseq_LINKER'. Unlike density plots, this shows "
+                             "the exact feature regions as colored rectangles.")
+
+    # Fiberseq-specific options
+    parser.add_argument("--fiberseq", dest="fiberseq_dir", default=None,
+                        help="Directory containing fiberseq BED files. Auto-discovers files matching "
+                             "*.FIRE.bed, *.LINKER.bed, *.m6A.bed, *.5mC.bed patterns. "
+                             "Sets up FIRE_LINKER as a combined feature track and m6A/5mC as density lines.")
+
+    # Display options
+    parser.add_argument("--background", dest="background_color", default="black",
+                        choices=["white", "black"],
+                        help="Background color for the SVG (default: black)")
+    parser.add_argument("--bar-width", dest="bar_width", type=int, default=8,
+                        help="Width of each feature bar in pixels (default: 8)")
+    parser.add_argument("--bar-spacing", dest="bar_spacing", type=int, default=0,
+                        help="Spacing between bars within a read group (default: 0)")
+    parser.add_argument("--read-spacing", dest="read_spacing", type=int, default=12,
+                        help="Spacing between read groups (default: 12)")
+    parser.add_argument("--cluster-spacing", dest="cluster_spacing", type=int, default=30,
+                        help="Spacing between clusters (default: 30)")
+    parser.add_argument("--ratio", type=float, default=1/300,
+                        help="Ratio for scaling bp to pixels (default: 1/300)")
+    parser.add_argument("--smoothness", default="smoothed",
+                        help="Smoothness level (default: smoothed)")
+
+    # Filtering options
+    parser.add_argument("--max-clusters", dest="max_clusters", type=int, default=None,
+                        help="Maximum number of clusters to plot")
+    parser.add_argument("--top-clusters", dest="top_clusters", default=None,
+                        help="Select top N clusters per category, format: 'post:4,pre:2,mixed:3'. "
+                             "Categories: group names from metadata (e.g., 'post', 'pre'), "
+                             "'mixed' for clusters with no clear enrichment")
+    parser.add_argument("--clusters", dest="clusters", default=None,
+                        help="Manually specify cluster IDs to plot, comma-separated (e.g., '1,5,17,23'). "
+                             "Overrides --top-clusters and --max-clusters.")
+    parser.add_argument("--include-mixed", dest="include_mixed", action="store_true",
+                        help="Include 'mixed' (non-significant) clusters in default selection. "
+                             "By default, only statistically enriched clusters are plotted.")
+    parser.add_argument("--reads-file", dest="reads_file", default=None,
+                        help="File containing read names to include (one per line). "
+                             "Only these reads will be plotted.")
+
+    # Mode options
+    parser.add_argument("--hide-brackets", dest="hide_brackets", action="store_true",
+                        help="Hide cluster brackets and labels (cleaner dendrogram view)")
+    parser.add_argument("--no-reorder", dest="no_reorder", action="store_true",
+                        help="Disable dendrogram reordering - keep reads grouped by cluster")
+    parser.add_argument("--n-per-cluster", dest="max_reps", type=int, default=5,
+                        help="Number of sequences per cluster (default: 5)")
+    parser.add_argument("--log-file", dest="log_file",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help="Save console output to {output}.log (default: True)")
+
+    return parser.parse_args()
 
 
 # =============================================================================
@@ -443,6 +543,52 @@ def load_bed_data(sample_bed_paths, database, featuresets, smoothness, reads_nee
     return read_data
 
 
+def load_custom_bed_files(custom_bed_files, reads_needed, read_data=None):
+    """Load custom BED files into read_data structure.
+
+    Args:
+        custom_bed_files: Dict of featureset_name -> path
+        reads_needed: Set of read names to load
+        read_data: Existing read_data dict to update (or None to create new)
+
+    Returns:
+        dict: read_data[read][featureset] = list of features
+    """
+    if read_data is None:
+        read_data = defaultdict(lambda: defaultdict(list))
+
+    if not custom_bed_files:
+        return read_data
+
+    print(f"\nLoading custom BED files...")
+    for fs_name, bed_path in custom_bed_files.items():
+        print(f"  {fs_name}: {bed_path}")
+        try:
+            with open(bed_path) as f:
+                for line in f:
+                    if line.startswith('#'):
+                        continue
+                    parts = line.strip().split('\t')
+                    if len(parts) < 4:
+                        continue
+                    read_name, start, end, feature = parts[0], int(parts[1]), int(parts[2]), parts[3]
+                    if read_name not in reads_needed:
+                        continue
+                    if read_name not in read_data:
+                        read_data[read_name] = {}
+                    if fs_name not in read_data[read_name]:
+                        read_data[read_name][fs_name] = []
+                    read_data[read_name][fs_name].append({
+                        'start': start,
+                        'stop': end,
+                        'feature': feature
+                    })
+        except Exception as e:
+            print(f"  Error loading {bed_path}: {e}")
+
+    return read_data
+
+
 # =============================================================================
 # Helper Functions: Enrichment Handling
 # =============================================================================
@@ -512,6 +658,25 @@ def get_cluster_colors(unique_clusters):
         cluster_colors[cid] = mcolors.rgb2hex(cluster_cmap(color_idx))
 
     return cluster_colors
+
+
+def get_primary_color(fs, featureset_colors, featureset_color_order, default="#FFFFFF"):
+    """Get the first non-unannotated color for a featureset.
+
+    Args:
+        fs: Featureset name
+        featureset_colors: Dict of featureset -> feature -> (color, opacity)
+        featureset_color_order: Dict of featureset -> list of feature names
+        default: Default color if none found
+
+    Returns:
+        str: Hex color code
+    """
+    if fs in featureset_colors and featureset_colors[fs]:
+        for feat_name in featureset_color_order.get(fs, []):
+            if feat_name != 'unannotated':
+                return featureset_colors[fs][feat_name][0]
+    return default
 
 
 def generate_sample_colors(samples, existing_colors=None):
@@ -1006,7 +1171,8 @@ def draw_annotation_bars(d, cluster_reads, read_x_positions, read_to_original_cl
             d.append(draw.Rectangle(base_x, annot_start_y + 15, group_width, 8, fill=sample_color))
 
 
-def draw_feature_bars(d, drawing_data, featuresets, bar_width, read_heights, num_featuresets):
+def draw_feature_bars(d, drawing_data, featuresets, bar_width, read_heights, num_featuresets,
+                      density_line_data=None, rect_plot_data=None, background_color="black"):
     """Draw feature rectangles with borders between featuresets and around outer edge.
 
     Args:
@@ -1016,6 +1182,9 @@ def draw_feature_bars(d, drawing_data, featuresets, bar_width, read_heights, num
         bar_width: Width of each bar
         read_heights: Dict of read -> (min_y, max_y, x_start, total_width) for borders
         num_featuresets: Number of feature sets
+        density_line_data: Optional dict of read -> featureset -> {points, color, base_x} for line plots
+        rect_plot_data: Optional dict of read -> featureset -> list of {y, height, color, base_x} for rect plots
+        background_color: Background color for determining line plot background fill
     """
     stroke_width = 0.5
 
@@ -1023,12 +1192,95 @@ def draw_feature_bars(d, drawing_data, featuresets, bar_width, read_heights, num
     for read in drawing_data:
         for fs in featuresets:
             for rect in drawing_data[read][fs]:
-                if rect["height"] > 0:
+                if rect["height"] > 0 and rect["fill"] != "none":
                     d.append(draw.Rectangle(
                         rect["x"], rect["y"],
                         bar_width, rect["height"],
                         fill=rect["fill"],
                         fill_opacity=rect["fill_opacity"]
+                    ))
+
+    # Draw density line plots if present
+    if density_line_data:
+        for read in density_line_data:
+            if read not in read_heights:
+                continue
+            min_y, max_y, x_start, total_width = read_heights[read]
+
+            # Draw background for line plot area (dark gray)
+            for line_fs, line_data in density_line_data[read].items():
+                base_x = line_data['base_x']
+                # Draw background rectangle for the line plot area
+                d.append(draw.Rectangle(
+                    base_x, min_y,
+                    bar_width, max_y - min_y,
+                    fill="#1a1a1a" if background_color == "black" else "#f0f0f0",
+                    fill_opacity=1.0
+                ))
+
+            # Draw each line on top
+            for line_fs, line_data in density_line_data[read].items():
+                points = line_data['points']
+                color = line_data['color']
+                base_x = line_data['base_x']
+
+                if len(points) >= 2:
+                    # Create polyline path
+                    # Build points string for polyline
+                    points_str = " ".join(f"{x},{y}" for x, y in points)
+
+                    # Add filled area under the line (to base_x)
+                    # Create path: start at bottom-left, go up the line, then back down
+                    path_d = f"M {base_x},{points[0][1]} "
+                    for x, y in points:
+                        path_d += f"L {x},{y} "
+                    path_d += f"L {base_x},{points[-1][1]} Z"
+
+                    d.append(draw.Path(
+                        d=path_d,
+                        fill=color,
+                        fill_opacity=0.3,
+                        stroke='none'
+                    ))
+
+                    # Draw the line itself
+                    d.append(draw.Lines(
+                        *[coord for point in points for coord in point],
+                        stroke=color,
+                        stroke_width=1.0,
+                        fill='none'
+                    ))
+
+    # Draw rect plot rectangles if present (e.g., FIRE/Linker exact calls)
+    if rect_plot_data:
+        for read in rect_plot_data:
+            if read not in read_heights:
+                continue
+            min_y, max_y, x_start, total_width = read_heights[read]
+
+            # Draw background for rect plot area (dark gray, same as density line)
+            first_rect = None
+            for rect_fs in rect_plot_data[read]:
+                if rect_plot_data[read][rect_fs]:
+                    first_rect = rect_plot_data[read][rect_fs][0]
+                    break
+            if first_rect:
+                d.append(draw.Rectangle(
+                    first_rect['base_x'], min_y,
+                    bar_width, max_y - min_y,
+                    fill="#1a1a1a" if background_color == "black" else "#f0f0f0",
+                    fill_opacity=1.0
+                ))
+
+            # Draw each feature rectangle
+            for rect_fs, rects in rect_plot_data[read].items():
+                for rect in rects:
+                    rect_height = max(rect['height'], 2)  # Minimum 2px height
+                    d.append(draw.Rectangle(
+                        rect['base_x'], rect['y'],
+                        bar_width, rect_height,
+                        fill=rect['color'],
+                        fill_opacity=0.85
                     ))
 
     # Draw borders: outer border + vertical lines between featuresets
@@ -1173,6 +1425,85 @@ def draw_top_legends(d, sample_colors, cluster_colors, read_to_original_cluster,
         ))
 
 
+def draw_density_line_legend(d, density_line_colors, rect_plot_colors, legend_x, legend_y, text_color):
+    """Draw legend for density line plot and rect plot tracks.
+
+    Args:
+        d: Drawing object
+        density_line_colors: Dict of featureset -> color for density lines
+        rect_plot_colors: Dict of featureset -> color for rect plots (or None if not shown)
+        legend_x: X position for legend
+        legend_y: Y position for legend
+        text_color: Text color
+    """
+    if not density_line_colors and not rect_plot_colors:
+        return
+
+    current_x = legend_x
+
+    # Density line (m6A/5mC) legend
+    if density_line_colors:
+        d.append(draw.Text(
+            "m6A/5mC:", font_size=10, x=current_x, y=legend_y,
+            fill=text_color, font_family='sans-serif', font_weight='bold'
+        ))
+        current_x += 60
+
+        # Display name mapping
+        display_names = {
+            'fiberseq_m6A': 'm6A',
+            'fiberseq_5mC': '5mC',
+        }
+
+        for fs, color in density_line_colors.items():
+            # Draw a small line sample
+            d.append(draw.Lines(
+                current_x, legend_y - 3,
+                current_x + 20, legend_y - 3,
+                stroke=color, stroke_width=2, fill='none'
+            ))
+            # Draw filled area sample under line
+            d.append(draw.Rectangle(
+                current_x, legend_y - 3, 20, 6,
+                fill=color, fill_opacity=0.3
+            ))
+            display_name = display_names.get(fs, fs.replace('fiberseq_', ''))
+            d.append(draw.Text(
+                display_name, font_size=9, x=current_x + 25, y=legend_y,
+                fill=text_color, font_family='sans-serif'
+            ))
+            current_x += 25 + len(display_name) * 6 + 20
+
+        current_x += 20  # Extra spacing before rect plot legend
+
+    # Rect plot (FIRE/Linker) legend
+    if rect_plot_colors:
+        d.append(draw.Text(
+            "FIRE/Linker:", font_size=10, x=current_x, y=legend_y,
+            fill=text_color, font_family='sans-serif', font_weight='bold'
+        ))
+        current_x += 85
+
+        # Display name mapping for rect plot features
+        rect_display_names = {
+            'fiberseq_FIRE': 'FIRE',
+            'fiberseq_LINKER': 'Linker',
+        }
+
+        for fs, color in rect_plot_colors.items():
+            d.append(draw.Rectangle(
+                current_x, legend_y - 6, 20, 10,
+                fill=color, fill_opacity=0.8,
+                stroke=color, stroke_width=1
+            ))
+            display_name = rect_display_names.get(fs, fs.replace('fiberseq_', ''))
+            d.append(draw.Text(
+                display_name, font_size=9, x=current_x + 25, y=legend_y,
+                fill=text_color, font_family='sans-serif'
+            ))
+            current_x += 25 + len(display_name) * 6 + 20
+
+
 def draw_color_legends(d, featuresets, featureset_colors, featureset_color_order,
                        fs_display_names, color_legend_y_start, left_margin, text_color):
     """Draw featureset color legends at bottom."""
@@ -1226,77 +1557,6 @@ def draw_color_legends(d, featuresets, featureset_colors, featureset_color_order
 # Main Script
 # =============================================================================
 
-def parse_args():
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(
-        description="Generate KaryoScope SVG for cluster representative reads.",
-        formatter_class=argparse.RawTextHelpFormatter)
-
-    # Input/Output
-    parser.add_argument("--cluster-analysis-prefix", dest="cluster_prefix", required=True,
-                        help="Prefix from cluster_analysis.py outputs (auto-discovers .read_assignments.tsv, .feature_matrix.npz, etc.)")
-    parser.add_argument("--output", required=True,
-                        help="Output SVG file path")
-
-    # Data sources
-    parser.add_argument("--bed", dest="bed_files", nargs='+',
-                        help="Full paths to BED files. If not provided, uses --input-bed-prefix to auto-discover.")
-    parser.add_argument("--input-bed-prefix", dest="input_bed_prefix",
-                        help="Base directory for auto-discovery of BED files (e.g., 'results'). "
-                             "Structure: {prefix}/{sample}/telogator/1/KaryoScope/{database}/")
-    parser.add_argument("--database", dest="database",
-                        help="Database name (e.g., KS_human_CHM13). Auto-detected from --bed paths if not provided.")
-    parser.add_argument("--colors", dest="colors_dir", required=True,
-                        help="Full path to colors database directory (contains {database}.{featureset}.colors.txt files)")
-    parser.add_argument("--featuresets", default="chromosome,subtelomeric,region",
-                        help="Comma-separated list of feature sets to plot (default: chromosome,subtelomeric,region)")
-
-    # Display options
-    parser.add_argument("--background", dest="background_color", default="black",
-                        choices=["white", "black"],
-                        help="Background color for the SVG (default: black)")
-    parser.add_argument("--bar-width", dest="bar_width", type=int, default=8,
-                        help="Width of each feature bar in pixels (default: 8)")
-    parser.add_argument("--bar-spacing", dest="bar_spacing", type=int, default=0,
-                        help="Spacing between bars within a read group (default: 0)")
-    parser.add_argument("--read-spacing", dest="read_spacing", type=int, default=12,
-                        help="Spacing between read groups (default: 12)")
-    parser.add_argument("--cluster-spacing", dest="cluster_spacing", type=int, default=30,
-                        help="Spacing between clusters (default: 30)")
-    parser.add_argument("--ratio", type=float, default=1/300,
-                        help="Ratio for scaling bp to pixels (default: 1/300)")
-    parser.add_argument("--smoothness", default="smoothed",
-                        help="Smoothness level (default: smoothed)")
-
-    # Filtering options
-    parser.add_argument("--max-clusters", dest="max_clusters", type=int, default=None,
-                        help="Maximum number of clusters to plot")
-    parser.add_argument("--top-clusters", dest="top_clusters", default=None,
-                        help="Select top N clusters per category, format: 'post:4,pre:2,mixed:3'. "
-                             "Categories: group names from metadata (e.g., 'post', 'pre'), "
-                             "'mixed' for clusters with no clear enrichment")
-    parser.add_argument("--clusters", dest="clusters", default=None,
-                        help="Manually specify cluster IDs to plot, comma-separated (e.g., '1,5,17,23'). "
-                             "Overrides --top-clusters and --max-clusters.")
-    parser.add_argument("--include-mixed", dest="include_mixed", action="store_true",
-                        help="Include 'mixed' (non-significant) clusters in default selection. "
-                             "By default, only statistically enriched clusters are plotted.")
-    parser.add_argument("--reads-file", dest="reads_file", default=None,
-                        help="File containing read names to include (one per line). "
-                             "Only these reads will be plotted.")
-
-    # Mode options
-    parser.add_argument("--hide-brackets", dest="hide_brackets", action="store_true",
-                        help="Hide cluster brackets and labels (cleaner dendrogram view)")
-    parser.add_argument("--no-reorder", dest="no_reorder", action="store_true",
-                        help="Disable dendrogram reordering - keep reads grouped by cluster")
-    parser.add_argument("--n-per-cluster", dest="max_reps", type=int, default=5,
-                        help="Number of sequences per cluster (default: 5)")
-    parser.add_argument("--log-file", dest="log_file",
-                        action=argparse.BooleanOptionalAction, default=True,
-                        help="Save console output to {output}.log (default: True)")
-
-    return parser.parse_args()
 
 
 class TeeLogger:
@@ -1316,6 +1576,94 @@ class TeeLogger:
 
     def close(self):
         self.log.close()
+
+
+def compute_density_features(features, bin_size, read_length, feature_name):
+    """Convert individual features to density bins.
+
+    For features with many small marks (e.g., m6A, 5mC), this bins them
+    and returns density levels (none/low/medium/high) per bin.
+    """
+    if not features or read_length <= 0:
+        return []
+
+    # Create bins
+    n_bins = (read_length + bin_size - 1) // bin_size
+    bin_counts = [0] * n_bins
+
+    # Count features per bin (count each feature once per bin it overlaps)
+    for feat in features:
+        start_bin = feat['start'] // bin_size
+        end_bin = min((feat['stop'] - 1) // bin_size, n_bins - 1)
+        if end_bin < 0:
+            continue
+        for b in range(max(0, start_bin), end_bin + 1):
+            bin_counts[b] += 1
+
+    # Convert counts to density labels
+    # Thresholds for 300bp bin with single-base features:
+    # - none: 0 marks
+    # - low: 1-5 marks (~1-2% density)
+    # - medium: 6-15 marks (~2-5% density)
+    # - high: 16+ marks (>5% density)
+    density_features = []
+    for b in range(n_bins):
+        count = bin_counts[b]
+        if count == 0:
+            level = 'none'
+        elif count <= 5:
+            level = 'low'
+        elif count <= 15:
+            level = 'medium'
+        else:
+            level = 'high'
+
+        density_features.append({
+            'start': b * bin_size,
+            'stop': min((b + 1) * bin_size, read_length),
+            'feature': f"{feature_name}_{level}"
+        })
+
+    return density_features
+
+
+def compute_density_line(features, bin_size, read_length, max_density=50):
+    """Compute density as percentage per bin for line plot rendering.
+
+    Args:
+        features: List of feature dicts with 'start' and 'stop' keys
+        bin_size: Size of each bin in bp
+        read_length: Total length of the read
+        max_density: Number of marks considered 100% density (default: 50)
+
+    Returns:
+        List of (bin_center_bp, density_pct) tuples for polyline rendering
+    """
+    if not features or read_length <= 0:
+        return []
+
+    n_bins = (read_length + bin_size - 1) // bin_size
+    bin_counts = [0] * n_bins
+
+    # Count features per bin
+    for feat in features:
+        if feat.get('feature') == 'unannotated':
+            continue
+        start_bin = feat['start'] // bin_size
+        end_bin = min((feat['stop'] - 1) // bin_size, n_bins - 1)
+        if end_bin < 0:
+            continue
+        for b in range(max(0, start_bin), end_bin + 1):
+            bin_counts[b] += 1
+
+    # Convert to density percentages
+    density_points = []
+    for b in range(n_bins):
+        bin_center = b * bin_size + bin_size // 2
+        density_pct = min(100.0, (bin_counts[b] / max_density) * 100.0)
+        density_points.append((bin_center, density_pct))
+
+    return density_points
 
 
 def main():
@@ -1390,6 +1738,91 @@ def main():
     background_color = args.background_color
     text_color = "#000000" if background_color == "white" else "#FFFFFF"
     featuresets = [f.strip() for f in args.featuresets.split(",")]
+
+    # Parse custom BED files
+    custom_bed_files = {}  # featureset_name -> path
+    if args.custom_beds:
+        for item in args.custom_beds:
+            if ':' not in item:
+                print(f"Error: Custom BED format should be 'name:path', got '{item}'")
+                sys.exit(1)
+            name, path = item.split(':', 1)
+            custom_bed_files[name] = path
+            if name not in featuresets:
+                featuresets.append(name)
+
+    # Process --fiberseq directory (auto-discover fiberseq BED files)
+    fiberseq_files = {}  # feature_type -> path
+    if args.fiberseq_dir:
+        fiberseq_dir = args.fiberseq_dir
+        print(f"\nAuto-discovering fiberseq BED files in: {fiberseq_dir}")
+
+        # Look for each fiberseq feature type
+        for feature_type in ['FIRE', 'LINKER', 'm6A', '5mC']:
+            pattern = os.path.join(fiberseq_dir, f"*.{feature_type}.bed")
+            matches = glob.glob(pattern)
+            if matches:
+                fiberseq_files[feature_type] = matches[0]
+                print(f"  Found {feature_type}: {os.path.basename(matches[0])}")
+
+        # Create combined FIRE_LINKER file if both exist
+        if 'FIRE' in fiberseq_files and 'LINKER' in fiberseq_files:
+            combined_path = os.path.join(fiberseq_dir, os.path.basename(fiberseq_files['FIRE']).replace('.FIRE.bed', '.FIRE_LINKER.bed'))
+            if not os.path.exists(combined_path):
+                print(f"  Creating combined FIRE_LINKER file...")
+                with open(combined_path, 'w') as out:
+                    for bed_file in [fiberseq_files['FIRE'], fiberseq_files['LINKER']]:
+                        with open(bed_file) as f:
+                            for line in f:
+                                out.write(line)
+            custom_bed_files['fiberseq_FIRE_LINKER'] = combined_path
+            if 'fiberseq_FIRE_LINKER' not in featuresets:
+                featuresets.append('fiberseq_FIRE_LINKER')
+            print(f"  Added fiberseq_FIRE_LINKER track")
+
+        # Add m6A and 5mC as custom beds for density line plot
+        if 'm6A' in fiberseq_files:
+            custom_bed_files['fiberseq_m6A'] = fiberseq_files['m6A']
+        if '5mC' in fiberseq_files:
+            custom_bed_files['fiberseq_5mC'] = fiberseq_files['5mC']
+
+        # Auto-set density_line_plot if m6A and 5mC are available and not already set
+        if 'm6A' in fiberseq_files and '5mC' in fiberseq_files and not args.density_line_plot:
+            args.density_line_plot = 'fiberseq_m6A:fiberseq_5mC'
+            print(f"  Auto-configured density line plot for m6A/5mC")
+
+    num_featuresets = len(featuresets)
+
+    # Parse density featuresets
+    density_featuresets = set()
+    if args.density_featuresets:
+        density_featuresets = set(f.strip() for f in args.density_featuresets.split(','))
+        print(f"Density featuresets: {density_featuresets}")
+        print(f"Density bin size: {args.density_bin_size} bp")
+
+    # Parse density line plot featuresets
+    density_line_plot_featuresets = []
+    density_line_plot_name = None
+    if args.density_line_plot:
+        density_line_plot_featuresets = [f.strip() for f in args.density_line_plot.split(':')]
+        density_line_plot_name = "density_line"
+        # Remove individual featuresets from main list and add combined track
+        featuresets = [fs for fs in featuresets if fs not in density_line_plot_featuresets]
+        featuresets.append(density_line_plot_name)
+        print(f"Density line plot featuresets: {density_line_plot_featuresets}")
+        print(f"Density bin size: {args.density_bin_size} bp")
+
+    # Parse rect plot featuresets (exact feature rectangles)
+    rect_plot_featuresets = []
+    rect_plot_name = None
+    if args.rect_plot:
+        rect_plot_featuresets = [f.strip() for f in args.rect_plot.split(':')]
+        rect_plot_name = "rect_plot"
+        # Remove individual featuresets from main list and add combined track
+        featuresets = [fs for fs in featuresets if fs not in rect_plot_featuresets]
+        featuresets.append(rect_plot_name)
+        print(f"Rect plot featuresets: {rect_plot_featuresets}")
+
     num_featuresets = len(featuresets)
 
     # Featureset display names
@@ -1398,7 +1831,15 @@ def main():
         "subtelomeric": "Subtelomere",
         "region": "Satellite",
         "acrocentric": "Acrocentric",
-        "repeat": "Interspersed repeat"
+        "repeat": "Interspersed repeat",
+        "fiberseq": "Fiberseq",
+        "fiberseq_FIRE": "FIRE",
+        "fiberseq_m6A": "m6A",
+        "fiberseq_5mC": "5mC",
+        "fiberseq_LINKER": "Linker",
+        "fiberseq_FIRE_LINKER": "FIRE/Linker",
+        "density_line": "m6A/5mC",
+        "rect_plot": "FIRE/Linker"
     }
 
     max_reps = args.max_reps
@@ -1443,10 +1884,23 @@ def main():
     # Load feature matrix
     feature_matrix_data = load_feature_matrix(feature_matrix_file)
 
-    # Load color files
+    # Load color files - include density line plot and rect plot featuresets for color lookup
+    # Exclude placeholder tracks from color loading (they have no color files)
+    placeholder_tracks = {density_line_plot_name, rect_plot_name} - {None}
+    featuresets_for_colors = list(set(
+        [fs for fs in featuresets if fs not in placeholder_tracks] +
+        density_line_plot_featuresets +
+        rect_plot_featuresets
+    ))
+
     featureset_colors, featureset_color_order = load_color_files(
-        args.colors_dir, database, featuresets
+        args.colors_dir, database, featuresets_for_colors
     )
+
+    # Add empty placeholders for combined tracks (they don't have individual color files)
+    for track_name in placeholder_tracks:
+        featureset_colors[track_name] = {}
+        featureset_color_order[track_name] = []
 
     # Get all reads we need
     all_reads_needed = set()
@@ -1457,9 +1911,14 @@ def main():
             read_to_sample[read] = sample
 
     # Load BED data
+    # Filter out custom featuresets for standard loading
+    standard_featuresets = [fs for fs in featuresets if fs not in custom_bed_files]
     read_data = load_bed_data(
-        sample_bed_paths, database, featuresets, args.smoothness, all_reads_needed
+        sample_bed_paths, database, standard_featuresets, args.smoothness, all_reads_needed
     )
+
+    # Load custom BED files
+    read_data = load_custom_bed_files(custom_bed_files, all_reads_needed, read_data)
 
     # --- Generate colors ---
     # Get all unique samples
@@ -1529,7 +1988,30 @@ def main():
     # --- Calculate drawing data ---
     ratio = args.ratio
     drawing_data = defaultdict(lambda: defaultdict(list))
+    density_line_data = defaultdict(lambda: defaultdict(list))  # read -> featureset -> [(y, x_offset)]
+    rect_plot_data = defaultdict(lambda: defaultdict(list))  # read -> featureset -> [{y, height, color}]
     uncolored_features = defaultdict(set)
+
+    # Get colors for density line plot featuresets
+    density_line_colors = {
+        fs: get_primary_color(fs, featureset_colors, featureset_color_order)
+        for fs in density_line_plot_featuresets
+    }
+    if density_line_colors:
+        print(f"Density line colors: {density_line_colors}")
+
+    # Get colors for rect plot featuresets - use explicit colors for known features
+    rect_plot_explicit_colors = {
+        'fiberseq_FIRE': '#FF4500',    # Orange-red for FIRE
+        'fiberseq_LINKER': '#00CC66',  # Green for Linker
+    }
+    rect_plot_colors = {
+        fs: rect_plot_explicit_colors.get(fs,
+            get_primary_color(fs, featureset_colors, featureset_color_order))
+        for fs in rect_plot_featuresets
+    }
+    if rect_plot_colors:
+        print(f"Rect plot colors: {rect_plot_colors}")
 
     for read in read_data:
         if read not in read_x_positions:
@@ -1537,11 +2019,102 @@ def main():
 
         base_x = read_x_positions[read]
         scaffold_min_start = scaffold_min_starts.get(read, 0)
+        read_length = scaffold_lengths.get(read, 0)
 
         for fs_idx, fs in enumerate(featuresets):
             x_offset = fs_idx * (args.bar_width + args.bar_spacing)
 
-            for feat in read_data[read][fs]:
+            # Handle density line plot track
+            if fs == density_line_plot_name and density_line_plot_featuresets:
+                # Compute density lines for each featureset in the combined track
+                for line_fs in density_line_plot_featuresets:
+                    features = read_data[read].get(line_fs, [])
+                    if not features:
+                        continue
+
+                    # Compute density percentages
+                    density_points = compute_density_line(
+                        features, args.density_bin_size, read_length, max_density=50
+                    )
+
+                    # Convert to drawing coordinates
+                    line_points = []
+                    for bp_pos, density_pct in density_points:
+                        # Y position based on bp position
+                        y_pos = top_margin + 50 + floor((bp_pos - scaffold_min_start) * ratio)
+                        # X offset based on density (0% = left edge, 100% = right edge of bar)
+                        x_pos = base_x + x_offset + (density_pct / 100.0) * args.bar_width
+                        line_points.append((x_pos, y_pos))
+
+                    if line_points:
+                        density_line_data[read][line_fs] = {
+                            'points': line_points,
+                            'color': density_line_colors.get(line_fs, "#FFFFFF"),
+                            'base_x': base_x + x_offset
+                        }
+
+                # Add a placeholder rectangle for read_heights calculation
+                if read_length > 0:
+                    start_y = top_margin + 50
+                    stop_y = top_margin + 50 + floor((read_length - scaffold_min_start) * ratio)
+                    drawing_data[read][fs].append({
+                        "x": base_x + x_offset,
+                        "y": start_y,
+                        "height": stop_y - start_y,
+                        "fill": "none",
+                        "fill_opacity": 0
+                    })
+                continue
+
+            # Handle rect plot track (exact feature rectangles)
+            if fs == rect_plot_name and rect_plot_featuresets:
+                # Collect rectangles for each featureset in the combined track
+                for rect_fs in rect_plot_featuresets:
+                    features = read_data[read].get(rect_fs, [])
+                    if not features:
+                        continue
+
+                    for feat in features:
+                        if feat.get('feature') == 'unannotated':
+                            continue
+                        final_start = feat['start'] - scaffold_min_start
+                        final_stop = feat['stop'] - scaffold_min_start
+                        start_y = top_margin + 50 + floor(final_start * ratio)
+                        stop_y = top_margin + 50 + floor(final_stop * ratio)
+                        rect_plot_data[read][rect_fs].append({
+                            'y': start_y,
+                            'height': max(stop_y - start_y, 2),  # Minimum 2px height
+                            'color': rect_plot_colors.get(rect_fs, "#FFFFFF"),
+                            'base_x': base_x + x_offset
+                        })
+
+                # Add a placeholder rectangle for read_heights calculation
+                if read_length > 0:
+                    start_y = top_margin + 50
+                    stop_y = top_margin + 50 + floor((read_length - scaffold_min_start) * ratio)
+                    drawing_data[read][fs].append({
+                        "x": base_x + x_offset,
+                        "y": start_y,
+                        "height": stop_y - start_y,
+                        "fill": "none",
+                        "fill_opacity": 0
+                    })
+                continue
+
+            # Get features for this read/featureset
+            features = read_data[read].get(fs, [])
+
+            # Apply density computation if this featureset is marked for density
+            if fs in density_featuresets and features:
+                # Filter out unannotated features - we only count actual marks for density
+                density_features = [f for f in features if f['feature'] != 'unannotated']
+                # Extract base feature name from featureset (e.g., "fiberseq_m6A" -> "m6A")
+                base_feature = fs.split('_')[-1] if '_' in fs else fs
+                features = compute_density_features(
+                    density_features, args.density_bin_size, read_length, base_feature
+                )
+
+            for feat in features:
                 final_start = feat['start'] - scaffold_min_start
                 final_stop = feat['stop'] - scaffold_min_start
 
@@ -1624,7 +2197,10 @@ def main():
                         enrichment_colors, group_width, top_margin, left_margin, text_color)
 
     # Feature bars
-    draw_feature_bars(d, drawing_data, featuresets, args.bar_width, read_heights, num_featuresets)
+    draw_feature_bars(d, drawing_data, featuresets, args.bar_width, read_heights, num_featuresets,
+                      density_line_data=density_line_data,
+                      rect_plot_data=rect_plot_data if rect_plot_featuresets else None,
+                      background_color=background_color)
 
     # Read labels
     draw_read_labels(d, cluster_reads, read_x_positions, group_width, top_margin, text_color)
@@ -1658,9 +2234,17 @@ def main():
                      read_to_original_enrichment, enrichment_colors,
                      legend_x, legend_y, text_color)
 
-    # Color legends at bottom
+    # Density line / Rect plot legend (row 4, if applicable)
+    if density_line_colors or rect_plot_colors:
+        density_legend_y = legend_y + 60  # After sample, cluster, enrichment rows
+        draw_density_line_legend(d, density_line_colors,
+                                 rect_plot_colors if rect_plot_featuresets else None,
+                                 legend_x, density_legend_y, text_color)
+
+    # Color legends at bottom (exclude density_line since it has its own legend)
     color_legend_y_start = max_stop_y + 130
-    draw_color_legends(d, featuresets, featureset_colors, featureset_color_order,
+    bottom_legend_featuresets = [fs for fs in featuresets if fs != density_line_plot_name]
+    draw_color_legends(d, bottom_legend_featuresets, featureset_colors, featureset_color_order,
                       fs_display_names, color_legend_y_start, left_margin, text_color)
 
     # --- Save ---
