@@ -22,6 +22,7 @@
 import argparse
 import sys
 import gzip
+import fnmatch
 import numpy as np
 import pandas as pd
 
@@ -80,8 +81,8 @@ parser.add_argument("--davies-bouldin", dest="compute_davies_bouldin",
                     help="Compute Davies-Bouldin index (not recommended, favors high k) (default: False)")
 parser.add_argument("--min-read-length", dest="min_read_length", type=int, default=10000,
                     help="Minimum read length in bp to include (default: 10000)")
-parser.add_argument("--exclude-features", dest="exclude_features", default="novel,unknown,canonical_telomere_specific",
-                    help="Comma-separated list of features to exclude (default: 'novel,unknown,canonical_telomere_specific')")
+parser.add_argument("--exclude-features", dest="exclude_features", default="novel,unknown,canonical_telomere*",
+                    help="Comma-separated list of features to exclude, supports wildcards (* and ?) (default: 'novel,unknown,canonical_telomere*')")
 parser.add_argument("--linkage-method", dest="linkage_method", default="ward",
                     help="Linkage method for hierarchical clustering (default: ward)")
 parser.add_argument("--matrix-type", dest="matrix_type", default="length_weighted",
@@ -692,16 +693,20 @@ in_data['length'] = in_data['end'] - in_data['start']
 # --- Filter excluded features BEFORE read length filtering ---
 # This ensures read length is calculated on remaining annotated sequence
 if args.exclude_features:
-    exclude_set = set(f.strip() for f in args.exclude_features.split(','))
+    exclude_patterns = [f.strip() for f in args.exclude_features.split(',')]
     print(f"\n--- Filtering excluded features ---")
-    print(f"  Excluding (component match): {sorted(exclude_set)}")
+    print(f"  Excluding (component match): {sorted(exclude_patterns)}")
     before_count = len(in_data)
     before_reads = in_data['read'].nunique()
 
-    # Component matching: filter if any colon-separated part matches exclude list
+    # Component matching: filter if any colon-separated part matches exclude patterns (supports wildcards)
     def has_excluded_component(feature):
         components = feature.split(':')
-        return any(comp in exclude_set for comp in components)
+        for comp in components:
+            for pattern in exclude_patterns:
+                if fnmatch.fnmatch(comp, pattern):
+                    return True
+        return False
 
     mask = in_data['feature'].apply(has_excluded_component)
     in_data = in_data[~mask]
@@ -1117,6 +1122,9 @@ def fast_enrichment_check(cluster_mask, read_groups, group_totals_dict, control_
     """Fast enrichment calculation for k-optimization loop.
 
     Returns: (enrichment_label, max_purity) where max_purity is the highest group percentage.
+
+    Uses odds ratio to determine enrichment, which works correctly even when
+    one group dominates the dataset (e.g., 90% tumor vs 10% normal).
     """
     cluster_groups = read_groups[cluster_mask]
     group_counts = Counter(cluster_groups)
@@ -1129,16 +1137,26 @@ def fast_enrichment_check(cluster_mask, read_groups, group_totals_dict, control_
 
     # Calculate expected proportions
     total_reads = sum(group_totals_dict.values())
-    expected_props = {g: group_totals_dict[g] / total_reads for g in all_grps}
 
-    # Check if any group is significantly overrepresented (>15% above expected)
+    # Use odds ratio to detect enrichment (works with skewed group sizes)
+    # Odds ratio > 1.5 indicates meaningful enrichment
+    best_enrichment = "mixed"
+    best_odds = 1.0
+
     for grp in all_grps:
-        observed_pct = group_counts.get(grp, 0) / total_in
-        expected_pct = expected_props[grp]
-        if observed_pct > expected_pct + 0.15:
-            return f"{grp}-enriched", max_purity
+        in_cluster = group_counts.get(grp, 0)
+        out_cluster = group_totals_dict[grp] - in_cluster
+        other_in = total_in - in_cluster
+        other_out = total_reads - group_totals_dict[grp] - other_in
 
-    return "mixed", max_purity
+        # Calculate odds ratio with small pseudocount to avoid division by zero
+        odds_ratio = ((in_cluster + 0.5) * (other_out + 0.5)) / ((out_cluster + 0.5) * (other_in + 0.5))
+
+        if odds_ratio > best_odds and odds_ratio > 1.5:
+            best_odds = odds_ratio
+            best_enrichment = f"{grp}-enriched"
+
+    return best_enrichment, max_purity
 
 # Calculate clustering metrics for different k values
 if args.n_clusters is None:
