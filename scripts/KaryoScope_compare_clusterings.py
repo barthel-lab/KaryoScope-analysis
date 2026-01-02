@@ -71,34 +71,43 @@ def compute_normalized_mutual_info(labels1, labels2):
     return normalized_mutual_info_score(labels1, labels2)
 
 
-def plot_enrichment_sankey(merged, enrich1, enrich2, label1, label2, ax):
+def plot_enrichment_sankey(merged, enrich1, enrich2, label1, label2, ax, dark_mode=False):
     """Create a heatmap showing flow between enrichment categories."""
     ct = pd.crosstab(merged[enrich1], merged[enrich2])
 
     # Normalize by row (what fraction of each label1 category goes to each label2 category)
     ct_pct = ct.div(ct.sum(axis=1), axis=0) * 100
 
-    sns.heatmap(ct_pct, annot=True, fmt='.1f', cmap='Blues', ax=ax,
-                cbar_kws={'label': '% of reads'})
+    # Use different colormap for dark mode
+    cmap = 'YlGnBu' if dark_mode else 'Blues'
+    annot_color = 'white' if dark_mode else 'black'
+
+    sns.heatmap(ct_pct, annot=True, fmt='.1f', cmap=cmap, ax=ax,
+                cbar_kws={'label': '% of reads'},
+                annot_kws={'color': annot_color})
     ax.set_xlabel(f'{label2} enrichment')
     ax.set_ylabel(f'{label1} enrichment')
     ax.set_title(f'Enrichment Flow: {label1} → {label2}\n(row-normalized percentages)')
 
 
-def plot_cluster_size_comparison(df1, df2, label1, label2, ax):
+def plot_cluster_size_comparison(df1, df2, label1, label2, ax, colors=None):
     """Compare cluster size distributions."""
+    if colors is None:
+        colors = ['blue', 'orange']
+
     sizes1 = df1.groupby('cluster').size()
     sizes2 = df2.groupby('cluster').size()
 
-    ax.hist(sizes1, bins=20, alpha=0.5, label=f'{label1} (n={len(sizes1)})', color='blue')
-    ax.hist(sizes2, bins=20, alpha=0.5, label=f'{label2} (n={len(sizes2)})', color='orange')
+    ax.hist(sizes1, bins=20, alpha=0.6, label=f'{label1} (n={len(sizes1)})', color=colors[0])
+    ax.hist(sizes2, bins=20, alpha=0.6, label=f'{label2} (n={len(sizes2)})', color=colors[1])
     ax.set_xlabel('Cluster size')
     ax.set_ylabel('Number of clusters')
     ax.set_title('Cluster Size Distributions')
     ax.legend()
 
 
-def plot_top_cluster_mappings(merged, col1, col2, enrich1_map, enrich2_map, label1, label2, ax):
+def plot_top_cluster_mappings(merged, col1, col2, enrich1_map, enrich2_map, label1, label2, ax,
+                              dark_mode=False):
     """Show top cluster-to-cluster mappings."""
     cluster_map = merged.groupby([col1, col2]).size().reset_index(name='count')
     cluster_map = cluster_map.sort_values('count', ascending=True).tail(15)
@@ -110,18 +119,19 @@ def plot_top_cluster_mappings(merged, col1, col2, enrich1_map, enrich2_map, labe
         e2 = enrich2_map.get(row[col2], 'unk')[:8]
         labels.append(f"{label1[:3]}{row[col1]}({e1}) → {label2[:3]}{row[col2]}({e2})")
 
+    # Adjust colors for dark mode visibility
     colors = []
     for _, row in cluster_map.iterrows():
         e1 = enrich1_map.get(row[col1], 'mixed')
         e2 = enrich2_map.get(row[col2], 'mixed')
         if 'Post' in e1 and 'Post' in e2:
-            colors.append('#377EB8')  # Blue - both Post
+            colors.append('#5dade2' if dark_mode else '#377EB8')  # Blue - both Post
         elif 'Pre' in e1 and 'Pre' in e2:
-            colors.append('#E41A1C')  # Red - both Pre
+            colors.append('#ec7063' if dark_mode else '#E41A1C')  # Red - both Pre
         elif e1 == e2:
-            colors.append('#4DAF4A')  # Green - same
+            colors.append('#58d68d' if dark_mode else '#4DAF4A')  # Green - same
         else:
-            colors.append('#999999')  # Gray - different
+            colors.append('#aab7b8' if dark_mode else '#999999')  # Gray - different
 
     ax.barh(range(len(labels)), cluster_map['count'], color=colors)
     ax.set_yticks(range(len(labels)))
@@ -274,6 +284,8 @@ def main():
                         help="Label for second clustering (e.g., 'repeat')")
     parser.add_argument("--output-prefix", dest="output_prefix", required=True,
                         help="Output prefix for generated files")
+    parser.add_argument("--dark-mode", dest="dark_mode", action="store_true", default=False,
+                        help="Use dark background for plots (default: False)")
 
     args = parser.parse_args()
 
@@ -315,47 +327,64 @@ def main():
     print("\nGenerating comparison plots...")
     plots_file = f"{args.output_prefix}.comparison_plots.pdf"
 
-    sns.set_style("whitegrid")
+    # Set up plot style based on dark mode
+    if args.dark_mode:
+        plt.style.use('dark_background')
+        sns.set_style("darkgrid", {"axes.facecolor": "#1a1a1a", "grid.color": "#404040"})
+        PLOT_BG_COLOR = '#1a1a1a'
+        TEXT_COLOR = 'white'
+        HIST_COLORS = ['#5dade2', '#f5b041']  # Light blue and orange for dark mode
+    else:
+        sns.set_style("whitegrid")
+        PLOT_BG_COLOR = 'white'
+        TEXT_COLOR = 'black'
+        HIST_COLORS = ['blue', 'orange']
     plt.rcParams['figure.dpi'] = 150
 
     with PdfPages(plots_file) as pdf:
         # Page 1: Enrichment flow and cluster sizes
         fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        fig.patch.set_facecolor(PLOT_BG_COLOR)
         fig.suptitle(f'Clustering Comparison: {args.label1} vs {args.label2}',
-                     fontsize=14, fontweight='bold')
+                     fontsize=14, fontweight='bold', color=TEXT_COLOR)
 
         plot_enrichment_sankey(merged, f'{args.label1}_enrich', f'{args.label2}_enrich',
-                               args.label1, args.label2, axes[0])
-        plot_cluster_size_comparison(df1, df2, args.label1, args.label2, axes[1])
+                               args.label1, args.label2, axes[0], dark_mode=args.dark_mode)
+        plot_cluster_size_comparison(df1, df2, args.label1, args.label2, axes[1],
+                                     colors=HIST_COLORS)
 
         plt.tight_layout()
-        pdf.savefig(fig, bbox_inches='tight')
+        pdf.savefig(fig, bbox_inches='tight', facecolor=PLOT_BG_COLOR)
         plt.close(fig)
 
         # Page 2: Top cluster mappings
         fig, ax = plt.subplots(figsize=(12, 8))
+        fig.patch.set_facecolor(PLOT_BG_COLOR)
         plot_top_cluster_mappings(merged, f'{args.label1}_cluster', f'{args.label2}_cluster',
-                                  enrich1_map, enrich2_map, args.label1, args.label2, ax)
+                                  enrich1_map, enrich2_map, args.label1, args.label2, ax,
+                                  dark_mode=args.dark_mode)
         plt.tight_layout()
-        pdf.savefig(fig, bbox_inches='tight')
+        pdf.savefig(fig, bbox_inches='tight', facecolor=PLOT_BG_COLOR)
         plt.close(fig)
 
         # Page 3: Concordance by cluster (label1 → label2)
         fig, ax = plt.subplots(figsize=(12, 8))
+        fig.patch.set_facecolor(PLOT_BG_COLOR)
         plot_concordance_by_cluster(merged, f'{args.label1}_cluster',
                                     f'{args.label1}_enrich', f'{args.label2}_enrich',
                                     args.label1, args.label2, ax)
         plt.tight_layout()
-        pdf.savefig(fig, bbox_inches='tight')
+        pdf.savefig(fig, bbox_inches='tight', facecolor=PLOT_BG_COLOR)
         plt.close(fig)
 
         # Page 4: Concordance by cluster (label2 → label1)
         fig, ax = plt.subplots(figsize=(12, 8))
+        fig.patch.set_facecolor(PLOT_BG_COLOR)
         plot_concordance_by_cluster(merged, f'{args.label2}_cluster',
                                     f'{args.label2}_enrich', f'{args.label1}_enrich',
                                     args.label2, args.label1, ax)
         plt.tight_layout()
-        pdf.savefig(fig, bbox_inches='tight')
+        pdf.savefig(fig, bbox_inches='tight', facecolor=PLOT_BG_COLOR)
         plt.close(fig)
 
     print(f"  Saved: {plots_file}")
