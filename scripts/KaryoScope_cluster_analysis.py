@@ -1234,7 +1234,7 @@ if args.n_clusters is None:
         # Calculate standard clustering metrics
         if k > 1:
             if n_samples > 2000:
-                silhouette = silhouette_score(adj_matrix, labels, sample_size=min(2000, n_samples), random_state=42)
+                silhouette = silhouette_score(adj_matrix, labels, sample_size=min(2000, n_samples))
             else:
                 silhouette = silhouette_score(adj_matrix, labels)
             calinski_harabasz = calinski_harabasz_score(adj_matrix, labels)
@@ -1257,10 +1257,15 @@ if args.n_clusters is None:
         perfect_enriched = 0
         strong_enriched = 0
         any_enriched = 0
+        # Track reads in enriched clusters
+        perfect_reads = 0
+        strong_reads = 0
+        any_enriched_reads = 0
 
         for cluster_id in range(1, k + 1):
             cluster_mask = labels_arr == cluster_id
-            if cluster_mask.sum() >= args.min_cluster_size:
+            cluster_size = cluster_mask.sum()
+            if cluster_size >= args.min_cluster_size:
                 enrich, purity = fast_enrichment_check(cluster_mask, read_groups_arr,
                                                        group_totals, control_group, all_groups)
                 enrichments.append(enrich)
@@ -1268,10 +1273,13 @@ if args.n_clusters is None:
 
                 if enrich != "mixed":
                     any_enriched += 1
+                    any_enriched_reads += cluster_size
                     if purity >= args.perfect_threshold:
                         perfect_enriched += 1
+                        perfect_reads += cluster_size
                     if purity >= args.strong_threshold:
                         strong_enriched += 1
+                        strong_reads += cluster_size
 
         # Count enrichments by group
         group_enriched_counts = {g: sum(1 for e in enrichments if e == f"{g}-enriched") for g in all_groups}
@@ -1281,6 +1289,12 @@ if args.n_clusters is None:
         enriched_ratio = any_enriched / valid_clusters if valid_clusters > 0 else 0
         perfect_ratio = perfect_enriched / valid_clusters if valid_clusters > 0 else 0
         strong_ratio = strong_enriched / valid_clusters if valid_clusters > 0 else 0
+
+        # Calculate read percentages
+        total_reads = len(read_names)
+        perfect_reads_pct = (perfect_reads / total_reads * 100) if total_reads > 0 else 0
+        strong_reads_pct = (strong_reads / total_reads * 100) if total_reads > 0 else 0
+        any_enriched_reads_pct = (any_enriched_reads / total_reads * 100) if total_reads > 0 else 0
 
         # Composite score (50% silhouette, 10% any enriched, 40% perfect)
         silhouette_norm = (silhouette + 1) / 2
@@ -1300,6 +1314,12 @@ if args.n_clusters is None:
             'enriched_ratio': enriched_ratio,
             'strong_ratio': strong_ratio,
             'perfect_ratio': perfect_ratio,
+            'any_enriched_reads': any_enriched_reads,
+            'strong_reads': strong_reads,
+            'perfect_reads': perfect_reads,
+            'any_enriched_reads_pct': any_enriched_reads_pct,
+            'strong_reads_pct': strong_reads_pct,
+            'perfect_reads_pct': perfect_reads_pct,
             'composite_score': composite_score,
             **{f'{g}_enriched': group_enriched_counts.get(g, 0) for g in all_groups},
             'mixed': mixed
@@ -1323,8 +1343,8 @@ if args.n_clusters is None:
     stats_df.to_csv(stats_file, sep='\t', index=False)
     print(f"  Saved k analysis to: {stats_file}")
 
-    # Generate k-selection diagnostic plot (2x3 grid)
-    fig, axes = plt.subplots(2, 3, figsize=(16, 10))
+    # Generate k-selection diagnostic plot (2x4 grid)
+    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
     fig.patch.set_facecolor(PLOT_BG_COLOR)
     for ax in axes.flat:
         ax.set_facecolor(PLOT_BG_COLOR)
@@ -1392,6 +1412,27 @@ if args.n_clusters is None:
     ax6.axvline(x=best_composite_k, color='g', linestyle='--', alpha=0.5, label=f'Best k={best_composite_k}')
     ax6.axhline(y=stats_df['composite_score'].max(), color='r', linestyle='--', alpha=0.3)
     ax6.legend()
+
+    # 7. Reads in enriched clusters (absolute counts)
+    ax7 = axes[0, 3]
+    ax7.plot(stats_df['k'], stats_df['any_enriched_reads'], '-o', markersize=3, label='Any enriched', color='blue')
+    ax7.plot(stats_df['k'], stats_df['strong_reads'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
+    ax7.plot(stats_df['k'], stats_df['perfect_reads'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='red')
+    ax7.set_xlabel('Number of clusters (k)')
+    ax7.set_ylabel('Number of reads')
+    ax7.set_title('Reads in Enriched Clusters (count)')
+    ax7.legend()
+
+    # 8. Reads in enriched clusters (percentages)
+    ax8 = axes[1, 3]
+    ax8.plot(stats_df['k'], stats_df['any_enriched_reads_pct'], '-o', markersize=3, label='Any enriched', color='blue')
+    ax8.plot(stats_df['k'], stats_df['strong_reads_pct'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
+    ax8.plot(stats_df['k'], stats_df['perfect_reads_pct'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='red')
+    ax8.set_xlabel('Number of clusters (k)')
+    ax8.set_ylabel('Percent of reads')
+    ax8.set_title('Reads in Enriched Clusters (%)')
+    ax8.set_ylim(0, 100)
+    ax8.legend()
 
     plt.tight_layout()
     k_plot_file = f"{args.output_prefix}.k_selection.pdf"
