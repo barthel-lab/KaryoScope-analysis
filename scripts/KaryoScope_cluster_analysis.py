@@ -425,11 +425,13 @@ def calculate_enrichment_two_group(cluster_samples, sample_to_group, control_gro
     control_pct = (control_in / total_in * 100) if total_in > 0 else 0
     treatment_pct = (treatment_in / total_in * 100) if total_in > 0 else 0
 
-    # Determine enrichment direction
+    # Determine enrichment direction using odds ratio (accounts for unequal group sizes)
+    # odds_ratio > 1 means control is over-represented relative to baseline
+    # odds_ratio < 1 means treatment is over-represented relative to baseline
     if p_value < 0.05:
-        if control_pct > treatment_pct:
+        if odds_ratio > 1:
             enrichment = f"{control_group}-enriched"
-        elif treatment_pct > control_pct:
+        elif odds_ratio < 1:
             enrichment = f"{treatment_group}-enriched"
         else:
             enrichment = "mixed"
@@ -440,13 +442,16 @@ def calculate_enrichment_two_group(cluster_samples, sample_to_group, control_gro
     group_counts = {control_group: control_in, treatment_group: treatment_in}
     group_pcts = {control_group: control_pct, treatment_group: treatment_pct}
 
+    # Dominant group based on odds ratio (which group is over-represented)
+    dominant_group = control_group if odds_ratio > 1 else treatment_group
+
     return {
         'group_counts': group_counts,
         'group_pcts': group_pcts,
         'odds_ratio': odds_ratio,
         'p_value': p_value,
         'enrichment': enrichment,
-        'dominant_group': control_group if control_pct > treatment_pct else treatment_group
+        'dominant_group': dominant_group
     }
 
 
