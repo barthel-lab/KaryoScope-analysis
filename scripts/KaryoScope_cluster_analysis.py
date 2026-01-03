@@ -1386,7 +1386,7 @@ if args.n_clusters is None:
     ax3.legend()
 
     # 4. Enrichment counts (absolute)
-    ax4 = axes[1, 0]
+    ax4 = axes[0, 3]
     ax4.plot(stats_df['k'], stats_df['any_enriched'], '-o', markersize=3, label='Any enriched', color='blue')
     ax4.plot(stats_df['k'], stats_df['strong_enriched'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
     ax4.plot(stats_df['k'], stats_df['perfect_enriched'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='red')
@@ -1396,7 +1396,7 @@ if args.n_clusters is None:
     ax4.legend()
 
     # 5. Enrichment by group
-    ax5 = axes[1, 1]
+    ax5 = axes[1, 0]
     for g in all_groups:
         col = f'{g}_enriched'
         if col in stats_df.columns:
@@ -1407,36 +1407,36 @@ if args.n_clusters is None:
     ax5.set_title('Enrichment by Group')
     ax5.legend()
 
-    # 6. Composite score (our recommended metric)
-    ax6 = axes[1, 2]
-    ax6.plot(stats_df['k'], stats_df['composite_score'], 'b-o', markersize=3)
+    # 6. Reads in enriched clusters (absolute counts)
+    ax6 = axes[1, 1]
+    ax6.plot(stats_df['k'], stats_df['any_enriched_reads'], '-o', markersize=3, label='Any enriched', color='blue')
+    ax6.plot(stats_df['k'], stats_df['strong_reads'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
+    ax6.plot(stats_df['k'], stats_df['perfect_reads'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='red')
     ax6.set_xlabel('Number of clusters (k)')
-    ax6.set_ylabel('Composite Score')
-    ax6.set_title('Composite Score (silhouette + enrichment)')
-    best_composite_k = int(stats_df.loc[stats_df['composite_score'].idxmax(), 'k'])
-    ax6.axvline(x=best_composite_k, color='g', linestyle='--', alpha=0.5, label=f'Best k={best_composite_k}')
-    ax6.axhline(y=stats_df['composite_score'].max(), color='r', linestyle='--', alpha=0.3)
+    ax6.set_ylabel('Number of reads')
+    ax6.set_title('Reads in Enriched Clusters (count)')
     ax6.legend()
 
-    # 7. Reads in enriched clusters (absolute counts)
-    ax7 = axes[0, 3]
-    ax7.plot(stats_df['k'], stats_df['any_enriched_reads'], '-o', markersize=3, label='Any enriched', color='blue')
-    ax7.plot(stats_df['k'], stats_df['strong_reads'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
-    ax7.plot(stats_df['k'], stats_df['perfect_reads'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='red')
+    # 7. Reads in enriched clusters (percentages)
+    ax7 = axes[1, 2]
+    ax7.plot(stats_df['k'], stats_df['any_enriched_reads_pct'], '-o', markersize=3, label='Any enriched', color='blue')
+    ax7.plot(stats_df['k'], stats_df['strong_reads_pct'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
+    ax7.plot(stats_df['k'], stats_df['perfect_reads_pct'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='red')
     ax7.set_xlabel('Number of clusters (k)')
-    ax7.set_ylabel('Number of reads')
-    ax7.set_title('Reads in Enriched Clusters (count)')
+    ax7.set_ylabel('Percent of reads')
+    ax7.set_title('Reads in Enriched Clusters (%)')
+    ax7.set_ylim(0, 100)
     ax7.legend()
 
-    # 8. Reads in enriched clusters (percentages)
+    # 8. Composite score (our recommended metric) - last position
     ax8 = axes[1, 3]
-    ax8.plot(stats_df['k'], stats_df['any_enriched_reads_pct'], '-o', markersize=3, label='Any enriched', color='blue')
-    ax8.plot(stats_df['k'], stats_df['strong_reads_pct'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
-    ax8.plot(stats_df['k'], stats_df['perfect_reads_pct'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='red')
+    ax8.plot(stats_df['k'], stats_df['composite_score'], 'b-o', markersize=3)
     ax8.set_xlabel('Number of clusters (k)')
-    ax8.set_ylabel('Percent of reads')
-    ax8.set_title('Reads in Enriched Clusters (%)')
-    ax8.set_ylim(0, 100)
+    ax8.set_ylabel('Composite Score')
+    ax8.set_title('Composite Score (silhouette + enrichment)')
+    best_composite_k = int(stats_df.loc[stats_df['composite_score'].idxmax(), 'k'])
+    ax8.axvline(x=best_composite_k, color='g', linestyle='--', alpha=0.5, label=f'Best k={best_composite_k}')
+    ax8.axhline(y=stats_df['composite_score'].max(), color='r', linestyle='--', alpha=0.3)
     ax8.legend()
 
     plt.tight_layout()
