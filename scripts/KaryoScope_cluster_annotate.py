@@ -27,9 +27,7 @@ import argparse
 import fnmatch
 import gzip
 import os
-import re
 import sys
-from collections import Counter, defaultdict
 
 import pandas as pd
 
@@ -97,75 +95,29 @@ def summarize_featureset(cluster_reads, bed_df, top_n=3, exclude_patterns=None):
     cluster_bed = bed_df[bed_df['read'].isin(cluster_reads)]
 
     if len(cluster_bed) == 0:
-        return '', 0
+        return ''
 
     # Count by feature (weighted by length)
     feature_bp = cluster_bed.groupby('feature')['length'].sum()
 
-    # Filter out excluded features
+    if len(feature_bp) == 0:
+        return ''
+
+    # Calculate total BEFORE filtering (so percentages reflect true proportion)
+    total_bp = feature_bp.sum()
+
+    # Filter out excluded features for display only
     if exclude_patterns:
         feature_bp = feature_bp[~feature_bp.index.map(lambda f: matches_any_pattern(f, exclude_patterns))]
 
     if len(feature_bp) == 0:
-        return '', 0
+        return ''
 
-    total_bp = feature_bp.sum()
-
-    # Top features by coverage
+    # Top features by coverage (percentages relative to total including excluded)
     top_features = feature_bp.nlargest(top_n)
     top_str = '; '.join([f"{f}({100*v/total_bp:.1f}%)" for f, v in top_features.items()])
 
-    return top_str, len(feature_bp)
-
-
-def categorize_feature(feature):
-    """Categorize a feature into high-level categories."""
-    feature_lower = feature.lower()
-
-    # Satellites
-    if 'hsat' in feature_lower:
-        return 'satellite', 'HSat'
-    if 'asat' in feature_lower or 'a-sat' in feature_lower or 'alpha' in feature_lower or feature_lower in ['active', 'inactive', 'divergent', 'monomeric']:
-        return 'satellite', 'aSat'
-    if 'bsat' in feature_lower:
-        return 'satellite', 'BSat'
-    if 'gsat' in feature_lower:
-        return 'satellite', 'GSat'
-
-    # rDNA
-    if 'rdna' in feature_lower or 'rrna' in feature_lower:
-        return 'rDNA', 'rDNA'
-
-    # Chromosome
-    if feature.startswith('chr') and '_' not in feature:
-        return 'chromosome', feature
-
-    return 'other', feature
-
-
-def get_satellite_summary(cluster_reads, bed_df):
-    """Get satellite and rDNA summary for a cluster."""
-    cluster_bed = bed_df[bed_df['read'].isin(cluster_reads)]
-
-    if len(cluster_bed) == 0:
-        return '', False
-
-    feature_bp = cluster_bed.groupby('feature')['length'].sum()
-    total_bp = feature_bp.sum()
-
-    satellites = Counter()
-    has_rDNA = False
-
-    for feature, bp in feature_bp.items():
-        cat, subcat = categorize_feature(feature)
-        if cat == 'satellite':
-            satellites[subcat] += bp
-        elif cat == 'rDNA':
-            has_rDNA = True
-
-    sat_str = '; '.join([f"{s}({100*v/total_bp:.1f}%)" for s, v in satellites.most_common() if v/total_bp > 0.001]) if satellites else ''
-
-    return sat_str, has_rDNA
+    return top_str
 
 
 def main():
@@ -194,8 +146,8 @@ def main():
     parser.add_argument("--min-size", dest="min_size", type=int, default=1,
                         help="Minimum cluster size to include (default: 1)")
     parser.add_argument("--exclude-features", dest="exclude_features",
-                        default="*multigroup*,*_arm,nonsubtelomeric,nonacrocentric,nonrepeat,categorized",
-                        help="Comma-separated features to exclude, supports wildcards (default: '*multigroup*,*_arm,nonsubtelomeric,nonacrocentric,nonrepeat,categorized')")
+                        default="*multigroup*,*_arm,nonsubtelomeric,nonacrocentric,nonrepeat,categorized,canonical_telomere*",
+                        help="Comma-separated features to exclude, supports wildcards (default: '*multigroup*,*_arm,nonsubtelomeric,nonacrocentric,nonrepeat,categorized,canonical_telomere*')")
 
     args = parser.parse_args()
 
@@ -310,20 +262,13 @@ def main():
             row['Tumor_pct'] = round(info.get('Tumor_pct'), 1) if info.get('Tumor_pct') is not None else None
             row['Normal_count'] = info.get('Normal_count')
             row['Normal_pct'] = round(info.get('Normal_pct'), 1) if info.get('Normal_pct') is not None else None
-            row['q_value'] = info.get('q_value')
+            q = info.get('q_value')
+            row['q_value'] = f"{q:.4e}" if q is not None else None
 
         # Annotate each featureset
         for fs in featuresets:
             if fs in bed_data:
-                top_str, _ = summarize_featureset(cluster_reads, bed_data[fs], args.top_n, exclude_patterns)
-                row[f'{fs}_top'] = top_str
-
-        # Get satellite summary (from any available featureset)
-        for fs in ['region', 'centromeric', 'repeat']:
-            if fs in bed_data:
-                sat_str, _ = get_satellite_summary(cluster_reads, bed_data[fs])
-                row['satellites'] = sat_str
-                break
+                row[f'{fs}_top'] = summarize_featureset(cluster_reads, bed_data[fs], args.top_n, exclude_patterns)
 
         results.append(row)
 
@@ -354,13 +299,6 @@ def main():
         n_100pct = (result_df['Tumor_pct'] == 100).sum()
         print(f"\n100% Tumor clusters: {n_100pct}")
 
-    # Print clusters with satellites
-    if 'satellites' in result_df.columns:
-        sat_clusters = result_df[result_df['satellites'].notna() & (result_df['satellites'] != '')]
-        if len(sat_clusters) > 0:
-            print(f"\nClusters with satellite signal: {len(sat_clusters)}")
-            for _, row in sat_clusters.head(5).iterrows():
-                print(f"  Cluster {row['cluster_id']}: {row.get('satellites', '')}")
 
 
 if __name__ == "__main__":
