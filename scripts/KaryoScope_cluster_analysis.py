@@ -1296,11 +1296,16 @@ if args.n_clusters is None:
         strong_reads_pct = (strong_reads / total_reads * 100) if total_reads > 0 else 0
         any_enriched_reads_pct = (any_enriched_reads / total_reads * 100) if total_reads > 0 else 0
 
-        # Composite score (50% silhouette, 10% any enriched, 40% perfect)
-        silhouette_norm = (silhouette + 1) / 2
-        composite_score = (0.5 * silhouette_norm +
-                          0.1 * enriched_ratio +
-                          0.4 * perfect_ratio)
+        # Composite score: 40% silhouette, 10% strong ratio, 20% perfect ratio,
+        #                  10% strong read %, 20% perfect read %
+        silhouette_norm = (silhouette + 1) / 2  # normalize from [-1,1] to [0,1]
+        strong_reads_norm = strong_reads_pct / 100  # normalize from 0-100 to 0-1
+        perfect_reads_norm = perfect_reads_pct / 100  # normalize from 0-100 to 0-1
+        composite_score = (0.4 * silhouette_norm +
+                          0.1 * strong_ratio +
+                          0.2 * perfect_ratio +
+                          0.1 * strong_reads_norm +
+                          0.2 * perfect_reads_norm)
 
         stats = {
             'k': k,
