@@ -123,7 +123,9 @@ def load_stats(readnames_dir, samples, reference="CHM13"):
             # For total aligned bases, only count non-secondary alignments
             # (primary + supplementary cover non-overlapping portions of the read)
             # Secondary alignments are alternative mappings for the same read portion
-            non_secondary = df[df['is_primary'] == True]
+            # Non-secondary = primary OR supplementary
+            # is_primary=True for primary, is_not_supplementary=False for supplementary
+            non_secondary = df[(df['is_primary'] == True) | (df['is_not_supplementary'] == False)]
             non_secondary_align = non_secondary.groupby('read').agg(
                 total_align_len=('align_len', 'sum'),
             ).reset_index()
@@ -158,6 +160,23 @@ def load_stats(readnames_dir, samples, reference="CHM13"):
                 (df['is_primary'] == True) &
                 (df['is_not_supplementary'] == True)
             ].copy()
+
+            # Add placeholder columns so merges work consistently
+            filtered_df['n_alignments'] = 1
+            filtered_df['n_secondary'] = 0
+            filtered_df['n_supplementary'] = 0
+            if 'align_len' in filtered_df.columns and 'read_len' in filtered_df.columns:
+                filtered_df['total_align_len'] = filtered_df['align_len']
+                filtered_df['total_align_fraction'] = filtered_df['align_len'] / filtered_df['read_len']
+            if 'mapq' in filtered_df.columns:
+                filtered_df['primary_mapq'] = filtered_df['mapq']
+            if 'de' in filtered_df.columns:
+                filtered_df['primary_de'] = filtered_df['de']
+            if 'align_len' in filtered_df.columns:
+                filtered_df['primary_align_len'] = filtered_df['align_len']
+            if 'align_fraction' in filtered_df.columns:
+                filtered_df['primary_align_fraction'] = filtered_df['align_fraction']
+
             print(f"  {sample}: {len(filtered_df)} primary alignments (columns for aggregate stats not found)")
             all_stats.append(filtered_df)
 

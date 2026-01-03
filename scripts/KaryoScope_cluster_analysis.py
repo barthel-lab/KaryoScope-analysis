@@ -402,7 +402,20 @@ def calculate_enrichment_two_group(cluster_samples, sample_to_group, control_gro
     """Calculate enrichment using Fisher's exact test (two-group comparison)."""
     # Get treatment group (the other group)
     groups = list(group_totals.keys())
-    treatment_group = [g for g in groups if g != control_group][0] if len(groups) == 2 else None
+
+    # Handle edge case: single group or empty groups
+    if len(groups) < 2:
+        return {
+            'group_counts': {g: len(cluster_samples) for g in groups} if groups else {},
+            'group_pcts': {g: 100.0 for g in groups} if groups else {},
+            'odds_ratio': np.nan,
+            'p_value': 1.0,
+            'enrichment': 'mixed',
+            'dominant_group': groups[0] if groups else None
+        }
+
+    non_control_groups = [g for g in groups if g != control_group]
+    treatment_group = non_control_groups[0] if len(groups) == 2 and non_control_groups else None
 
     if treatment_group is None:
         # If more than 2 groups, pick the most enriched non-control group
@@ -459,6 +472,17 @@ def calculate_enrichment_multi_group(cluster_samples, sample_to_group, group_tot
     """Calculate enrichment using chi-square test (multi-group comparison)."""
     groups = list(group_totals.keys())
 
+    # Handle edge case: empty or single group
+    if len(groups) < 2:
+        return {
+            'group_counts': {g: len(cluster_samples) for g in groups} if groups else {},
+            'group_pcts': {g: 100.0 for g in groups} if groups else {},
+            'odds_ratio': np.nan,
+            'p_value': 1.0,
+            'enrichment': 'mixed',
+            'dominant_group': groups[0] if groups else None
+        }
+
     # Count samples in cluster by group
     group_counts = Counter(sample_to_group.get(s, s) for s in cluster_samples)
 
@@ -481,8 +505,8 @@ def calculate_enrichment_multi_group(cluster_samples, sample_to_group, group_tot
     total_in = sum(observed_in)
     group_pcts = {g: (group_counts.get(g, 0) / total_in * 100) if total_in > 0 else 0 for g in groups}
 
-    # Determine dominant group
-    dominant_group = max(groups, key=lambda g: group_pcts[g])
+    # Determine dominant group (guard against empty groups - shouldn't happen after check above)
+    dominant_group = max(groups, key=lambda g: group_pcts[g]) if groups else None
 
     # Enrichment label
     if p_value < 0.05:
@@ -503,6 +527,19 @@ def calculate_enrichment_multi_group(cluster_samples, sample_to_group, group_tot
 def calculate_enrichment_per_sample(cluster_samples, sample_totals):
     """Calculate enrichment per sample (each sample vs all others)."""
     samples = list(sample_totals.keys())
+
+    # Handle edge case: no samples
+    if not samples:
+        return {
+            'group_counts': {},
+            'group_pcts': {},
+            'odds_ratio': np.nan,
+            'p_value': 1.0,
+            'enrichment': 'mixed',
+            'dominant_group': None,
+            'all_p_values': {},
+            'all_odds_ratios': {}
+        }
 
     # Count samples in cluster
     sample_counts = Counter(cluster_samples)
@@ -533,11 +570,18 @@ def calculate_enrichment_per_sample(cluster_samples, sample_totals):
         min_p_sample = min(enriched_samples.keys(), key=lambda s: enriched_samples[s])
         min_p = enriched_samples[min_p_sample]
         enrichment = f"{min_p_sample}-enriched"
-    else:
+    elif p_values:
         # No significant enrichment - find min p-value for reporting
         min_p_sample = min(p_values.keys(), key=lambda s: p_values[s])
         min_p = p_values[min_p_sample]
         enrichment = "mixed"
+    else:
+        min_p_sample = None
+        min_p = 1.0
+        enrichment = "mixed"
+
+    # Determine dominant sample (guard against empty samples)
+    dominant_sample = max(samples, key=lambda s: sample_pcts[s]) if samples else None
 
     return {
         'group_counts': {s: sample_counts.get(s, 0) for s in samples},
@@ -545,7 +589,7 @@ def calculate_enrichment_per_sample(cluster_samples, sample_totals):
         'odds_ratio': np.nan,
         'p_value': min_p,
         'enrichment': enrichment,
-        'dominant_group': max(samples, key=lambda s: sample_pcts[s]),
+        'dominant_group': dominant_sample,
         'all_p_values': p_values,
         'all_odds_ratios': odds_ratios
     }
@@ -663,7 +707,7 @@ def calculate_stratified_variance(cluster_samples, sample_to_group, sample_total
             'mean_normalized': mean_normalized,
             'std_normalized': std_normalized,
             'cv_normalized': cv_normalized,
-            'consistent': cv_normalized < 0.5,  # Flag if CV > 50%
+            'consistent': cv_normalized < 0.5,  # True if CV < 50% (consistent across samples)
             'n_samples': len(group_sample_names)
         }
 
@@ -1134,11 +1178,11 @@ def fast_enrichment_check(cluster_mask, read_groups, group_totals_dict, control_
     cluster_groups = read_groups[cluster_mask]
     group_counts = Counter(cluster_groups)
     total_in = len(cluster_groups)
-    if total_in == 0:
+    if total_in == 0 or not all_grps:
         return "mixed", 0.0
 
     # Calculate max purity (highest percentage from any single group)
-    max_purity = max(group_counts.get(g, 0) / total_in for g in all_grps)
+    max_purity = max((group_counts.get(g, 0) / total_in for g in all_grps), default=0.0)
 
     # Calculate expected proportions
     total_reads = sum(group_totals_dict.values())
@@ -1170,6 +1214,11 @@ if args.n_clusters is None:
     max_k_limit = min(args.max_k + 1, len(read_names) // 10)
     k_range = list(range(args.min_k, max_k_limit))
     n_samples = len(read_names)
+
+    if not k_range:
+        print(f"ERROR: Empty k-range (min_k={args.min_k} >= max_k_limit={max_k_limit})")
+        print(f"  Try lowering --min-k or ensuring you have enough reads (need at least 10x max_k reads)")
+        sys.exit(1)
 
     print(f"Testing cluster counts from {min(k_range)} to {max(k_range)} ({len(k_range)} values)...")
 

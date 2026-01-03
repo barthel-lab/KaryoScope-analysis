@@ -47,17 +47,31 @@ def load_bed_file(filepath):
     mode = 'rt' if filepath.endswith('.gz') else 'r'
 
     records = []
+    malformed_count = 0
     with open_func(filepath, mode) as f:
-        for line in f:
+        for line_num, line in enumerate(f, 1):
             parts = line.strip().split('\t')
-            if len(parts) >= 4:
+            if len(parts) < 4:
+                malformed_count += 1
+                continue
+            try:
                 records.append({
                     'read': parts[0],
                     'start': int(parts[1]),
                     'end': int(parts[2]),
                     'feature': parts[3]
                 })
-    return pd.DataFrame(records)
+            except ValueError:
+                malformed_count += 1
+                continue
+
+    if malformed_count > 0:
+        print(f"  Warning: Skipped {malformed_count} malformed lines in {filepath}")
+
+    df = pd.DataFrame(records)
+    if df.empty:
+        print(f"  Warning: No valid records in {filepath}")
+    return df
 
 
 def merge_two_beds(df1, df2, sep=":"):
@@ -147,13 +161,25 @@ for i, bed_file in enumerate(args.bed, 1):
 merged_df = load_bed_file(args.bed[0])
 print(f"\n  BED1 intervals: {len(merged_df):,}")
 
+if merged_df.empty:
+    print("Error: First BED file has no valid records", file=sys.stderr)
+    sys.exit(1)
+
 # Iteratively merge with remaining BED files
 for i, bed_file in enumerate(args.bed[1:], 2):
     df_next = load_bed_file(bed_file)
     print(f"  BED{i} intervals: {len(df_next):,}")
 
+    if df_next.empty:
+        print(f"  Warning: BED{i} has no valid records, skipping")
+        continue
+
     merged_df = merge_two_beds(merged_df, df_next, args.separator)
     print(f"  After merge {i-1}: {len(merged_df):,} intervals")
+
+    if merged_df.empty:
+        print(f"  Warning: Merge resulted in no overlapping intervals")
+        break
 
 print(f"\nFinal merged intervals: {len(merged_df):,}")
 
