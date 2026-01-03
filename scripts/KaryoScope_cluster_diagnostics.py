@@ -129,7 +129,11 @@ def compute_effect_size(group1: np.ndarray, group2: np.ndarray) -> Tuple[float, 
     """
     if len(group1) == 0 or len(group2) == 0:
         return 0.0, "n/a"
-    stat, _ = stats.mannwhitneyu(group1, group2, alternative='two-sided')
+    try:
+        stat, _ = stats.mannwhitneyu(group1, group2, alternative='two-sided')
+    except ValueError:
+        # Can happen with identical values or other edge cases
+        return 0.0, "n/a"
     n1, n2 = len(group1), len(group2)
     r = 1 - (2 * stat) / (n1 * n2)
 
@@ -656,7 +660,7 @@ def plot_cluster_vs_others(df, cluster_ids, metrics, group_label=None, enrichmen
                 effect_size = 1 - (2 * stat) / (n1 * n2)
 
                 ax.set_title(f"{metric}\n({p_str}, r={effect_size:.2f})")
-            except:
+            except (ValueError, ZeroDivisionError):
                 ax.set_title(metric)
         else:
             ax.set_title(metric)
@@ -1004,7 +1008,7 @@ def pub_count_distribution_figure(
                     try:
                         chi2, p_val, dof, expected = stats.chi2_contingency(contingency)
                         p_values.append(p_val)
-                    except:
+                    except (ValueError, ZeroDivisionError):
                         p_values.append(1.0)
                 else:
                     p_values.append(1.0)
@@ -1071,7 +1075,10 @@ def pub_summary_heatmap(
         data.append(row)
 
     matrix = pd.DataFrame(data, index=clusters, columns=metrics)
-    z_matrix = (matrix - matrix.mean()) / matrix.std()
+    # Handle constant columns (std=0) by replacing with 1 to avoid NaN
+    std = matrix.std()
+    std[std == 0] = 1.0
+    z_matrix = (matrix - matrix.mean()) / std
 
     # Order clusters
     if cluster_order == 'enrichment' and enrichment_map:

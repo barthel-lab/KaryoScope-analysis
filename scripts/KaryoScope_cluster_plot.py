@@ -207,6 +207,8 @@ def load_cluster_analysis(cluster_analysis_file):
 
             # Determine enrichment tier for each cluster
             def get_enrichment_tier(row):
+                if not pct_cols:
+                    return 2  # No pct columns, treat as "other"
                 max_pct = max(row[col] for col in pct_cols)
                 if max_pct == 100.0:
                     return 0  # Perfect: 100% enriched
@@ -252,10 +254,19 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
 
     # Filter by reads file if provided
     if reads_file:
-        with open(reads_file, 'r') as f:
-            allowed_reads = set(line.strip() for line in f if line.strip())
-        reps_df = reps_df[reps_df['read'].isin(allowed_reads)]
-        print(f"  After reads filter: {len(reps_df)} reads (from {len(allowed_reads)} in file)")
+        if not os.path.exists(reads_file):
+            print(f"  Warning: reads_file not found: {reads_file}")
+        else:
+            try:
+                with open(reads_file, 'r') as f:
+                    allowed_reads = set(line.strip() for line in f if line.strip())
+                if allowed_reads:
+                    reps_df = reps_df[reps_df['read'].isin(allowed_reads)]
+                    print(f"  After reads filter: {len(reps_df)} reads (from {len(allowed_reads)} in file)")
+                else:
+                    print(f"  Warning: reads_file is empty, no filtering applied")
+            except Exception as e:
+                print(f"  Warning: Could not read reads_file: {e}")
 
     # Merge enrichment info from cluster_analysis.tsv
     if cluster_enrichments:
@@ -348,6 +359,9 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
     cluster_reads = OrderedDict()
     for cluster_id in clusters_to_plot:
         cluster_data = reps_df[reps_df['cluster'] == cluster_id]
+        if cluster_data.empty:
+            print(f"  Warning: Cluster {cluster_id} has no reads after filtering, skipping")
+            continue
         enrichment = cluster_data['enrichment'].iloc[0]
 
         # Apply max_reps limit using rank (rank 1 = closest to centroid)
@@ -528,9 +542,14 @@ def load_bed_data(sample_bed_paths, database, featuresets, smoothness, reads_nee
 
             with open_func(bed_path, mode) as f:
                 for line in f:
-                    parts = line.strip().split()[:4]
-                    scaffold, start, stop, feature = parts
-                    start, stop = int(start), int(stop)
+                    parts = line.strip().split()
+                    if len(parts) < 4:
+                        continue  # Skip malformed BED lines
+                    scaffold, start, stop, feature = parts[:4]
+                    try:
+                        start, stop = int(start), int(stop)
+                    except ValueError:
+                        continue  # Skip lines with non-integer coordinates
 
                     if scaffold in reads_needed:
                         read_data[scaffold][fs].append({
@@ -1577,6 +1596,13 @@ class TeeLogger:
     def close(self):
         self.log.close()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
 
 def compute_density_features(features, bin_size, read_length, feature_name):
     """Convert individual features to density bins.
@@ -1859,8 +1885,15 @@ def main():
     if args.top_clusters:
         top_clusters = {}
         for part in args.top_clusters.split(','):
-            key, val = part.strip().split(':')
-            top_clusters[key.strip()] = int(val)
+            part = part.strip()
+            if ':' not in part:
+                print(f"  Warning: Invalid top_clusters format '{part}', expected 'category:N'")
+                continue
+            try:
+                key, val = part.split(':', 1)
+                top_clusters[key.strip()] = int(val)
+            except ValueError as e:
+                print(f"  Warning: Invalid top_clusters value '{part}': {e}")
 
     # Parse clusters if provided (manual selection)
     clusters = None
