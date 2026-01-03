@@ -1234,7 +1234,7 @@ if args.n_clusters is None:
         # Calculate standard clustering metrics
         if k > 1:
             if n_samples > 2000:
-                silhouette = silhouette_score(adj_matrix, labels, sample_size=min(2000, n_samples))
+                silhouette = silhouette_score(adj_matrix, labels, sample_size=min(2000, n_samples), random_state=42)
             else:
                 silhouette = silhouette_score(adj_matrix, labels)
             calinski_harabasz = calinski_harabasz_score(adj_matrix, labels)
