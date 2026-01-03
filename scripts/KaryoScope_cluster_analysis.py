@@ -1228,12 +1228,11 @@ if args.n_clusters is None:
         perfect_ratio = perfect_enriched / valid_clusters if valid_clusters > 0 else 0
         strong_ratio = strong_enriched / valid_clusters if valid_clusters > 0 else 0
 
-        # Composite score
+        # Composite score (50% silhouette, 10% any enriched, 40% perfect)
         silhouette_norm = (silhouette + 1) / 2
-        composite_score = (0.3 * silhouette_norm +
-                          0.3 * enriched_ratio +
-                          0.2 * strong_ratio +
-                          0.2 * perfect_ratio)
+        composite_score = (0.5 * silhouette_norm +
+                          0.1 * enriched_ratio +
+                          0.4 * perfect_ratio)
 
         stats = {
             'k': k,
