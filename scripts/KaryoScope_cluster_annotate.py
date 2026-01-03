@@ -185,6 +185,7 @@ def main():
                 'enrichment': row.get('enrichment', 'unknown'),
                 'p_value': row.get('p_value', None),
                 'q_value': row.get('q_value', None),
+                'odds_ratio': row.get('odds_ratio', None),
                 'Tumor_count': row.get('Tumor_count', None),
                 'Tumor_pct': row.get('Tumor_pct', None),
                 'Normal_count': row.get('Normal_count', None),
@@ -264,6 +265,8 @@ def main():
             row['Normal_pct'] = round(info.get('Normal_pct'), 1) if info.get('Normal_pct') is not None else None
             q = info.get('q_value')
             row['q_value'] = f"{q:.4e}" if q is not None else None
+            odds = info.get('odds_ratio')
+            row['odds_ratio'] = round(odds, 2) if odds is not None else None
 
         # Annotate each featureset
         for fs in featuresets:
