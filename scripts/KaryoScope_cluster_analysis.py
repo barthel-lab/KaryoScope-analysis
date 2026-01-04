@@ -124,6 +124,8 @@ parser.add_argument("--strong-threshold", dest="strong_threshold", type=float, d
                     help="Threshold for strong enrichment (default: 0.80 = 80%%)")
 parser.add_argument("--early-stopping", dest="early_stopping", type=int, default=50,
                     help="Stop k search if no improvement for N iterations (0 to disable) (default: 50)")
+parser.add_argument("--silhouette-sample-size", dest="silhouette_sample_size", type=int, default=2000,
+                    help="Sample size for silhouette score calculation (default: 2000)")
 parser.add_argument("--nested", dest="nested",
                     action=argparse.BooleanOptionalAction, default=False,
                     help="Hierarchical testing: first test groups, then test samples within enriched groups (default: False)")
@@ -1233,8 +1235,8 @@ if args.n_clusters is None:
 
         # Calculate standard clustering metrics
         if k > 1:
-            if n_samples > 2000:
-                silhouette = silhouette_score(adj_matrix, labels, sample_size=min(2000, n_samples))
+            if n_samples > args.silhouette_sample_size:
+                silhouette = silhouette_score(adj_matrix, labels, sample_size=args.silhouette_sample_size)
             else:
                 silhouette = silhouette_score(adj_matrix, labels)
             calinski_harabasz = calinski_harabasz_score(adj_matrix, labels)
@@ -1296,16 +1298,11 @@ if args.n_clusters is None:
         strong_reads_pct = (strong_reads / total_reads * 100) if total_reads > 0 else 0
         any_enriched_reads_pct = (any_enriched_reads / total_reads * 100) if total_reads > 0 else 0
 
-        # Composite score: 40% silhouette, 10% strong ratio, 20% perfect ratio,
-        #                  10% strong read %, 20% perfect read %
+        # Composite score: 50% silhouette, 10% any enriched ratio, 40% perfect ratio
         silhouette_norm = (silhouette + 1) / 2  # normalize from [-1,1] to [0,1]
-        strong_reads_norm = strong_reads_pct / 100  # normalize from 0-100 to 0-1
-        perfect_reads_norm = perfect_reads_pct / 100  # normalize from 0-100 to 0-1
-        composite_score = (0.4 * silhouette_norm +
-                          0.1 * strong_ratio +
-                          0.2 * perfect_ratio +
-                          0.1 * strong_reads_norm +
-                          0.2 * perfect_reads_norm)
+        composite_score = (0.5 * silhouette_norm +
+                          0.1 * enriched_ratio +
+                          0.4 * perfect_ratio)
 
         stats = {
             'k': k,
