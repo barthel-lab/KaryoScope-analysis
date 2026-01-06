@@ -142,8 +142,23 @@ def parse_args():
                         help="Hide cluster brackets and labels (cleaner dendrogram view)")
     parser.add_argument("--no-reorder", dest="no_reorder", action="store_true",
                         help="Disable dendrogram reordering - keep reads grouped by cluster")
+    parser.add_argument("--hide-dendrogram", dest="hide_dendrogram", action="store_true",
+                        help="Completely hide the dendrogram (sets dendrogram height to 0)")
+    parser.add_argument("--cluster-labels", dest="cluster_labels", default=None,
+                        help="TSV or Excel file with custom cluster labels. "
+                             "Must have 'cluster_id' and label column (default column: 'curated_annotation')")
+    parser.add_argument("--label-column", dest="label_column", default="curated_annotation",
+                        help="Column name for custom labels in --cluster-labels file (default: curated_annotation)")
+    parser.add_argument("--vertical", dest="vertical", action="store_true",
+                        help="Rotate plot 90 degrees (dendrogram on left, reads vertical)")
+    parser.add_argument("--show-matrix", dest="show_matrix", action="store_true",
+                        help="Show sample × cluster read count matrix (vertical mode only)")
     parser.add_argument("--n-per-cluster", dest="max_reps", type=int, default=5,
                         help="Number of sequences per cluster (default: 5)")
+    parser.add_argument("--min-length", dest="min_length", type=int, default=None,
+                        help="Minimum read length in bp for representative selection")
+    parser.add_argument("--max-length", dest="max_length", type=int, default=None,
+                        help="Maximum read length in bp for representative selection")
     parser.add_argument("--log-file", dest="log_file",
                         action=argparse.BooleanOptionalAction, default=True,
                         help="Save console output to {output}.log (default: True)")
@@ -182,6 +197,40 @@ def load_sample_metadata(metadata_file):
             print(f"  Warning: Could not load sample metadata: {e}")
 
     return sample_to_group, sample_colors, group_colors
+
+
+def load_cluster_labels(labels_file, label_column="curated_annotation"):
+    """Load custom cluster labels from TSV or Excel file.
+
+    Args:
+        labels_file: Path to TSV or Excel file with cluster_id and label columns
+        label_column: Column name containing the labels
+
+    Returns:
+        dict: cluster_id -> label mapping
+    """
+    labels = {}
+
+    if labels_file is None or not os.path.exists(labels_file):
+        return labels
+
+    try:
+        if labels_file.endswith('.xlsx') or labels_file.endswith('.xls'):
+            df = pd.read_excel(labels_file)
+        else:
+            df = pd.read_csv(labels_file, sep='\t')
+
+        if 'cluster_id' in df.columns and label_column in df.columns:
+            for _, row in df.iterrows():
+                if pd.notna(row[label_column]) and str(row[label_column]).strip():
+                    labels[int(row['cluster_id'])] = str(row[label_column])
+            print(f"  Loaded {len(labels)} custom cluster labels from {labels_file}")
+        else:
+            print(f"  Warning: Could not find 'cluster_id' or '{label_column}' columns in {labels_file}")
+    except Exception as e:
+        print(f"  Warning: Could not load cluster labels: {e}")
+
+    return labels
 
 
 def load_cluster_analysis(cluster_analysis_file):
@@ -232,7 +281,7 @@ def load_cluster_analysis(cluster_analysis_file):
     return cluster_enrichments, cluster_order
 
 
-def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order=None, max_reps=None, top_clusters=None, max_clusters=None, clusters=None, include_mixed=False, reads_file=None):
+def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order=None, max_reps=None, top_clusters=None, max_clusters=None, clusters=None, include_mixed=False, reads_file=None, min_length=None, max_length=None):
     """Load read assignments from TSV file.
 
     Args:
@@ -244,6 +293,8 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
         max_clusters: Maximum total clusters to include
         clusters: List of specific cluster IDs to plot (overrides top_clusters and max_clusters)
         reads_file: Path to file with read names to include (one per line)
+        min_length: Minimum read length in bp (optional)
+        max_length: Maximum read length in bp (optional)
 
     Returns:
         tuple: (cluster_reads OrderedDict, unique_enrichments set)
@@ -251,6 +302,18 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
     print(f"\nLoading read assignments from: {reps_file}")
     reps_df = pd.read_csv(reps_file, sep='\t')
     print(f"  Total reads: {len(reps_df)}")
+
+    # Apply length filtering if specified
+    if min_length is not None or max_length is not None:
+        if 'read_length' in reps_df.columns:
+            original_count = len(reps_df)
+            if min_length is not None:
+                reps_df = reps_df[reps_df['read_length'] >= min_length]
+            if max_length is not None:
+                reps_df = reps_df[reps_df['read_length'] <= max_length]
+            print(f"  After length filter ({min_length or 0}-{max_length or 'inf'} bp): {len(reps_df)} reads (from {original_count})")
+        else:
+            print(f"  Warning: read_length column not found, skipping length filter")
 
     # Filter by reads file if provided
     if reads_file:
@@ -1001,7 +1064,8 @@ def draw_cluster_dendrogram(d, cluster_dendro_data, cluster_x_start, cluster_x_e
         """Convert distance to Y pixel coordinate (higher distance = higher up)."""
         return dendro_base_y - (dist / max_distance) * (dendrogram_height - 15)
 
-    line_color = '#AAAAAA' if background_color == 'black' else '#444444'
+    # Thin white lines
+    line_color = '#FFFFFF'
 
     # Build mapping from linkage index to display x-center
     # cluster_order[i] is the cluster_id at display position i
@@ -1094,22 +1158,27 @@ def draw_cluster_dendrogram(d, cluster_dendro_data, cluster_x_start, cluster_x_e
 
         # Draw vertical lines from each child's x-position up to merge height
         # Then horizontal line connecting at merge height
-        d.append(draw.Line(x1, y_bottom_left, x1, y_top, stroke=line_color, stroke_width=2))
-        d.append(draw.Line(x2, y_bottom_right, x2, y_top, stroke=line_color, stroke_width=2))
-        d.append(draw.Line(x1, y_top, x2, y_top, stroke=line_color, stroke_width=2))
+        d.append(draw.Line(x1, y_bottom_left, x1, y_top, stroke=line_color, stroke_width=1))
+        d.append(draw.Line(x2, y_bottom_right, x2, y_top, stroke=line_color, stroke_width=1))
+        d.append(draw.Line(x1, y_top, x2, y_top, stroke=line_color, stroke_width=1))
 
     n_branches = len(linkage_matrix)
     print(f"  Drew cluster dendrogram for {n_clusters} clusters ({n_branches} branches)")
 
 
 def draw_cluster_brackets(d, cluster_reads, cluster_x_start, cluster_x_end,
-                          enrichment_colors, read_heights, label_height, text_color):
+                          enrichment_colors, read_heights, label_height, text_color,
+                          cluster_labels=None):
     """Draw cluster brackets and labels below the feature bars (inverted, pointing up).
 
     Args:
         read_heights: Dict of read -> (min_y, max_y, x_start, total_width) for y-positioning
         label_height: Height of rotated featureset labels below bars
+        cluster_labels: Optional dict of cluster_id -> custom label string
     """
+    if cluster_labels is None:
+        cluster_labels = {}
+
     for cluster_id, data in cluster_reads.items():
         if cluster_id == 'all':  # Skip when in dendrogram mode
             continue
@@ -1137,9 +1206,18 @@ def draw_cluster_brackets(d, cluster_reads, cluster_x_start, cluster_x_end,
 
         # Labels below the bracket
         label_x = (x_start + x_end) / 2
+
+        # Use custom label if available, otherwise default to cluster ID
+        if cluster_id in cluster_labels:
+            label_text = cluster_labels[cluster_id]
+            label_font_size = 9  # slightly smaller for longer labels
+        else:
+            label_text = f"c{cluster_id}"
+            label_font_size = 10
+
         d.append(draw.Text(
-            f"c{cluster_id}",
-            font_size=10, x=label_x, y=bracket_y + 15,
+            label_text,
+            font_size=label_font_size, x=label_x, y=bracket_y + 15,
             fill=color, font_family='sans-serif',
             text_anchor='middle', font_weight='bold'
         ))
@@ -1148,6 +1226,436 @@ def draw_cluster_brackets(d, cluster_reads, cluster_x_start, cluster_x_end,
             enrichment,
             font_size=8, x=label_x, y=bracket_y + 27,
             fill=color, font_family='sans-serif', text_anchor='middle'
+        ))
+
+
+# =============================================================================
+# Vertical Mode Drawing Functions
+# =============================================================================
+
+def draw_cluster_dendrogram_vertical(d, cluster_dendro_data, cluster_y_start, cluster_y_end,
+                                     left_margin, dendrogram_width, background_color):
+    """Draw cluster-level dendrogram on the LEFT side for vertical mode.
+
+    Clusters are arranged vertically, dendrogram branches extend horizontally from left.
+
+    Key insight: The linkage matrix indices refer to the ORIGINAL order before
+    optimal_leaf_ordering. We need to map these to DISPLAY positions using leaf_order.
+    """
+    if cluster_dendro_data is None or cluster_dendro_data.get('linkage') is None:
+        return
+
+    linkage_matrix = cluster_dendro_data['linkage']
+    cluster_order = cluster_dendro_data['cluster_order']
+    leaf_order = cluster_dendro_data.get('leaf_order')
+    n_clusters = len(cluster_order)
+
+    if n_clusters <= 1 or len(linkage_matrix) == 0:
+        return
+
+    # Map cluster display position to y-center
+    display_pos_y_center = {}
+    for display_idx, cluster_id in enumerate(cluster_order):
+        y_start = cluster_y_start.get(cluster_id, 0)
+        y_end = cluster_y_end.get(cluster_id, 0)
+        y_center = (y_start + y_end) / 2
+        display_pos_y_center[display_idx] = y_center
+
+    # Build mapping from linkage index to display position
+    # leaf_order[i] is the linkage index at display position i
+    linkage_idx_to_display_pos = {}
+    if leaf_order is not None:
+        for display_pos, linkage_idx in enumerate(leaf_order):
+            linkage_idx_to_display_pos[linkage_idx] = display_pos
+    else:
+        for i in range(n_clusters):
+            linkage_idx_to_display_pos[i] = i
+
+    max_distance = linkage_matrix[:, 2].max() if len(linkage_matrix) > 0 else 1
+    max_distance = max(max_distance, 1)
+
+    # Dendrogram base X (rightmost point, where leaves attach)
+    dendro_base_x = left_margin - 10
+
+    def distance_to_x(dist):
+        """Convert distance to X pixel coordinate (higher distance = further left)."""
+        return dendro_base_x - (dist / max_distance) * (dendrogram_width - 15)
+
+    # Thin white lines
+    line_color = '#FFFFFF'
+
+    # Track node positions
+    node_y_center = {}
+    node_height = {}
+    node_display_positions = {}
+
+    def get_node_info(node_idx):
+        """Recursively get y-center, height, and display positions for a node."""
+        if node_idx in node_y_center:
+            return node_y_center[node_idx], node_height[node_idx], node_display_positions[node_idx]
+
+        if node_idx < n_clusters:
+            # Leaf node - map linkage index to display position
+            display_pos = linkage_idx_to_display_pos.get(node_idx)
+            if display_pos is None:
+                return None, 0, []
+            y = display_pos_y_center.get(display_pos, 0)
+            node_y_center[node_idx] = y
+            node_height[node_idx] = 0
+            node_display_positions[node_idx] = [display_pos]
+            return y, 0, [display_pos]
+
+        # Internal node
+        row_idx = node_idx - n_clusters
+        if row_idx >= len(linkage_matrix):
+            return None, 0, []
+
+        idx1, idx2, dist, count = linkage_matrix[row_idx]
+        idx1, idx2 = int(idx1), int(idx2)
+
+        y1, h1, positions1 = get_node_info(idx1)
+        y2, h2, positions2 = get_node_info(idx2)
+
+        if y1 is None or y2 is None:
+            return None, dist, []
+
+        all_positions = positions1 + positions2
+        y_center = sum(display_pos_y_center[pos] for pos in all_positions) / len(all_positions)
+
+        node_y_center[node_idx] = y_center
+        node_height[node_idx] = dist
+        node_display_positions[node_idx] = all_positions
+
+        return y_center, dist, all_positions
+
+    # First pass: compute all node info
+    root_idx = n_clusters + len(linkage_matrix) - 1
+    get_node_info(root_idx)
+
+    # Draw the dendrogram (horizontal lines from each child, vertical line connecting)
+    for row_idx, (idx1, idx2, dist, count) in enumerate(linkage_matrix):
+        idx1, idx2 = int(idx1), int(idx2)
+
+        y1 = node_y_center.get(idx1)
+        y2 = node_y_center.get(idx2)
+        h1 = node_height.get(idx1, 0)
+        h2 = node_height.get(idx2, 0)
+
+        if y1 is None or y2 is None:
+            continue
+
+        x_right_top = distance_to_x(h1)
+        x_right_bottom = distance_to_x(h2)
+        x_left = distance_to_x(dist)
+
+        # Horizontal lines from each child to merge point
+        d.append(draw.Line(x_right_top, y1, x_left, y1, stroke=line_color, stroke_width=1))
+        d.append(draw.Line(x_right_bottom, y2, x_left, y2, stroke=line_color, stroke_width=1))
+        # Vertical line connecting at merge point
+        d.append(draw.Line(x_left, y1, x_left, y2, stroke=line_color, stroke_width=1))
+
+    print(f"  Drew vertical dendrogram for {n_clusters} clusters")
+
+
+def draw_feature_bars_vertical(d, drawing_data, featuresets, bar_width, read_positions,
+                               num_featuresets, bar_spacing=2, background_color='black'):
+    """Draw feature bars VERTICALLY (top to bottom) for vertical mode.
+
+    In vertical mode:
+    - Reads are stacked vertically (y varies per read)
+    - Each read has horizontal feature bars extending to the right
+    - Features are drawn as horizontal rectangles at y positions based on scaled coordinates
+    - Multiple featuresets are stacked vertically within each read's bar area
+    """
+    stroke_width = 0.5
+
+    # First, draw all feature rectangles
+    for read, (x_start, y_start, bar_length) in read_positions.items():
+        if read not in drawing_data:
+            continue
+
+        for fs_idx, fs in enumerate(featuresets):
+            y_offset = fs_idx * (bar_width + bar_spacing)  # Stack featuresets vertically
+
+            for feat in drawing_data[read].get(fs, []):
+                x = x_start + feat['scaled_start']
+                width = max(2, feat['scaled_stop'] - feat['scaled_start'])  # Minimum 2px width
+
+                d.append(draw.Rectangle(
+                    x, y_start + y_offset,
+                    width, bar_width,
+                    fill=feat['color'],
+                    fill_opacity=feat.get('fill_opacity', 1.0)
+                ))
+
+    # Draw borders around each read's bar area
+    for read, (x_start, y_start, bar_length) in read_positions.items():
+        if read not in drawing_data:
+            continue
+
+        total_height = num_featuresets * bar_width + (num_featuresets - 1) * bar_spacing
+
+        # Outer border
+        d.append(draw.Rectangle(
+            x_start, y_start,
+            bar_length, total_height,
+            fill='none',
+            stroke='black',
+            stroke_width=stroke_width
+        ))
+
+        # Horizontal lines between featureset bars
+        for i in range(1, num_featuresets):
+            line_y = y_start + i * (bar_width + bar_spacing) - bar_spacing / 2
+            d.append(draw.Line(
+                x_start, line_y, x_start + bar_length, line_y,
+                stroke='black',
+                stroke_width=stroke_width
+            ))
+
+
+def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_metadata,
+                       read_assignments_file, x_start, cell_width, cell_height, text_color,
+                       background_color='black'):
+    """Draw sample × cluster read count matrix for vertical mode.
+
+    Uses FULL cluster read counts from read_assignments file, not just representatives.
+
+    Args:
+        d: Drawing object
+        cluster_ids: List of cluster IDs to include in matrix
+        cluster_y_start: Dict of cluster_id -> y start position
+        cluster_y_end: Dict of cluster_id -> y end position
+        sample_metadata: DataFrame with 'sample' and 'group' columns
+        read_assignments_file: Path to read_assignments.tsv with all reads
+        x_start: X position for matrix start
+        cell_width: Width of each cell (sample column)
+        cell_height: Height of each cell (matches bar_width typically)
+        text_color: Color for text
+        background_color: Background color ('black' or 'white')
+
+    Returns:
+        float: Total width of the matrix (for layout calculation)
+    """
+    # Load full read assignments to get complete cluster counts
+    full_df = pd.read_csv(read_assignments_file, sep='\t')
+
+    # Get all samples from metadata, ordered by group
+    if sample_metadata is not None and 'group' in sample_metadata.columns:
+        # Sort samples by group (Normal first, then Tumor/other)
+        sorted_metadata = sample_metadata.sort_values(
+            by='group',
+            key=lambda x: x.map({'Normal': 0, 'Control': 0}).fillna(1)
+        )
+        all_samples = sorted_metadata['sample'].tolist()
+        sample_groups = sorted_metadata.set_index('sample')['group'].to_dict()
+    else:
+        # Extract all unique samples from read assignments
+        all_samples = sorted(full_df['sample'].unique().tolist())
+        sample_groups = {}
+
+    n_samples = len(all_samples)
+
+    # Calculate x positions with gaps between groups
+    group_gap = 5  # Gap between Normal and Tumor groups
+    sample_x_positions = {}
+    current_x = 0
+    prev_group = None
+    for sample in all_samples:
+        group = sample_groups.get(sample)
+        if prev_group is not None and group != prev_group:
+            current_x += group_gap  # Add gap when group changes
+        sample_x_positions[sample] = current_x
+        current_x += cell_width
+        prev_group = group
+
+    total_matrix_width = current_x  # Total width including gaps
+
+    # Compute FULL read counts per cluster × sample from all assignments
+    cluster_sample_counts = {}
+    max_count = 1  # Avoid division by zero
+
+    for cluster_id in cluster_ids:
+        cluster_df = full_df[full_df['cluster'] == cluster_id]
+        counts = {sample: 0 for sample in all_samples}
+        for sample in cluster_df['sample']:
+            if sample in counts:
+                counts[sample] += 1
+        cluster_sample_counts[cluster_id] = counts
+        max_count = max(max_count, max(counts.values()) if counts.values() else 1)
+
+    # Draw column headers (rotated sample names)
+    header_y = min(cluster_y_start.values()) - 5 if cluster_y_start else 30
+    for sample in all_samples:
+        x = x_start + sample_x_positions[sample] + cell_width / 2
+
+        # Sample name, rotated 90 degrees
+        d.append(draw.Text(
+            sample, font_size=7, x=x, y=header_y,
+            fill=text_color, font_family='sans-serif',
+            transform=f"rotate(-90 {x} {header_y})",
+            text_anchor='start'
+        ))
+
+    # Draw cells for each cluster
+    for cluster_id in cluster_y_start:
+        if cluster_id not in cluster_sample_counts:
+            continue
+
+        y_mid = (cluster_y_start[cluster_id] + cluster_y_end[cluster_id]) / 2
+        y = y_mid - cell_height / 2
+
+        for sample in all_samples:
+            x = x_start + sample_x_positions[sample]
+            count = cluster_sample_counts[cluster_id].get(sample, 0)
+
+            # Heatmap color intensity based on count
+            # Use blue (low) -> red (high) heatmap
+            intensity = count / max_count if max_count > 0 else 0
+
+            if count == 0:
+                # Zero counts: dark background
+                fill_color = '#1a1a1a' if background_color == 'black' else '#f0f0f0'
+            else:
+                # Heatmap: interpolate from blue (low) through yellow to red (high)
+                if intensity < 0.5:
+                    # Blue to yellow
+                    t = intensity * 2
+                    r = int(t * 255)
+                    g = int(t * 255)
+                    b = int(255 * (1 - t))
+                else:
+                    # Yellow to red
+                    t = (intensity - 0.5) * 2
+                    r = 255
+                    g = int(255 * (1 - t))
+                    b = 0
+                fill_color = f'#{r:02x}{g:02x}{b:02x}'
+
+            # Draw cell with white border
+            d.append(draw.Rectangle(
+                x, y,
+                cell_width, cell_height,
+                fill=fill_color,
+                stroke='#FFFFFF',
+                stroke_width=0.5
+            ))
+
+            # Draw count text
+            if count > 0 and cell_width >= 10:
+                # Text color contrasts with cell - white for dark cells, black for bright
+                count_text_color = '#000000' if intensity > 0.4 else '#ffffff'
+                d.append(draw.Text(
+                    str(count), font_size=5, x=x + cell_width / 2, y=y + cell_height / 2 + 2,
+                    fill=count_text_color, font_family='sans-serif',
+                    text_anchor='middle'
+                ))
+            elif count == 0 and cell_width >= 8:
+                # Show "0" for zero counts in dim color
+                d.append(draw.Text(
+                    '0', font_size=4, x=x + cell_width / 2, y=y + cell_height / 2 + 1.5,
+                    fill='#444444', font_family='sans-serif',
+                    text_anchor='middle'
+                ))
+
+    # Return total matrix width (includes gaps between groups)
+    return total_matrix_width
+
+
+def draw_cluster_labels_vertical(d, cluster_y_start, cluster_y_end, x_start, text_color,
+                                  cluster_labels=None, enrichment_colors=None, cluster_enrichments=None):
+    """Draw cluster labels on the RIGHT side for vertical mode (names only, no brackets).
+
+    Args:
+        d: Drawing object
+        cluster_y_start: Dict of cluster_id -> y start position
+        cluster_y_end: Dict of cluster_id -> y end position
+        x_start: X position for labels
+        text_color: Default text color
+        cluster_labels: Dict of cluster_id -> custom label text
+        enrichment_colors: Optional dict of enrichment -> color for coloring labels
+        cluster_enrichments: Optional dict of cluster_id -> enrichment for coloring
+    """
+    if cluster_labels is None:
+        cluster_labels = {}
+
+    for cluster_id in cluster_y_start:
+        y_start = cluster_y_start[cluster_id]
+        y_end = cluster_y_end[cluster_id]
+        label_y = (y_start + y_end) / 2
+
+        # Get label text
+        if cluster_id in cluster_labels:
+            label_text = cluster_labels[cluster_id]
+        else:
+            label_text = f"Cluster {cluster_id}"
+
+        # Get color based on enrichment if available
+        if enrichment_colors and cluster_enrichments and cluster_id in cluster_enrichments:
+            enrichment = cluster_enrichments[cluster_id]
+            color = enrichment_colors.get(enrichment, text_color)
+        else:
+            color = text_color
+
+        d.append(draw.Text(
+            label_text,
+            font_size=9, x=x_start, y=label_y + 3,
+            fill=color, font_family='sans-serif',
+            text_anchor='start', font_weight='bold'
+        ))
+
+
+def draw_cluster_brackets_vertical(d, cluster_reads, cluster_y_start, cluster_y_end,
+                                   enrichment_colors, read_positions, label_width, text_color,
+                                   right_margin, cluster_labels=None):
+    """Draw cluster brackets on the RIGHT side for vertical mode (with brackets and enrichment)."""
+    if cluster_labels is None:
+        cluster_labels = {}
+
+    for cluster_id, data in cluster_reads.items():
+        if cluster_id == 'all':
+            continue
+
+        y_start = cluster_y_start[cluster_id]
+        y_end = cluster_y_end[cluster_id]
+        enrichment = data['enrichment']
+        color = enrichment_colors.get(enrichment, '#999999')
+
+        # Find the rightmost x of reads in this cluster
+        cluster_max_x = 0
+        for read, sample in data['reads']:
+            if read in read_positions:
+                x_start, _, _ = read_positions[read]
+                cluster_max_x = max(cluster_max_x, x_start + label_width)
+
+        bracket_x = cluster_max_x + 10
+
+        # Draw bracket (vertical line on right, horizontal lines pointing left)
+        d.append(draw.Line(bracket_x, y_start, bracket_x, y_end, stroke=color, stroke_width=3))
+        d.append(draw.Line(bracket_x, y_start, bracket_x - 8, y_start, stroke=color, stroke_width=2))
+        d.append(draw.Line(bracket_x, y_end, bracket_x - 8, y_end, stroke=color, stroke_width=2))
+
+        # Labels to the right of bracket
+        label_y = (y_start + y_end) / 2
+
+        if cluster_id in cluster_labels:
+            label_text = cluster_labels[cluster_id]
+            label_font_size = 9
+        else:
+            label_text = f"c{cluster_id}"
+            label_font_size = 10
+
+        d.append(draw.Text(
+            label_text,
+            font_size=label_font_size, x=bracket_x + 5, y=label_y - 8,
+            fill=color, font_family='sans-serif',
+            text_anchor='start', font_weight='bold'
+        ))
+
+        d.append(draw.Text(
+            enrichment,
+            font_size=8, x=bracket_x + 5, y=label_y + 8,
+            fill=color, font_family='sans-serif', text_anchor='start'
         ))
 
 
@@ -2095,6 +2603,9 @@ def main():
     # Load cluster analysis to get enrichment info and cluster priority order
     cluster_enrichments, cluster_order = load_cluster_analysis(cluster_analysis_file)
 
+    # Load custom cluster labels if provided
+    cluster_labels = load_cluster_labels(args.cluster_labels, args.label_column)
+
     # Parse top_clusters if provided
     top_clusters = None
     if args.top_clusters:
@@ -2126,7 +2637,9 @@ def main():
         max_clusters=args.max_clusters,
         clusters=clusters,
         include_mixed=args.include_mixed,
-        reads_file=args.reads_file
+        reads_file=args.reads_file,
+        min_length=args.min_length,
+        max_length=args.max_length
     )
 
     # Load feature matrix
@@ -2186,6 +2699,216 @@ def main():
             compute_cluster_dendrogram_order(feature_matrix_data, cluster_reads)
     elif args.no_reorder:
         print("  Dendrogram reordering disabled (--no-reorder)")
+
+    # Hide dendrogram if requested (but still use ordering)
+    if args.hide_dendrogram:
+        cluster_dendro_data = None
+        print("  Dendrogram hidden (--hide-dendrogram)")
+
+    # ==========================================================================
+    # VERTICAL MODE - Separate drawing path
+    # ==========================================================================
+    if args.vertical:
+        # Build mappings if not already done
+        if not read_to_original_cluster:
+            for cluster_id, data in cluster_reads.items():
+                for read, sample in data['reads']:
+                    read_to_original_cluster[read] = cluster_id
+                    read_to_original_enrichment[read] = data['enrichment']
+
+        unique_clusters = set(read_to_original_cluster.values())
+        cluster_colors = get_cluster_colors(unique_clusters)
+
+        # Vertical layout parameters
+        dendrogram_width = 100 if cluster_dendro_data is not None else 0
+        left_margin = 50 + dendrogram_width
+        top_margin = 80  # More space for rotated sample headers
+        bar_width = args.bar_width
+        num_fs = len(featuresets)
+        group_height = bar_width * num_fs + args.bar_spacing * (num_fs - 1)
+
+        # Use compact spacing when matrix is shown (square cells require tight row spacing)
+        if args.show_matrix:
+            row_spacing = 2  # Minimal spacing between reads
+            cluster_gap = 8  # Small gap between clusters
+        else:
+            row_spacing = args.read_spacing
+            cluster_gap = args.cluster_spacing
+
+        # Calculate y positions (reads stacked vertically by cluster)
+        read_y_positions = {}
+        cluster_y_start = {}
+        cluster_y_end = {}
+        current_y = top_margin
+
+        for cluster_id, data in cluster_reads.items():
+            cluster_y_start[cluster_id] = current_y
+            for read, sample in data['reads']:
+                read_y_positions[read] = current_y
+                current_y += group_height + row_spacing
+            cluster_y_end[cluster_id] = current_y - row_spacing
+            current_y += cluster_gap
+
+        # Calculate scaffold lengths and max length for uniform bar width
+        max_read_length = 0
+        scaffold_lengths = {}
+        scaffold_min_starts = {}
+
+        for read in read_data:
+            for fs in read_data[read]:
+                for feat in read_data[read][fs]:
+                    scaffold_lengths[read] = max(scaffold_lengths.get(read, 0), feat['stop'])
+                    if read not in scaffold_min_starts:
+                        scaffold_min_starts[read] = feat['start']
+                    else:
+                        scaffold_min_starts[read] = min(scaffold_min_starts[read], feat['start'])
+            if read in scaffold_lengths:
+                max_read_length = max(max_read_length, scaffold_lengths[read] - scaffold_min_starts.get(read, 0))
+
+        ratio = args.ratio
+        max_bar_length = floor(max_read_length * ratio)
+
+        # Build drawing data for vertical mode
+        drawing_data_vertical = defaultdict(lambda: defaultdict(list))
+        uncolored_features = defaultdict(set)
+
+        for read in read_data:
+            if read not in read_y_positions:
+                continue
+
+            base_y = read_y_positions[read]
+            scaffold_min_start = scaffold_min_starts.get(read, 0)
+
+            for fs in featuresets:
+                features = read_data[read].get(fs, [])
+
+                for feat in features:
+                    final_start = feat['start'] - scaffold_min_start
+                    final_stop = feat['stop'] - scaffold_min_start
+                    scaled_start = floor(final_start * ratio)
+                    scaled_stop = floor(final_stop * ratio)
+
+                    feature_name = feat.get('feature', 'unknown')
+                    color_info = featureset_colors.get(fs, {}).get(feature_name)
+                    if color_info is None:
+                        color = '#444444'
+                        fill_opacity = 1.0
+                        uncolored_features[fs].add(feature_name)
+                    else:
+                        color, fill_opacity = color_info
+
+                    drawing_data_vertical[read][fs].append({
+                        'scaled_start': scaled_start,
+                        'scaled_stop': scaled_stop,
+                        'color': color,
+                        'fill_opacity': fill_opacity
+                    })
+
+        # Calculate read positions dict for vertical drawing: (x_start, y_start, bar_length)
+        read_positions_vertical = {}
+        for read in read_y_positions:
+            y_pos = read_y_positions[read]
+            read_length = scaffold_lengths.get(read, 0) - scaffold_min_starts.get(read, 0)
+            bar_length = floor(read_length * ratio)
+            read_positions_vertical[read] = (left_margin, y_pos, bar_length)
+
+        # Calculate matrix parameters if enabled
+        matrix_width = 0
+        matrix_x_start = left_margin + max_bar_length + 15  # After feature bars
+        # Square cells: size matches the row height (group_height)
+        cell_size = group_height + row_spacing  # Square cells matching row spacing
+        cell_width = cell_size
+        cell_height = cell_size
+
+        if args.show_matrix:
+            # Load sample metadata for matrix
+            meta_df = pd.read_csv(sample_metadata_file, sep='\t')
+            n_samples = len(meta_df)
+            matrix_width = n_samples * cell_width + 15  # Small padding
+            print(f"  Matrix enabled: {n_samples} samples × {len(cluster_y_start)} clusters (cell size: {cell_size}px)")
+
+        # Image dimensions
+        label_width = 200  # Space for cluster labels
+        image_width = left_margin + max_bar_length + 20 + matrix_width + label_width
+        image_height = current_y + 50
+
+        print(f"\nVertical mode image dimensions: {image_width} x {image_height}")
+
+        # Create drawing
+        d = draw.Drawing(image_width, image_height)
+        d.append(draw.Rectangle(0, 0, image_width, image_height, fill=background_color))
+
+        # Draw vertical dendrogram on left
+        if cluster_dendro_data is not None:
+            draw_cluster_dendrogram_vertical(d, cluster_dendro_data, cluster_y_start, cluster_y_end,
+                                             left_margin, dendrogram_width, background_color)
+
+        # Draw feature bars vertically
+        draw_feature_bars_vertical(d, drawing_data_vertical, featuresets, bar_width,
+                                   read_positions_vertical, num_fs, args.bar_spacing, background_color)
+
+        # Draw sample matrix if enabled
+        if args.show_matrix:
+            cluster_ids = list(cluster_y_start.keys())
+            draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, meta_df,
+                              representatives_file, matrix_x_start, cell_width, cell_height,
+                              text_color, background_color)
+
+        # Draw cluster labels on right (after matrix if present)
+        if not args.hide_brackets:
+            # Label position depends on whether matrix is shown
+            label_x = matrix_x_start + matrix_width + 10 if args.show_matrix else left_margin + max_bar_length + 20
+            # Build cluster_enrichments dict for coloring labels
+            cluster_enrichments_dict = {cid: data['enrichment'] for cid, data in cluster_reads.items() if cid != 'all'}
+            draw_cluster_labels_vertical(d, cluster_y_start, cluster_y_end, label_x, text_color,
+                                         cluster_labels=cluster_labels,
+                                         enrichment_colors=enrichment_colors,
+                                         cluster_enrichments=cluster_enrichments_dict)
+
+        # Save vertical plot
+        d.save_svg(args.output)
+
+        # Report warnings
+        for fs in featuresets:
+            if uncolored_features[fs]:
+                sys.stderr.write(f"Warning: {fs} - features not in colors file:\n")
+                for feature in sorted(list(uncolored_features[fs])):
+                    sys.stderr.write(f"  - {feature}\n")
+
+        print(f"\n--- Summary ---")
+        original_cluster_count = len(set(read_to_original_cluster.values())) if read_to_original_cluster else len(cluster_reads)
+        print(f"Clusters plotted: {original_cluster_count}")
+        total_reads = sum(len(data['reads']) for data in cluster_reads.values())
+        print(f"Total reads plotted: {total_reads}")
+        print(f"\n✅ Saved to {args.output}")
+
+        # Print parameters
+        params = [
+            ("cluster-analysis-prefix", args.cluster_prefix),
+            ("output", args.output),
+            ("featuresets", ','.join(featuresets)),
+            ("background", background_color),
+            ("clusters", args.clusters if args.clusters else "None"),
+            ("hide-brackets", args.hide_brackets),
+            ("hide-dendrogram", args.hide_dendrogram),
+            ("cluster-labels", args.cluster_labels if args.cluster_labels else "None"),
+            ("vertical", args.vertical),
+            ("show-matrix", args.show_matrix),
+            ("n-per-cluster", args.max_reps),
+        ]
+        print(f"\n{'='*60}")
+        print("Parameters")
+        print(f"{'='*60}")
+        print(f"{'Parameter':<25} {'Value':<35}")
+        print(f"{'-'*25} {'-'*35}")
+        for param, value in params:
+            print(f"{param:<25} {str(value):<35}")
+
+        return  # Exit main after vertical mode
+
+    # ==========================================================================
+    # HORIZONTAL MODE (original code continues below)
+    # ==========================================================================
 
     # If not reordered, build mappings
     if not read_to_original_cluster:
@@ -2437,7 +3160,8 @@ def main():
     label_height = longest_label * 4.5  # font_size=6, tight fit
     if not args.hide_brackets:
         draw_cluster_brackets(d, cluster_reads, cluster_x_start, cluster_x_end,
-                             enrichment_colors, read_heights, label_height, text_color)
+                             enrichment_colors, read_heights, label_height, text_color,
+                             cluster_labels=cluster_labels)
 
     # Annotation bars
     draw_annotation_bars(d, cluster_reads, read_x_positions, read_to_original_cluster,
@@ -2537,7 +3261,10 @@ def main():
         ("clusters", args.clusters if args.clusters else "None"),
         ("include-mixed", args.include_mixed),
         ("hide-brackets", args.hide_brackets),
+        ("hide-dendrogram", args.hide_dendrogram),
         ("no-reorder", args.no_reorder),
+        ("cluster-labels", args.cluster_labels if args.cluster_labels else "None"),
+        ("vertical", args.vertical),
         ("n-per-cluster", args.max_reps),
         ("log-file", args.log_file),
     ]
