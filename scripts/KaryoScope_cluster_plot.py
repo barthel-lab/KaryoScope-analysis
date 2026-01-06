@@ -860,32 +860,146 @@ def compute_cluster_dendrogram_order(feature_matrix_data, cluster_reads):
         displayed_centroid_indices = [cluster_ids_ordered.index(cid) for cid in displayed_clusters_in_order]
         subset_centroids = cluster_centroids[displayed_centroid_indices]
 
-        # Compute pairwise distances between displayed cluster centroids
-        from scipy.spatial.distance import pdist
-        from scipy.cluster.hierarchy import linkage
+        # Use Bio.Phylo to extract subtree from the full dendrogram
+        # This preserves the original tree structure for displayed clusters
+        from scipy.cluster.hierarchy import to_tree
+        from io import StringIO
+        from Bio import Phylo
 
-        if len(subset_centroids) > 1:
-            subset_distances = pdist(subset_centroids, metric='euclidean')
+        def parse_terminal_name(name):
+            """Parse cluster ID from terminal name with validation."""
+            if name is None:
+                raise ValueError("Terminal name is None")
+            if not name.startswith('n'):
+                raise ValueError(f"Invalid terminal name format: {name}")
+            try:
+                return int(name[1:])
+            except ValueError:
+                raise ValueError(f"Cannot parse cluster ID from: {name}")
 
-            # Get linkage method
-            linkage_method = feature_matrix_data.get('linkage_method', 'ward')
-            if hasattr(linkage_method, 'item'):
-                linkage_method = linkage_method.item()
-            linkage_method = str(linkage_method)
+        def linkage_to_newick(linkage_matrix, labels):
+            """Convert scipy linkage matrix to Newick format with proper branch lengths."""
+            tree = to_tree(linkage_matrix)
 
-            # Compute linkage on subset
-            subset_linkage = linkage(subset_distances, method=linkage_method)
+            def to_newick(node):
+                if node.is_leaf():
+                    return f"n{labels[node.id]}"  # Prefix with 'n' to ensure valid names
+                else:
+                    left_child = node.get_left()
+                    right_child = node.get_right()
+                    # Branch length = parent height - child height
+                    # For leaves, child height is 0
+                    left_height = 0 if left_child.is_leaf() else left_child.dist
+                    right_height = 0 if right_child.is_leaf() else right_child.dist
+                    left_branch = node.dist - left_height
+                    right_branch = node.dist - right_height
+                    left = to_newick(left_child)
+                    right = to_newick(right_child)
+                    return f'({left}:{left_branch:.6f},{right}:{right_branch:.6f})'
 
-            # Apply optimal leaf ordering
-            optimized_linkage = optimal_leaf_ordering(subset_linkage, subset_distances)
+            return to_newick(tree) + ';'
 
-            # Get leaf order
-            leaf_order = leaves_list(optimized_linkage)
+        def phylo_tree_to_linkage(tree, label_to_idx):
+            """Convert Bio.Phylo tree back to scipy linkage matrix format."""
+            n = len(label_to_idx)
+            linkage_rows = []
+            node_counter = [n]  # Next internal node ID
 
-            # Reorder clusters
-            reordered_cluster_ids = [displayed_clusters_in_order[i] for i in leaf_order]
+            def get_node_info(clade):
+                """Recursively build linkage. Returns (node_id, height, count)."""
+                if clade.is_terminal():
+                    # Leaf node - extract cluster ID from name (remove 'n' prefix)
+                    cluster_id = parse_terminal_name(clade.name)
+                    if cluster_id not in label_to_idx:
+                        raise ValueError(f"Unknown cluster ID: {cluster_id}")
+                    return label_to_idx[cluster_id], 0, 1
 
-            print(f"  Ordered {len(reordered_cluster_ids)} clusters using cluster-level dendrogram")
+                # Internal node - process children
+                children = clade.clades
+                if len(children) == 0:
+                    raise ValueError("Internal node has no children")
+
+                if len(children) != 2:
+                    # Handle non-binary nodes by sequential merging
+                    left_id, left_h, left_c = get_node_info(children[0])
+                    for child in children[1:]:
+                        right_id, right_h, right_c = get_node_info(child)
+                        height = max(left_h, right_h) + (clade.branch_length or 0.1)
+                        linkage_rows.append([left_id, right_id, height, left_c + right_c])
+                        left_id = node_counter[0]
+                        node_counter[0] += 1
+                        left_h = height
+                        left_c = left_c + right_c
+                    return left_id, left_h, left_c
+
+                left_id, left_h, left_c = get_node_info(children[0])
+                right_id, right_h, right_c = get_node_info(children[1])
+
+                # Height is the max child height plus branch length
+                height = max(left_h, right_h) + (clade.branch_length or 0.1)
+                linkage_rows.append([left_id, right_id, height, left_c + right_c])
+
+                new_id = node_counter[0]
+                node_counter[0] += 1
+                return new_id, height, left_c + right_c
+
+            get_node_info(tree.root)
+            return np.array(linkage_rows) if linkage_rows else None
+
+        original_full_linkage = feature_matrix_data['cluster_linkage']
+
+        if len(displayed_clusters_in_order) > 1:
+            # Convert full linkage to Newick and load with Bio.Phylo
+            newick_str = linkage_to_newick(original_full_linkage, cluster_ids_ordered)
+            full_tree = Phylo.read(StringIO(newick_str), 'newick')
+
+            # Get terminal names to keep (with 'n' prefix)
+            terminals_to_keep = {f"n{cid}" for cid in displayed_cluster_ids}
+
+            # Prune tree to only displayed clusters
+            # Remove terminals not in our set
+            all_terminals = list(full_tree.get_terminals())
+            for terminal in all_terminals:
+                if terminal.name not in terminals_to_keep:
+                    full_tree.prune(terminal)
+
+            # Collapse internal nodes with single children
+            def collapse_single_children(clade):
+                if clade.is_terminal():
+                    return
+                # Recursively process children first
+                for child in list(clade.clades):
+                    collapse_single_children(child)
+                # If this node has only one child, bypass it
+                while len(clade.clades) == 1:
+                    child = clade.clades[0]
+                    # Accumulate branch lengths (handle None values)
+                    clade.branch_length = (clade.branch_length or 0) + (child.branch_length or 0)
+                    clade.clades = list(child.clades)  # Explicit copy
+
+            collapse_single_children(full_tree.root)
+
+            # Check for degenerate tree after collapse
+            if not full_tree.root.clades and not full_tree.root.is_terminal():
+                print("  Warning: Tree collapsed to empty root, falling back to single cluster")
+                reordered_cluster_ids = displayed_clusters_in_order
+                optimized_linkage = None
+            else:
+                # Get leaf order from pruned tree (left-to-right traversal)
+                terminals = list(full_tree.get_terminals())
+                reordered_cluster_ids = []
+                for t in terminals:
+                    if t.name is not None:
+                        reordered_cluster_ids.append(parse_terminal_name(t.name))
+
+                print(f"  Extracted subtree with {len(reordered_cluster_ids)} clusters using Bio.Phylo")
+
+                # Convert pruned tree back to linkage format
+                label_to_idx = {cid: i for i, cid in enumerate(reordered_cluster_ids)}
+                optimized_linkage = phylo_tree_to_linkage(full_tree, label_to_idx)
+
+            # Identity mapping since we built linkage in display order
+            leaf_order = list(range(len(reordered_cluster_ids)))
         else:
             reordered_cluster_ids = displayed_clusters_in_order
             optimized_linkage = None
@@ -1320,7 +1434,8 @@ def draw_cluster_dendrogram_vertical(d, cluster_dendro_data, cluster_y_start, cl
             return None, dist, []
 
         all_positions = positions1 + positions2
-        y_center = sum(display_pos_y_center[pos] for pos in all_positions) / len(all_positions)
+        # Internal node y-center should be midpoint between its two children
+        y_center = (y1 + y2) / 2
 
         node_y_center[node_idx] = y_center
         node_height[node_idx] = dist
@@ -1484,6 +1599,78 @@ def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_me
         cluster_sample_counts[cluster_id] = counts
         max_count = max(max_count, max(counts.values()) if counts.values() else 1)
 
+    # Cluster samples within each group by their count profiles
+    from scipy.cluster.hierarchy import linkage, leaves_list
+
+    # Group samples by their group
+    group_to_samples = {}
+    for sample in all_samples:
+        group = sample_groups.get(sample, 'Unknown')
+        if group not in group_to_samples:
+            group_to_samples[group] = []
+        group_to_samples[group].append(sample)
+
+    # Store linkage matrices and sample orders for dendrograms
+    # group_name -> (Z, original_samples, ordered_samples)
+    group_linkages = {}
+
+    # Cluster samples within each group
+    clustered_samples = []
+    for group_name in ['Normal', 'Control']:  # Normal/Control first
+        if group_name in group_to_samples:
+            group_samples = group_to_samples.pop(group_name)
+            original_samples = group_samples.copy()  # Keep original order for linkage indices
+            if len(group_samples) > 2:
+                # Build count matrix: samples × clusters
+                count_matrix = np.array([
+                    [cluster_sample_counts[cid].get(s, 0) for cid in cluster_ids]
+                    for s in group_samples
+                ])
+                # Cluster using log-transformed counts (but display absolute)
+                if count_matrix.sum() > 0:  # Only cluster if there's data
+                    log_matrix = np.log1p(count_matrix)  # log(1 + count)
+                    Z = linkage(log_matrix, method='ward')
+                    order = leaves_list(Z)
+                    ordered_samples = [group_samples[i] for i in order]
+                    group_linkages[group_name] = (Z, original_samples, ordered_samples)
+                    group_samples = ordered_samples
+            clustered_samples.extend(group_samples)
+
+    # Add remaining groups (Tumor, etc.) - also clustered
+    for group_name in sorted(group_to_samples.keys()):
+        group_samples = group_to_samples[group_name]
+        original_samples = group_samples.copy()
+        if len(group_samples) > 2:
+            count_matrix = np.array([
+                [cluster_sample_counts[cid].get(s, 0) for cid in cluster_ids]
+                for s in group_samples
+            ])
+            # Cluster using log-transformed counts (but display absolute)
+            if count_matrix.sum() > 0:
+                log_matrix = np.log1p(count_matrix)  # log(1 + count)
+                Z = linkage(log_matrix, method='ward')
+                order = leaves_list(Z)
+                ordered_samples = [group_samples[i] for i in order]
+                group_linkages[group_name] = (Z, original_samples, ordered_samples)
+                group_samples = ordered_samples
+        clustered_samples.extend(group_samples)
+
+    all_samples = clustered_samples
+
+    # Recalculate x positions with gaps between groups
+    sample_x_positions = {}
+    current_x = 0
+    prev_group = None
+    for sample in all_samples:
+        group = sample_groups.get(sample)
+        if prev_group is not None and group != prev_group:
+            current_x += group_gap  # Add gap when group changes
+        sample_x_positions[sample] = current_x
+        current_x += cell_width
+        prev_group = group
+
+    total_matrix_width = current_x
+
     # Draw column headers (rotated sample names)
     header_y = min(cluster_y_start.values()) - 5 if cluster_y_start else 30
     for sample in all_samples:
@@ -1541,25 +1728,198 @@ def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_me
                 stroke_width=0.5
             ))
 
-            # Draw count text
-            if count > 0 and cell_width >= 10:
+            # Draw count text - always show the number
+            if count > 0:
                 # Text color contrasts with cell - white for dark cells, black for bright
                 count_text_color = '#000000' if intensity > 0.4 else '#ffffff'
+                font_size = 5 if cell_width >= 10 else 4
                 d.append(draw.Text(
-                    str(count), font_size=5, x=x + cell_width / 2, y=y + cell_height / 2 + 2,
+                    str(count), font_size=font_size, x=x + cell_width / 2, y=y + cell_height / 2 + 2,
                     fill=count_text_color, font_family='sans-serif',
                     text_anchor='middle'
                 ))
-            elif count == 0 and cell_width >= 8:
-                # Show "0" for zero counts in dim color
+            else:
+                # Always show "0" for zero counts - lighter color for visibility
                 d.append(draw.Text(
                     '0', font_size=4, x=x + cell_width / 2, y=y + cell_height / 2 + 1.5,
-                    fill='#444444', font_family='sans-serif',
+                    fill='#666666', font_family='sans-serif',
                     text_anchor='middle'
                 ))
 
-    # Return total matrix width (includes gaps between groups)
-    return total_matrix_width
+    # Return data needed for bar plot and dendrogram
+    return {
+        'width': total_matrix_width,
+        'sample_x_positions': sample_x_positions,
+        'cluster_sample_counts': cluster_sample_counts,
+        'all_samples': all_samples,
+        'sample_groups': sample_groups,
+        'group_linkages': group_linkages,
+        'cell_width': cell_width
+    }
+
+
+def draw_sample_bar_plot(d, matrix_data, cluster_ids, cluster_enrichments, x_start, y_start,
+                          cell_width, bar_height, text_color, background_color='black'):
+    """Draw stacked vertical bar plot showing reads per sample by enrichment type.
+
+    Args:
+        d: Drawing object
+        matrix_data: Dict returned from draw_sample_matrix containing sample info
+        cluster_ids: List of cluster IDs included in the matrix
+        cluster_enrichments: Dict of cluster_id -> enrichment type
+        x_start: X position for bar plot start (same as matrix)
+        y_start: Y position for bar plot top
+        cell_width: Width of each bar (matches matrix cell width)
+        bar_height: Maximum height of bars
+        text_color: Color for text labels
+        background_color: Background color ('black' or 'white')
+    """
+    sample_x_positions = matrix_data['sample_x_positions']
+    cluster_sample_counts = matrix_data['cluster_sample_counts']
+    all_samples = matrix_data['all_samples']
+
+    # Colors for enrichment types
+    enrichment_colors = {
+        'Normal-enriched': '#3b82f6',  # Blue
+        'Tumor-enriched': '#ef4444',   # Red
+        'mixed': '#9ca3af'             # Gray
+    }
+
+    # Compute reads per sample by enrichment type
+    sample_enrichment_counts = {sample: {'Normal-enriched': 0, 'Tumor-enriched': 0, 'mixed': 0}
+                                 for sample in all_samples}
+    sample_totals = {sample: 0 for sample in all_samples}
+
+    for cid in cluster_ids:
+        enrichment = cluster_enrichments.get(cid, 'mixed')
+        for sample in all_samples:
+            count = cluster_sample_counts.get(cid, {}).get(sample, 0)
+            sample_enrichment_counts[sample][enrichment] += count
+            sample_totals[sample] += count
+
+    max_total = max(sample_totals.values()) if sample_totals.values() else 1
+
+    # Draw stacked bars growing downward from y_start
+    for sample in all_samples:
+        x = x_start + sample_x_positions[sample]
+        current_y = y_start
+
+        # Stack order: Normal-enriched, mixed, Tumor-enriched (bottom to top visually = top to bottom in y)
+        for enrichment in ['Normal-enriched', 'mixed', 'Tumor-enriched']:
+            count = sample_enrichment_counts[sample][enrichment]
+            if count > 0:
+                bar_len = (count / max_total) * bar_height
+                color = enrichment_colors.get(enrichment, '#888888')
+
+                d.append(draw.Rectangle(
+                    x, current_y,
+                    cell_width, bar_len,
+                    fill=color,
+                    stroke='#FFFFFF',
+                    stroke_width=0.2
+                ))
+                current_y += bar_len
+
+    # Draw axis line on the left
+    axis_x = x_start - 3
+    d.append(draw.Line(
+        axis_x, y_start, axis_x, y_start + bar_height,
+        stroke=text_color, stroke_width=1
+    ))
+
+    # Add tick marks and labels for axis
+    tick_values = [0, max_total // 2, max_total]
+    for val in tick_values:
+        tick_y = y_start + (val / max_total) * bar_height if max_total > 0 else y_start
+        # Tick mark
+        d.append(draw.Line(
+            axis_x - 3, tick_y, axis_x, tick_y,
+            stroke=text_color, stroke_width=1
+        ))
+        # Label
+        d.append(draw.Text(
+            str(val), font_size=6,
+            x=axis_x - 5, y=tick_y + 2,
+            fill=text_color, font_family='sans-serif',
+            text_anchor='end'
+        ))
+
+
+def draw_sample_dendrogram(d, matrix_data, x_start, y_bottom, dendro_height, line_color='#FFFFFF'):
+    """Draw horizontal dendrogram above sample columns for each group.
+
+    Args:
+        d: Drawing object
+        matrix_data: Dict returned from draw_sample_matrix
+        x_start: X position where matrix starts
+        y_bottom: Y position of dendrogram bottom (top of matrix headers)
+        dendro_height: Height of dendrogram area
+        line_color: Color for dendrogram lines
+    """
+    group_linkages = matrix_data.get('group_linkages', {})
+    sample_x_positions = matrix_data['sample_x_positions']
+    cell_width = matrix_data['cell_width']
+
+    if not group_linkages:
+        return
+
+    # Draw dendrogram for each group
+    for group_name, (Z, original_samples, ordered_samples) in group_linkages.items():
+        n = len(original_samples)
+        if n < 2:
+            continue
+
+        # Build sample to x-center mapping using DISPLAY positions
+        sample_to_x = {}
+        for sample in ordered_samples:
+            sample_to_x[sample] = x_start + sample_x_positions[sample] + cell_width / 2
+
+        # Normalize heights to fit in dendro_height
+        max_height = Z[:, 2].max() if len(Z) > 0 else 1
+        height_scale = (dendro_height - 5) / max_height if max_height > 0 else 1
+
+        # Track node positions: node_id -> x_center
+        # Leaf nodes are 0 to n-1 (indices into ORIGINAL sample order)
+        # Internal nodes are n to 2n-2
+        node_x = {}
+        node_y = {}  # y position of the node (bottom of its subtree connection)
+
+        # Initialize leaf nodes - linkage index i refers to original_samples[i]
+        # but we need to look up the x position from the reordered display
+        for i, sample in enumerate(original_samples):
+            node_x[i] = sample_to_x[sample]  # Use display position of this sample
+            node_y[i] = y_bottom
+
+        # Process each merge in the linkage matrix
+        for i, (left, right, height, _) in enumerate(Z):
+            left, right = int(left), int(right)
+            new_node = n + i
+
+            # X position is midpoint of children
+            x_left = node_x[left]
+            x_right = node_x[right]
+            x_mid = (x_left + x_right) / 2
+            node_x[new_node] = x_mid
+
+            # Y position based on height (growing upward from y_bottom)
+            y_node = y_bottom - height * height_scale
+            node_y[new_node] = y_node
+
+            # Draw horizontal line connecting children
+            d.append(draw.Line(
+                x_left, y_node, x_right, y_node,
+                stroke=line_color, stroke_width=1
+            ))
+
+            # Draw vertical lines down to children
+            d.append(draw.Line(
+                x_left, y_node, x_left, node_y[left],
+                stroke=line_color, stroke_width=1
+            ))
+            d.append(draw.Line(
+                x_right, y_node, x_right, node_y[right],
+                stroke=line_color, stroke_width=1
+            ))
 
 
 def draw_cluster_labels_vertical(d, cluster_y_start, cluster_y_end, x_start, text_color,
@@ -2722,7 +3082,8 @@ def main():
         # Vertical layout parameters
         dendrogram_width = 100 if cluster_dendro_data is not None else 0
         left_margin = 50 + dendrogram_width
-        top_margin = 80  # More space for rotated sample headers
+        sample_dendro_height = 40 if args.show_matrix else 0  # Space for sample dendrogram
+        top_margin = 80 + sample_dendro_height  # More space for rotated sample headers + dendrogram
         bar_width = args.bar_width
         num_fs = len(featuresets)
         group_height = bar_width * num_fs + args.bar_spacing * (num_fs - 1)
@@ -2829,8 +3190,9 @@ def main():
 
         # Image dimensions
         label_width = 200  # Space for cluster labels
+        bar_plot_height = 50 if args.show_matrix else 0  # Space for bar plot below matrix
         image_width = left_margin + max_bar_length + 20 + matrix_width + label_width
-        image_height = current_y + 50
+        image_height = current_y + 50 + bar_plot_height
 
         print(f"\nVertical mode image dimensions: {image_width} x {image_height}")
 
@@ -2848,11 +3210,22 @@ def main():
                                    read_positions_vertical, num_fs, args.bar_spacing, background_color)
 
         # Draw sample matrix if enabled
+        matrix_data = None
         if args.show_matrix:
             cluster_ids = list(cluster_y_start.keys())
-            draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, meta_df,
+            matrix_data = draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, meta_df,
                               representatives_file, matrix_x_start, cell_width, cell_height,
                               text_color, background_color)
+
+            # Draw sample dendrogram just above sample labels
+            header_y = min(cluster_y_start.values()) - 5
+            dendro_bottom = header_y - 30  # Above sample name labels with spacing
+            draw_sample_dendrogram(d, matrix_data, matrix_x_start, dendro_bottom, sample_dendro_height)
+
+            # Draw bar plot below matrix
+            bar_plot_y = max(cluster_y_end.values()) + cell_height / 2 + 5
+            draw_sample_bar_plot(d, matrix_data, cluster_ids, cluster_enrichments, matrix_x_start, bar_plot_y,
+                                cell_width, 40, text_color, background_color)
 
         # Draw cluster labels on right (after matrix if present)
         if not args.hide_brackets:

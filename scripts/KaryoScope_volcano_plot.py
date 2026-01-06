@@ -35,6 +35,8 @@ def parse_args():
                         help="Q-value threshold for significance line (default: 0.05)")
     parser.add_argument("--figsize", dest="figsize", default="10,8",
                         help="Figure size as 'width,height' in inches (default: 10,8)")
+    parser.add_argument("--dark-mode", dest="dark_mode", action="store_true",
+                        help="Use dark background")
 
     return parser.parse_args()
 
@@ -71,12 +73,29 @@ def create_volcano_plot(df, labels, args):
 
     # Parse figure size
     figsize = tuple(float(x) for x in args.figsize.split(','))
+
+    # Set up dark mode if requested
+    if args.dark_mode:
+        plt.style.use('dark_background')
+        text_color = 'white'
+        grid_color = '#444444'
+        threshold_color = '#888888'
+    else:
+        text_color = 'black'
+        grid_color = '#cccccc'
+        threshold_color = 'black'
+
     fig, ax = plt.subplots(figsize=figsize)
 
+    if args.dark_mode:
+        fig.patch.set_facecolor('black')
+        ax.set_facecolor('black')
+
     # Prepare data
-    # Handle odds_ratio = 0 (avoid log2(0))
+    # Handle odds_ratio = 0 or very small values (avoid log2(0) creating extreme outliers)
     df = df.copy()
-    df['log2_or'] = np.log2(df['odds_ratio'].replace(0, 1e-10))
+    # Use floor of 0.01 (log2 = -6.6) to avoid compressing the x-axis
+    df['log2_or'] = np.log2(df['odds_ratio'].clip(lower=0.01))
     df['-log10_q'] = -np.log10(df['q_value'].replace(0, 1e-300))
 
     # Define colors for enrichment categories
@@ -107,12 +126,12 @@ def create_volcano_plot(df, labels, args):
     # Add significance threshold line
     if args.q_threshold > 0:
         threshold_y = -np.log10(args.q_threshold)
-        ax.axhline(threshold_y, color='black', linestyle='--', alpha=0.5, linewidth=1)
+        ax.axhline(threshold_y, color=threshold_color, linestyle='--', alpha=0.5, linewidth=1)
         ax.text(ax.get_xlim()[1], threshold_y, f' q={args.q_threshold}',
-                va='center', ha='left', fontsize=8, alpha=0.7)
+                va='center', ha='left', fontsize=8, alpha=0.7, color=text_color)
 
     # Add vertical line at x=0
-    ax.axvline(0, color='black', linestyle='-', alpha=0.2, linewidth=1)
+    ax.axvline(0, color=threshold_color, linestyle='-', alpha=0.3, linewidth=1)
 
     # Add labels for curated clusters
     texts = []
@@ -121,22 +140,25 @@ def create_volcano_plot(df, labels, args):
         if len(row) > 0:
             x = row['log2_or'].iloc[0]
             y = row['-log10_q'].iloc[0]
-            texts.append(ax.text(x, y, label, fontsize=7, ha='left', va='bottom'))
+            texts.append(ax.text(x, y, label, fontsize=7, ha='left', va='bottom', color=text_color))
 
     # Adjust text positions to avoid overlap
     if texts:
-        adjust_text(texts, arrowprops=dict(arrowstyle='-', color='gray', alpha=0.5, lw=0.5))
+        arrow_color = '#888888' if args.dark_mode else 'gray'
+        adjust_text(texts, arrowprops=dict(arrowstyle='-', color=arrow_color, alpha=0.5, lw=0.5))
 
     # Labels and title
-    ax.set_xlabel('log₂(Odds Ratio)', fontsize=11)
-    ax.set_ylabel('-log₁₀(q-value)', fontsize=11)
-    ax.set_title('Cluster Enrichment Volcano Plot', fontsize=13)
+    ax.set_xlabel('log₂(Odds Ratio)', fontsize=11, color=text_color)
+    ax.set_ylabel('-log₁₀(q-value)', fontsize=11, color=text_color)
+    ax.set_title('Cluster Enrichment Volcano Plot', fontsize=13, color=text_color)
 
     # Legend
-    ax.legend(loc='upper left', framealpha=0.9, fontsize=9)
+    legend = ax.legend(loc='upper left', framealpha=0.9, fontsize=9)
+    if args.dark_mode:
+        legend.get_frame().set_facecolor('#222222')
 
     # Grid
-    ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+    ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5, color=grid_color)
 
     # Tight layout
     plt.tight_layout()
