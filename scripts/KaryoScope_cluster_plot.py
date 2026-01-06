@@ -533,9 +533,17 @@ def load_bed_data(sample_bed_paths, database, featuresets, smoothness, reads_nee
         for sample_name, bed_dir in sample_bed_paths.items():
             bed_pattern = f"{sample_name}.telogator.1.{database}.{fs}.{smoothness}.features.bed.gz"
             bed_path = os.path.join(bed_dir, bed_pattern)
-
             if not os.path.exists(bed_path):
-                continue
+                # Restore lenient matching for manual inputs or non-standard names
+                # Pattern looks for {sample} and {featureset} in the same directory
+                import glob
+                candidates = glob.glob(os.path.join(bed_dir, f"*{sample_name}*{fs}*.bed*"))
+                if candidates:
+                    # Filter for database and smoothness if possible to be more specific
+                    best_candidates = [c for c in candidates if database in c and smoothness in c]
+                    bed_path = best_candidates[0] if best_candidates else candidates[0]
+                else:
+                    continue
 
             open_func = gzip.open if bed_path.endswith(".gz") else open
             mode = "rt" if bed_path.endswith(".gz") else "r"
@@ -1691,6 +1699,198 @@ def compute_density_line(features, bin_size, read_length, max_density=50):
 
     return density_points
 
+# =============================================================================
+# Structural Analysis Plotting (Additive)
+# =============================================================================
+
+def draw_mini_dendrogram(d, linkage_matrix, x_base, y_base, width, height, row_y_centers, color="white"):
+    """Draw a small dendrogram to the left of feature bars."""
+    n_leaves = len(row_y_centers)
+    if n_leaves < 2:
+        return
+        
+    max_dist = linkage_matrix[-1, 2] if len(linkage_matrix) > 0 else 1.0
+    if max_dist == 0: max_dist = 1.0
+    
+    node_x = {}
+    node_y = {}
+    
+    for i in range(n_leaves):
+        node_x[i] = x_base + width
+        node_y[i] = row_y_centers[i]
+        
+    for i, (idx1, idx2, dist, count) in enumerate(linkage_matrix):
+        idx1, idx2 = int(idx1), int(idx2)
+        node_idx = n_leaves + i
+        y1, y2 = node_y[idx1], node_y[idx2]
+        x_merge = x_base + width - (dist / max_dist) * width
+        
+        d.append(draw.Line(node_x[idx1], y1, x_merge, y1, stroke=color, stroke_width=2.5))
+        d.append(draw.Line(node_x[idx2], y2, x_merge, y2, stroke=color, stroke_width=2.5))
+        d.append(draw.Line(x_merge, y1, x_merge, y2, stroke=color, stroke_width=2.5))
+        
+        node_x[node_idx] = x_merge
+        node_y[node_idx] = (y1 + y2) / 2
+
+
+def plot_structural_mode(args, matrix_data):
+    """Generate multi-panel structural plot (separate files per chromosome)."""
+    print("structural mode plotting...")
+    
+    import scipy.cluster.hierarchy as sch
+    from scipy.spatial.distance import squareform
+    
+    # Load assignments
+    reps_file = f"{args.cluster_prefix}.read_assignments.tsv"
+    if not os.path.exists(reps_file):
+        print(f"Error: {reps_file} not found.")
+        sys.exit(1)
+        
+    reps_df = pd.read_csv(reps_file, sep='\t')
+    if 'chromosome' not in reps_df.columns:
+        print("Error: 'chromosome' column missing. Not a structural analysis output?")
+        sys.exit(1)
+        
+    chromosomes = sorted(reps_df['chromosome'].unique(), key=lambda x: (len(x), x))
+    print(f"Plotting {len(chromosomes)} chromosomes")
+    
+    # BED Data Source
+    if args.bed_files:
+        sample_bed_paths, database = parse_bed_paths(args.bed_files)
+    elif args.input_bed_prefix:
+        unique_samples = reps_df['sample'].unique()
+        sample_bed_paths = {}
+        database = args.database if args.database else "unknown_db"
+        for s in unique_samples:
+            path = os.path.join(args.input_bed_prefix, s, 'telogator', '1', 'KaryoScope', database)
+            sample_bed_paths[s] = path
+    else:
+        sample_bed_paths = {}
+        database = args.database
+
+    featuresets = args.featuresets.split(',')
+    featureset_colors, _ = load_color_files(args.colors_dir, database, featuresets)
+    
+    panel_width = 1200
+    margin_x = 40
+    margin_y = 60
+    
+    out_base = args.output[:-4] if args.output.endswith('.svg') else args.output
+    
+    for chrom in chromosomes:
+        chrom_df = reps_df[reps_df['chromosome'] == chrom]
+        unique_clusters = chrom_df['cluster'].unique()
+        
+        selected_reads = []
+        for cid in unique_clusters:
+            c_data = chrom_df[chrom_df['cluster'] == cid]
+            if c_data.empty: continue
+            selected_reads.append({
+                'read': c_data.iloc[0]['read'], 
+                'cluster': cid, 
+                'type': c_data.iloc[0]['cluster_type']
+            })
+            
+        if not selected_reads: continue
+
+        if not getattr(args, 'show_dendrogram', False):
+            selected_reads.sort(key=lambda x: (0 if x['type'] == 'Major' else 1))
+
+        fs_height = 14
+        row_spacing = 40
+        canvas_height = 120 + len(selected_reads) * (len(featuresets) * fs_height + row_spacing) + 120
+        canvas_width = panel_width + 2 * margin_x
+        
+        d = draw.Drawing(canvas_width, canvas_height, displayInline=False)
+        bg_color = args.background_color
+        text_color = "white" if bg_color == "black" else "black"
+        d.append(draw.Rectangle(0, 0, canvas_width, canvas_height, fill=bg_color))
+        d.append(draw.Text(f"KaryoScope: {chrom} Structural Analysis", 24, canvas_width/2, 40, 
+                          fill=text_color, font_weight='bold', text_anchor='middle'))
+        
+        panel_bg = "#111111" if bg_color == "black" else "#F5F5F5"
+        d.append(draw.Rectangle(margin_x - 5, 75, panel_width + 10, canvas_height - 180, fill=panel_bg, rx=10, ry=10))
+
+        reads_needed = set(r['read'] for r in selected_reads)
+        read_bed_data = load_bed_data(sample_bed_paths, database, featuresets, args.smoothness, reads_needed)
+        
+        # Local clustering if requested
+        local_Z = None
+        if getattr(args, 'show_dendrogram', False) and len(selected_reads) > 1:
+            unique_f = sorted(list(set(f['feature'] for r in read_bed_data for fs in read_bed_data[r] for f in read_bed_data[r][fs])))
+            f_map = {f: chr(j+200) for j, f in enumerate(unique_f)}
+            encoded = []
+            for r_obj in selected_reads:
+                r = r_obj['read']
+                if r in read_bed_data:
+                    fs0 = featuresets[0]
+                    feats = sorted(read_bed_data[r].get(fs0, []), key=lambda x: x['start'])
+                    encoded.append("".join([f_map.get(f['feature'], '?') for f in feats]))
+                else: encoded.append("")
+
+            dm = np.zeros((len(encoded), len(encoded)))
+            def _lev(s1, s2):
+                if len(s1) < len(s2): return _lev(s2, s1)
+                if not s2: return len(s1)
+                p = range(len(s2) + 1)
+                for c in s1:
+                    cur = [p[0]+1]
+                    for j, c2 in enumerate(s2): cur.append(min(p[j+1]+1, cur[j]+1, p[j]+(c!=c2)))
+                    p = cur
+                return p[-1]
+
+            for j1 in range(len(encoded)):
+                for j2 in range(j1+1, len(encoded)):
+                    d_val = _lev(encoded[j1], encoded[j2])
+                    dm[j1, j2] = dm[j2, j1] = d_val / max(len(encoded[j1]), len(encoded[j2]), 1)
+            
+            local_Z = sch.linkage(squareform(dm), method='ward')
+            leaf_order = sch.leaves_list(local_Z)
+            selected_reads = [selected_reads[idx] for idx in leaf_order]
+
+        max_len = 0
+        for r_obj in selected_reads:
+            r = r_obj['read']
+            if r in read_bed_data:
+                for fs in read_bed_data[r]:
+                    for feat in read_bed_data[r][fs]: max_len = max(max_len, feat['stop'])
+        if max_len == 0: max_len = 10000 
+        
+        show_d = getattr(args, 'show_dendrogram', False)
+        dendro_w = 250 if show_d else 20
+        label_w = 300
+        bars_x_start = margin_x + (dendro_w if show_d else 0) + label_w + 20
+        ratio = (panel_width - (dendro_w if show_d else 0) - label_w - 60) / max_len
+        
+        row_y_centers = []
+        for j in range(len(selected_reads)):
+            row_y_centers.append(110 + j * (len(featuresets)*fs_height + row_spacing) + (len(featuresets)*fs_height)/2)
+
+        if show_d and local_Z is not None:
+            draw_mini_dendrogram(d, local_Z, margin_x + 10, 110, dendro_w - 20, 0, row_y_centers, color=text_color)
+            
+        for j, r_obj in enumerate(selected_reads):
+            read, ry = r_obj['read'], row_y_centers[j] - (len(featuresets)*fs_height)/2
+            l_color = "#888888" if r_obj['type'] == "Major" else "#FF4444"
+            display_name = read if len(read) <= 45 else read[:20] + "..." + read[-20:]
+            d.append(draw.Text(display_name, 12, margin_x + (dendro_w if show_d else 10), ry + (len(featuresets)*fs_height)/2 + 4, fill=l_color, font_family='monospace'))
+            if read in read_bed_data:
+                for fs_idx, fs in enumerate(featuresets):
+                    for feat in read_bed_data[read].get(fs, []):
+                        w = max((feat['stop'] - feat['start']) * ratio, 2.5)
+                        x = bars_x_start + (feat['start'] * ratio)
+                        color, op = featureset_colors[fs].get(feat['feature'], ("#ffffff", 1.0))
+                        d.append(draw.Rectangle(x, ry + (fs_idx * fs_height), w, fs_height, fill=color, fill_opacity=op))
+
+        legend_y = canvas_height - 60
+        d.append(draw.Text("Legend:", 14, margin_x, legend_y, fill=text_color, font_weight='bold'))
+        d.append(draw.Text("Major (Dominant)", 12, margin_x + 100, legend_y, fill="#888888"))
+        d.append(draw.Text("Outlier (Variant)", 12, margin_x + 300, legend_y, fill="#FF4444"))
+        if featuresets: d.append(draw.Text(f"Tracks: {', '.join(featuresets)}", 12, margin_x + 500, legend_y, fill=text_color))
+        d.save_svg(f"{out_base}.{chrom}.svg")
+    print("Finished generating separate structural plots.")
+    sys.exit(0)
+
 
 def main():
     args = parse_args()
@@ -1710,6 +1910,21 @@ def main():
     feature_matrix_file = f"{prefix}.feature_matrix.npz"
     sample_metadata_file = f"{prefix}.sample_metadata.tsv"
     cluster_analysis_file = f"{prefix}.cluster_analysis.tsv"
+
+    # Check for structural mode
+    if os.path.exists(feature_matrix_file):
+        is_structure = False
+        fm = None
+        try:
+             fm = np.load(feature_matrix_file, allow_pickle=True)
+             if 'mode' in fm and str(fm['mode']) == 'structure':
+                 is_structure = True
+        except Exception:
+             pass
+             
+        if is_structure:
+             plot_structural_mode(args, fm)
+             sys.exit(0)
 
     # Verify required files exist
     if not os.path.exists(representatives_file):
