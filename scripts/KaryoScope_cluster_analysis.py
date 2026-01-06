@@ -152,6 +152,11 @@ parser.add_argument("--fdr-method", dest="fdr_method", default="bh",
                     help="FDR correction method:\n"
                          "  bh: Benjamini-Hochberg (default, assumes independence or PRDS)\n"
                          "  by: Benjamini-Yekutieli (more conservative, valid for any dependency)")
+parser.add_argument("--analysis-mode", dest="analysis_mode", default="enrichment",
+                    choices=["enrichment", "structure"],
+                    help="Analysis mode:\n"
+                         "  enrichment: Cluster all reads and test for group enrichment (original mode)\n"
+                         "  structure: Cluster per-chromosome to identify structural outliers (default: enrichment)")
 
 args = parser.parse_args()
 
@@ -177,6 +182,152 @@ class TeeLogger:
 if args.log_file:
     log_path = f"{args.output_prefix}.log"
     sys.stdout = TeeLogger(log_path)
+
+
+# =============================================================================
+# Structural Analysis Mode (Additive)
+# =============================================================================
+
+def run_structure_mode(in_data, args):
+    """Run the structure-based analysis workflow (per-chromosome clustering)."""
+    print("=" * 60)
+    print("Mode: Structural Analysis (Per-Chromosome)")
+    print("=" * 60)
+    
+    # Identify chromosomes
+    chromosomes = sorted(in_data['chromosome'].unique())
+    chromosomes = [c for c in chromosomes if c != 'unknown'] # Filter unknown
+    
+    print(f"Found {len(chromosomes)} chromosomes: {', '.join(chromosomes)}")
+    
+    all_cluster_assignments = []
+    chromosome_linkages = {}
+    
+    # Standard hierarchical clustering imports
+    from scipy.cluster.hierarchy import linkage, fcluster
+    from scipy.spatial.distance import squareform
+    
+    # Simple pure-python Levenshtein implementation
+    def levenshtein_distance(s1, s2):
+        if len(s1) < len(s2):
+            return levenshtein_distance(s2, s1)
+        if len(s2) == 0:
+            return len(s1)
+        previous_row = range(len(s2) + 1)
+        for i, c1 in enumerate(s1):
+            current_row = [i + 1]
+            for j, c2 in enumerate(s2):
+                insertions = previous_row[j + 1] + 1
+                deletions = current_row[j] + 1
+                substitutions = previous_row[j] + (c1 != c2)
+                current_row.append(min(insertions, deletions, substitutions))
+            previous_row = current_row
+        return previous_row[-1]
+
+    for chrom in chromosomes:
+        print(f"\n--- Processing {chrom} ---")
+        chrom_data = in_data[in_data['chromosome'] == chrom].copy()
+        
+        # Pre-calculate read -> sample map for speed
+        read_sample_map = dict(zip(chrom_data['read'], chrom_data['sample']))
+
+        # Create "read strings" for distance calculation
+        read_strings = {}
+        for read, group in chrom_data.groupby('read'):
+            # Sort by coordinate
+            sorted_group = group.sort_values('start')
+            # Create feature string
+            feat_list = sorted_group['feature'].tolist()
+            read_strings[read] = feat_list
+            
+        read_names = sorted(read_strings.keys())
+        n_reads = len(read_names)
+        
+        if n_reads < 2:
+            print(f"  Skipping {chrom} (only {n_reads} sample)")
+            for r in read_names:
+                all_cluster_assignments.append({
+                    'read': r, 'chromosome': chrom, 
+                    'cluster_id': f"{chrom}_Major", 'cluster_type': 'Major',
+                    'enrichment': 'Major', 
+                    'sample': read_sample_map[r]
+                })
+            continue
+
+        # Optimization: Deduplicate reads based on feature content
+        unique_feats = sorted(list(set(f for r in read_names for f in read_strings[r])))
+        feat_map = {f: chr(i+200) for i, f in enumerate(unique_feats)} 
+        
+        unique_structures = {} 
+        for r in read_names:
+            encoded = "".join([feat_map[f] for f in read_strings[r]])
+            if encoded not in unique_structures:
+                unique_structures[encoded] = []
+            unique_structures[encoded].append(r)
+            
+        unique_structure_list = sorted(unique_structures.keys())
+        n_unique = len(unique_structure_list)
+        print(f"  {n_reads} reads -> {n_unique} unique structures")
+        
+        if n_unique > 1:
+            print(f"  Computing distances for {n_unique} unique structures...")
+            dist_matrix = np.zeros((n_unique, n_unique))
+            for i in range(n_unique):
+                for j in range(i + 1, n_unique):
+                    d = levenshtein_distance(unique_structure_list[i], unique_structure_list[j])
+                    max_len = max(len(unique_structure_list[i]), len(unique_structure_list[j]))
+                    if max_len > 0:
+                        dist_matrix[i, j] = dist_matrix[j, i] = d / max_len
+
+            # Clustering
+            Z = linkage(squareform(dist_matrix), method='ward')
+            chromosome_linkages[chrom] = Z
+            clusters = fcluster(Z, t=0.25, criterion='distance')
+        else:
+            clusters = [1] * n_unique
+            chromosome_linkages[chrom] = None
+
+        # Determine Major Cluster
+        cluster_read_counts = defaultdict(int)
+        structure_to_cluster = {s: c for s, c in zip(unique_structure_list, clusters)}
+        
+        for s, reads in unique_structures.items():
+            cid = structure_to_cluster[s]
+            cluster_read_counts[cid] += len(reads)
+            
+        major_cluster_id = max(cluster_read_counts, key=cluster_read_counts.get)
+        
+        # Assign
+        for s, reads in unique_structures.items():
+            cid = structure_to_cluster[s]
+            is_major = (cid == major_cluster_id)
+            c_type = "Major" if is_major else "Outlier"
+            full_cluster_id = f"{chrom}_{c_type}"
+            if not is_major:
+                full_cluster_id += f"_{cid}"
+                
+            for r in reads:
+                all_cluster_assignments.append({
+                    'read': r, 'chromosome': chrom, 
+                    'cluster_id': full_cluster_id, 'cluster_type': c_type,
+                    'enrichment': c_type, 'sample': read_sample_map[r]
+                })
+
+    # Save
+    matrix_file = f"{args.output_prefix}.feature_matrix.npz"
+    assignments_file = f"{args.output_prefix}.read_assignments.tsv"
+    assignment_df = pd.DataFrame(all_cluster_assignments)
+    assignment_df = assignment_df.rename(columns={'cluster_id': 'cluster'})
+    if 'group' not in assignment_df.columns:
+        assignment_df['group'] = assignment_df['sample']
+    assignment_df.to_csv(assignments_file, sep='\t', index=False)
+    
+    np.savez_compressed(
+        matrix_file, mode='structure', chromosomes=chromosomes,
+        linkages=chromosome_linkages, info="Per-chromosome structural analysis"
+    )
+    print(f"\nSaved structural assignments: {assignments_file}")
+    sys.exit(0)
 
 # --- Set up plot style ---
 if args.dark_mode:
@@ -204,11 +355,15 @@ def load_bed_file(filepath, sample_label=None):
                 start = int(parts[1])
                 end = int(parts[2])
                 feature = parts[3]
+                # Try to extract chromosome from 5th column if available (standard KaryoScope output)
+                chrom = parts[4] if len(parts) >= 5 else "unknown"
+                
                 records.append({
                     'read': read,
                     'start': start,
                     'end': end,
                     'feature': feature,
+                    'chromosome': chrom,
                     'sample': sample_label
                 })
     return pd.DataFrame(records)
@@ -789,6 +944,12 @@ if args.min_read_length > 0:
     print(f"  Reads before filter: {reads_before:,}")
     print(f"  Reads after filter: {reads_after:,}")
     print(f"  Reads removed: {reads_before - reads_after:,}")
+
+# --- Branching Point ---
+if args.analysis_mode == 'structure':
+    run_structure_mode(in_data, args)
+    # The function will sys.exit(0), so we won't reach here
+    sys.exit(0)
 
 # --- Load sample metadata ---
 print(f"\n--- Loading sample metadata ---")
