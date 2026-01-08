@@ -157,6 +157,8 @@ parser.add_argument("--analysis-mode", dest="analysis_mode", default="enrichment
                     help="Analysis mode:\n"
                          "  enrichment: Cluster all reads and test for group enrichment (original mode)\n"
                          "  structure: Cluster per-chromosome to identify structural outliers (default: enrichment)")
+parser.add_argument("--structural-threshold", "--st", dest="structural_threshold", type=float, default=0.25,
+                    help="Distance threshold for structural outlier clustering (default: 0.25)")
 
 args = parser.parse_args()
 
@@ -282,7 +284,15 @@ def run_structure_mode(in_data, args):
             # Clustering
             Z = linkage(squareform(dist_matrix), method='ward')
             chromosome_linkages[chrom] = Z
-            clusters = fcluster(Z, t=0.25, criterion='distance')
+            
+            # Use user-defined threshold
+            threshold = args.structural_threshold
+            clusters = fcluster(Z, t=threshold, criterion='distance')
+            
+            # Report diagnostics
+            d_vals = dist_matrix[np.triu_indices(n_unique, k=1)]
+            print(f"  Distance Stats (n={len(d_vals)}): min={np.min(d_vals):.3f}, med={np.median(d_vals):.3f}, max={np.max(d_vals):.3f}")
+            print(f"  Clustering with threshold={threshold} -> {len(set(clusters))} clusters")
         else:
             clusters = [1] * n_unique
             chromosome_linkages[chrom] = None
