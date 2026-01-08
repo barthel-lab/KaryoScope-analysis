@@ -325,6 +325,12 @@ def run_structure_mode(in_data, args):
         major_consensus_s = major_structs[0][0]
         major_consensus_idx = unique_structure_list.index(major_consensus_s)
         
+        # Pre-calculate lengths per feature for the length-weighted metric
+        read_feature_lengths = chrom_data.groupby(['read', 'feature'])['length'].sum().unstack(fill_value=0)
+        consensus_read = unique_structures[major_consensus_s][0]
+        consensus_lengths = read_feature_lengths.loc[consensus_read]
+        consensus_feat_set = set(major_consensus_s)
+
         # Assign with divergence score
         for s, reads in unique_structures.items():
             cid = structure_to_cluster[s]
@@ -343,13 +349,29 @@ def run_structure_mode(in_data, args):
             else:
                 norm_div = 0.0
                 raw_div = 0.0
+            
+            # Binary Metric: Symmetric difference of feature types present
+            read_feat_set = set(s)
+            binary_div = len(consensus_feat_set ^ read_feat_set)
                 
             for r in reads:
+                # Length-Weighted Metric: Sum of absolute differences in bp per feature type
+                r_lengths = read_feature_lengths.loc[r]
+                # Ensure we handle features present in either the read or the consensus
+                all_feats = sorted(list(set(consensus_lengths.index) | set(r_lengths.index)))
+                l_div = 0.0
+                for f in all_feats:
+                    v_cons = consensus_lengths.get(f, 0.0)
+                    v_read = r_lengths.get(f, 0.0)
+                    l_div += abs(v_cons - v_read)
+
                 all_cluster_assignments.append({
                     'read': r, 'chromosome': chrom, 
                     'cluster': full_cluster_id, 'cluster_type': c_type,
                     'norm_divergence': norm_div,
                     'raw_divergence': raw_div,
+                    'binary_divergence': float(binary_div),
+                    'length_weighted_divergence': float(l_div),
                     'enrichment': c_type, 'sample': read_sample_map[r]
                 })
 
