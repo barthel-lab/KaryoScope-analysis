@@ -2261,8 +2261,12 @@ def draw_sample_bar_plot(d, matrix_data, cluster_ids, cluster_enrichments, x_sta
     max_total = max(sample_totals.values()) if sample_totals.values() else 1
 
     # Draw stacked bars growing downward from y_start
+    # Use thinner bars (max 8px) to match row barplot thickness
+    thin_bar_width = min(cell_width - 2, 8)
+
     for sample in all_samples:
-        x = x_start + sample_x_positions[sample]
+        # Center the thin bar within the cell
+        x = x_start + sample_x_positions[sample] + (cell_width - thin_bar_width) / 2
         current_y = y_start
 
         # Stack order: Normal-enriched, mixed, Tumor-enriched (bottom to top visually = top to bottom in y)
@@ -2274,10 +2278,9 @@ def draw_sample_bar_plot(d, matrix_data, cluster_ids, cluster_enrichments, x_sta
 
                 d.append(draw.Rectangle(
                     x, current_y,
-                    cell_width, bar_len,
+                    thin_bar_width, bar_len,
                     fill=color,
-                    stroke='#FFFFFF',
-                    stroke_width=0.2
+                    stroke='none'
                 ))
                 current_y += bar_len
 
@@ -2303,6 +2306,98 @@ def draw_sample_bar_plot(d, matrix_data, cluster_ids, cluster_enrichments, x_sta
             x=axis_x - 5, y=tick_y + 2,
             fill=text_color, font_family='sans-serif',
             text_anchor='end'
+        ))
+
+
+def draw_cluster_bar_plot(d, matrix_data, cluster_ids, cluster_y_start, cluster_y_end,
+                          cluster_enrichments, x_start, bar_max_width, text_color, background_color='black'):
+    """Draw horizontal stacked bar plot showing tumor vs normal reads per cluster (row sums).
+
+    Args:
+        d: Drawing object
+        matrix_data: Dict returned from draw_sample_matrix containing sample info
+        cluster_ids: List of cluster IDs
+        cluster_y_start: Dict of cluster_id -> y_start position
+        cluster_y_end: Dict of cluster_id -> y_end position
+        cluster_enrichments: Dict of cluster_id -> enrichment type (unused, kept for API compat)
+        x_start: X position for bar plot start (right edge of matrix)
+        bar_max_width: Maximum width of bars
+        text_color: Color for text labels
+        background_color: Background color ('black' or 'white')
+    """
+    cluster_sample_counts = matrix_data['cluster_sample_counts']
+    all_samples = matrix_data['all_samples']
+    sample_groups = matrix_data.get('sample_groups', {})
+
+    # Colors for sample groups
+    group_colors = {
+        'Normal': '#3b82f6',  # Blue
+        'Tumor': '#ef4444',   # Red
+    }
+
+    # Separate samples by group
+    normal_samples = [s for s in all_samples if sample_groups.get(s) == 'Normal']
+    tumor_samples = [s for s in all_samples if sample_groups.get(s) == 'Tumor']
+
+    # Compute reads per cluster by group
+    cluster_group_counts = {}
+    cluster_totals = {}
+    for cid in cluster_ids:
+        normal_count = sum(cluster_sample_counts.get(cid, {}).get(sample, 0) for sample in normal_samples)
+        tumor_count = sum(cluster_sample_counts.get(cid, {}).get(sample, 0) for sample in tumor_samples)
+        cluster_group_counts[cid] = {'Normal': normal_count, 'Tumor': tumor_count}
+        cluster_totals[cid] = normal_count + tumor_count
+
+    max_total = max(cluster_totals.values()) if cluster_totals.values() else 1
+
+    # Draw horizontal stacked bars for each cluster
+    for cid in cluster_ids:
+        if cid not in cluster_y_start:
+            continue
+
+        y_start = cluster_y_start[cid]
+        y_end = cluster_y_end[cid]
+        y_center = (y_start + y_end) / 2
+        bar_height = min(y_end - y_start - 2, 8)  # Bar height, max 8px
+
+        current_x = x_start
+        # Stack order: Normal first (blue), then Tumor (red)
+        for group in ['Normal', 'Tumor']:
+            count = cluster_group_counts.get(cid, {}).get(group, 0)
+            if count > 0:
+                bar_width = (count / max_total) * bar_max_width
+                color = group_colors.get(group, '#888888')
+
+                d.append(draw.Rectangle(
+                    current_x, y_center - bar_height / 2,
+                    bar_width, bar_height,
+                    fill=color,
+                    stroke='none'
+                ))
+                current_x += bar_width
+
+    # Draw axis line on top
+    axis_y = min(cluster_y_start.values()) - 5
+    d.append(draw.Line(
+        x_start, axis_y, x_start + bar_max_width, axis_y,
+        stroke=text_color, stroke_width=1
+    ))
+
+    # Add tick marks and labels for axis
+    tick_values = [0, max_total // 2, max_total]
+    for val in tick_values:
+        tick_x = x_start + (val / max_total) * bar_max_width if max_total > 0 else x_start
+        # Tick mark
+        d.append(draw.Line(
+            tick_x, axis_y - 3, tick_x, axis_y,
+            stroke=text_color, stroke_width=1
+        ))
+        # Label
+        d.append(draw.Text(
+            str(val), font_size=6,
+            x=tick_x, y=axis_y - 5,
+            fill=text_color, font_family='sans-serif',
+            text_anchor='middle'
         ))
 
 
@@ -4214,7 +4309,8 @@ def main():
         right_legend_width = 120  # Space for vertical color legend on right
         bubble_legend_height = 150  # Space for bubble legend + enrichment text legend at bottom
         bar_plot_height = 100 if args.show_matrix else 0  # Space for bar plot below matrix
-        image_width = left_margin + feature_bars_width + 20 + matrix_width + label_width + right_legend_width
+        row_bar_width = 60 if args.show_matrix else 0  # Space for row barplot to right of matrix
+        image_width = left_margin + feature_bars_width + 20 + matrix_width + row_bar_width + label_width + right_legend_width
         image_height = current_y + 50 + bar_plot_height + bubble_legend_height
 
         if args.column_tracks:
@@ -4265,10 +4361,16 @@ def main():
             dendro_bottom = header_y - 30  # Above sample name labels with spacing
             draw_sample_dendrogram(d, matrix_data, matrix_x_start, dendro_bottom, sample_dendro_height)
 
-            # Draw bar plot below matrix
+            # Draw bar plot below matrix (column sums)
             bar_plot_y = max(cluster_y_end.values()) + cell_height / 2 + 5
             draw_sample_bar_plot(d, matrix_data, cluster_ids, cluster_enrichments, matrix_x_start, bar_plot_y,
                                 cell_width, 40, text_color, background_color)
+
+            # Draw row bar plot to right of matrix (row sums)
+            row_bar_x_start = matrix_x_start + matrix_width + 5
+            draw_cluster_bar_plot(d, matrix_data, cluster_ids, cluster_y_start, cluster_y_end,
+                                 cluster_enrichments, row_bar_x_start, row_bar_width - 10,
+                                 text_color, background_color)
 
         # Draw enrichment bubbles (to the RIGHT of dendrogram tips, before feature bars)
         # Dendrogram tips are at 50 + dendrogram_width (consistent with draw_cluster_dendrogram_vertical)
@@ -4295,7 +4397,7 @@ def main():
         # Draw cluster labels on right (after feature bars and read indices)
         if not args.hide_brackets:
             if args.show_matrix:
-                label_x = matrix_x_start + matrix_width + 10
+                label_x = matrix_x_start + matrix_width + row_bar_width + 10
             else:
                 label_x = left_margin + feature_bars_width + 20  # Extra space for read index labels
             # Build cluster_enrichments dict for coloring labels
