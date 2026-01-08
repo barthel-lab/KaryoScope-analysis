@@ -26,6 +26,7 @@ The script automatically finds these files from the prefix:
 import argparse
 import fnmatch
 import gzip
+import math
 import os
 import sys
 
@@ -177,20 +178,30 @@ def main():
 
     # Load cluster analysis
     cluster_info = {}
+    group_names = []
     if os.path.exists(cluster_analysis_file):
         print(f"\nLoading cluster analysis: {cluster_analysis_file}")
         ca = pd.read_csv(cluster_analysis_file, sep='\t')
+
+        # Dynamically detect group names from columns ending in _count (excluding cluster_id, size, etc.)
+        count_cols = [c for c in ca.columns if c.endswith('_count')]
+        group_names = [c.replace('_count', '') for c in count_cols]
+        if group_names:
+            print(f"  Detected groups: {group_names}")
+
         for _, row in ca.iterrows():
-            cluster_info[row['cluster_id']] = {
+            info = {
                 'enrichment': row.get('enrichment', 'unknown'),
                 'p_value': row.get('p_value', None),
                 'q_value': row.get('q_value', None),
                 'odds_ratio': row.get('odds_ratio', None),
-                'Tumor_count': row.get('Tumor_count', None),
-                'Tumor_pct': row.get('Tumor_pct', None),
-                'Normal_count': row.get('Normal_count', None),
-                'Normal_pct': row.get('Normal_pct', None),
             }
+            # Add group-specific counts and percentages
+            for grp in group_names:
+                info[f'{grp}_count'] = row.get(f'{grp}_count', None)
+                info[f'{grp}_pct'] = row.get(f'{grp}_pct', None)
+
+            cluster_info[row['cluster_id']] = info
     else:
         print(f"\nWARNING: Cluster analysis file not found: {cluster_analysis_file}")
 
@@ -259,14 +270,26 @@ def main():
         if cluster_id in cluster_info:
             info = cluster_info[cluster_id]
             row['enrichment'] = info.get('enrichment', 'unknown')
-            row['Tumor_count'] = info.get('Tumor_count')
-            row['Tumor_pct'] = round(info.get('Tumor_pct'), 1) if info.get('Tumor_pct') is not None else None
-            row['Normal_count'] = info.get('Normal_count')
-            row['Normal_pct'] = round(info.get('Normal_pct'), 1) if info.get('Normal_pct') is not None else None
+
+            # Add group-specific counts and percentages dynamically
+            for grp in group_names:
+                count_val = info.get(f'{grp}_count')
+                pct_val = info.get(f'{grp}_pct')
+                row[f'{grp}_count'] = count_val
+                row[f'{grp}_pct'] = round(pct_val, 1) if pct_val is not None else None
+
             q = info.get('q_value')
             row['q_value'] = f"{q:.4e}" if q is not None else None
             odds = info.get('odds_ratio')
             row['odds_ratio'] = round(odds, 2) if odds is not None else None
+
+            # Calculate log2_fc from odds_ratio
+            if odds is not None and odds > 0:
+                row['log2_fc'] = round(math.log2(odds), 2)
+            elif odds == 0:
+                row['log2_fc'] = float('-inf')
+            else:
+                row['log2_fc'] = None
 
         # Annotate each featureset
         for fs in featuresets:
@@ -278,9 +301,14 @@ def main():
     # Create output DataFrame
     result_df = pd.DataFrame(results)
 
-    # Sort by tumor percentage (descending)
-    if 'Tumor_pct' in result_df.columns:
-        result_df = result_df.sort_values('Tumor_pct', ascending=False)
+    # Sort by log2_fc (descending) if available, otherwise by first group percentage
+    if 'log2_fc' in result_df.columns:
+        # Sort so most enriched in first group are at top (highest log2_fc)
+        result_df = result_df.sort_values('log2_fc', ascending=False, na_position='last')
+    elif group_names:
+        first_grp_pct = f'{group_names[0]}_pct'
+        if first_grp_pct in result_df.columns:
+            result_df = result_df.sort_values(first_grp_pct, ascending=False)
 
     # Save output
     result_df.to_csv(args.output, sep='\t', index=False)
@@ -298,9 +326,13 @@ def main():
             count = (result_df['enrichment'] == enrich).sum()
             print(f"  {enrich}: {count}")
 
-    if 'Tumor_pct' in result_df.columns:
-        n_100pct = (result_df['Tumor_pct'] == 100).sum()
-        print(f"\n100% Tumor clusters: {n_100pct}")
+    # Show 100% clusters for each group
+    for grp in group_names:
+        pct_col = f'{grp}_pct'
+        if pct_col in result_df.columns:
+            n_100pct = (result_df[pct_col] == 100).sum()
+            if n_100pct > 0:
+                print(f"\n100% {grp} clusters: {n_100pct}")
 
 
 
