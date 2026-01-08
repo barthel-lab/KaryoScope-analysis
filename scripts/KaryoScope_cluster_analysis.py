@@ -297,28 +297,29 @@ def run_structure_mode(in_data, args):
             clusters = [1] * n_unique
             chromosome_linkages[chrom] = None
 
-        # Determine Major Cluster and calculate Divergence Scores
+        # Determine Major Cluster
         cluster_read_counts = defaultdict(int)
-        cluster_structures = defaultdict(list) # cid -> list of (encoded_structure, count)
         structure_to_cluster = {s: c for s, c in zip(unique_structure_list, clusters)}
+        
+        # Track which structure is most abundant in the major cluster
+        major_cluster_struct_counts = defaultdict(int)
         
         for s, reads in unique_structures.items():
             cid = structure_to_cluster[s]
-            count = len(reads)
-            cluster_read_counts[cid] += count
-            cluster_structures[cid].append((s, count))
+            cluster_read_counts[cid] += len(reads)
             
         major_cluster_id = max(cluster_read_counts, key=cluster_read_counts.get)
         
-        # Find "centroid" (most abundant structure) for each cluster to calculate cross-cluster distance
-        cluster_centroids = {}
-        for cid, structs in cluster_structures.items():
-            # Sort by count desc, then structure string
-            structs.sort(key=lambda x: (-x[1], x[0]))
-            cluster_centroids[cid] = structs[0][0]
-            
-        major_centroid_s = cluster_centroids[major_cluster_id]
-        major_centroid_idx = unique_structure_list.index(major_centroid_s)
+        # Find the most abundant structure in the Major cluster to use as consensus
+        major_structs = []
+        for s, reads in unique_structures.items():
+            if structure_to_cluster[s] == major_cluster_id:
+                major_structs.append((s, len(reads)))
+        
+        # Sort by count desc
+        major_structs.sort(key=lambda x: (-x[1], x[0]))
+        major_consensus_s = major_structs[0][0]
+        major_consensus_idx = unique_structure_list.index(major_consensus_s)
         
         # Assign with divergence score
         for s, reads in unique_structures.items():
@@ -329,13 +330,11 @@ def run_structure_mode(in_data, args):
             if not is_major:
                 full_cluster_id += f"_{cid}"
             
-            # Distance from this structure's cluster centroid to the major cluster centroid
-            centroid_s = cluster_centroids[cid]
-            c_idx = unique_structure_list.index(centroid_s)
+            # Distance from this structure to the major consensus structure
+            s_idx = unique_structure_list.index(s)
             
-            # Use precalculated dist_matrix if available, else calculate
             if n_unique > 1:
-                div_score = dist_matrix[c_idx, major_centroid_idx]
+                div_score = dist_matrix[s_idx, major_consensus_idx]
             else:
                 div_score = 0.0
                 
