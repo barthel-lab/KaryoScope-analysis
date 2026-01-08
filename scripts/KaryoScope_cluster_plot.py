@@ -128,6 +128,8 @@ def parse_args():
                              "to pre-select representative reads.")
 
     # Mode options
+    parser.add_argument("--show-dendrogram", dest="show_dendrogram", action="store_true",
+                        help="Show hierarchical clustering dendrogram to the left of feature plots")
     parser.add_argument("--hide-brackets", dest="hide_brackets", action="store_true",
                         help="Hide cluster brackets and labels (cleaner dendrogram view)")
     parser.add_argument("--no-reorder", dest="no_reorder", action="store_true",
@@ -155,6 +157,12 @@ def parse_args():
                              "for each cluster. If not specified, plots rank 1 for each cluster.")
     parser.add_argument("--show-read-indices", dest="show_read_indices", action="store_true",
                         help="Show read index labels (1, 2, 3, ...) next to each read (default: hidden)")
+    parser.add_argument("--n-per-cluster", dest="max_reps", type=int, default=5,
+                        help="Number of sequences per cluster (default: 5)")
+    parser.add_argument("--show-threshold", dest="show_threshold", action="store_true",
+                        help="Visualize the structural distance threshold on the dendrogram")
+    parser.add_argument("--structural-threshold", "--st", dest="structural_threshold", type=float, default=0.25,
+                        help="Threshold for structural outlier clustering (default: 0.25)")
     parser.add_argument("--log-file", dest="log_file",
                         action=argparse.BooleanOptionalAction, default=True,
                         help="Save console output to {output}.log (default: True)")
@@ -3691,7 +3699,7 @@ def compute_density_line(features, bin_size, read_length, max_density=50):
 # Structural Analysis Plotting (Additive)
 # =============================================================================
 
-def draw_mini_dendrogram(d, linkage_matrix, x_base, y_base, width, height, row_y_centers, color="white"):
+def draw_mini_dendrogram(d, linkage_matrix, x_base, y_base, width, height, row_y_centers, color="white", threshold=None, show_threshold=False):
     """Draw a small dendrogram to the left of feature bars."""
     n_leaves = len(row_y_centers)
     if n_leaves < 2:
@@ -3719,6 +3727,13 @@ def draw_mini_dendrogram(d, linkage_matrix, x_base, y_base, width, height, row_y
         
         node_x[node_idx] = x_merge
         node_y[node_idx] = (y1 + y2) / 2
+
+    # Draw threshold line
+    if show_threshold and threshold is not None:
+        x_thresh = x_base + width - (threshold / max_dist) * width
+        if x_thresh >= x_base and x_thresh <= x_base + width:
+            d.append(draw.Line(x_thresh, row_y_centers[0] - 20, x_thresh, row_y_centers[-1] + 20,
+                              stroke="#FF4444", stroke_width=2, stroke_dasharray="5,5"))
 
 
 def plot_structural_mode(args, matrix_data):
@@ -3765,19 +3780,37 @@ def plot_structural_mode(args, matrix_data):
     
     out_base = args.output[:-4] if args.output.endswith('.svg') else args.output
     
+    chrom_drawings = [] # Store (drawing, height, width)
+    padding = 60
+    
     for chrom in chromosomes:
         chrom_df = reps_df[reps_df['chromosome'] == chrom]
         unique_clusters = chrom_df['cluster'].unique()
         
         selected_reads = []
-        for cid in unique_clusters:
-            c_data = chrom_df[chrom_df['cluster'] == cid]
-            if c_data.empty: continue
+        
+        # 1. Identify Major cluster and pick 1 rep
+        major_data = chrom_df[chrom_df['cluster_type'] == 'Major']
+        if not major_data.empty:
+            rep = major_data.iloc[0]
             selected_reads.append({
-                'read': c_data.iloc[0]['read'], 
-                'cluster': cid, 
-                'type': c_data.iloc[0]['cluster_type']
+                'read': rep['read'],
+                'cluster': rep['cluster'],
+                'type': 'Major'
             })
+            
+        # 2. Identify Outlier reads, sort by divergence_score desc, pick top 5
+        outlier_data = chrom_df[chrom_df['cluster_type'] == 'Outlier']
+        if not outlier_data.empty:
+            # Sort all outlier reads by divergence_score descending
+            top_outliers = outlier_data.sort_values(by='divergence_score', ascending=False).head(5)
+            
+            for _, row in top_outliers.iterrows():
+                selected_reads.append({
+                    'read': row['read'],
+                    'cluster': row['cluster'],
+                    'type': 'Outlier'
+                })
             
         if not selected_reads: continue
 
@@ -3855,7 +3888,9 @@ def plot_structural_mode(args, matrix_data):
             row_y_centers.append(110 + j * (len(featuresets)*fs_height + row_spacing) + (len(featuresets)*fs_height)/2)
 
         if show_d and local_Z is not None:
-            draw_mini_dendrogram(d, local_Z, margin_x + 10, 110, dendro_w - 20, 0, row_y_centers, color=text_color)
+            draw_mini_dendrogram(d, local_Z, margin_x + 10, 110, dendro_w - 20, 0, row_y_centers, 
+                                 color=text_color, threshold=getattr(args, 'structural_threshold', 0.25), 
+                                 show_threshold=getattr(args, 'show_threshold', False))
             
         for j, r_obj in enumerate(selected_reads):
             read, ry = r_obj['read'], row_y_centers[j] - (len(featuresets)*fs_height)/2
@@ -3876,7 +3911,43 @@ def plot_structural_mode(args, matrix_data):
         d.append(draw.Text("Outlier (Variant)", 12, margin_x + 300, legend_y, fill="#FF4444"))
         if featuresets: d.append(draw.Text(f"Tracks: {', '.join(featuresets)}", 12, margin_x + 500, legend_y, fill=text_color))
         d.save_svg(f"{out_base}.{chrom}.svg")
-    print("Finished generating separate structural plots.")
+        
+        # Store for combined grid
+        chrom_drawings.append((d, canvas_height, canvas_width))
+
+    if chrom_drawings:
+        print(f"Generating combined structural grid plot: {out_base}.all_chromosomes.svg")
+        n_cols = 5
+        
+        # Calculate row heights
+        row_heights = []
+        for i in range(0, len(chrom_drawings), n_cols):
+            batch = chrom_drawings[i:i+n_cols]
+            row_heights.append(max(h for d, h, w in batch))
+            
+        total_width = n_cols * (canvas_width + padding) + padding
+        total_height = sum(row_heights) + (len(row_heights) + 1) * padding
+        
+        all_d = draw.Drawing(total_width, total_height, displayInline=False)
+        all_d.append(draw.Rectangle(0, 0, total_width, total_height, fill=args.background_color))
+        
+        current_y = padding
+        for r_idx in range(len(row_heights)):
+            current_x = padding
+            for c_idx in range(n_cols):
+                idx = r_idx * n_cols + c_idx
+                if idx < len(chrom_drawings):
+                    d_obj, d_h, d_w = chrom_drawings[idx]
+                    g = draw.Group(transform=f"translate({current_x},{current_y})")
+                    for elem in d_obj.elements:
+                        g.append(elem)
+                    all_d.append(g)
+                    current_x += d_w + padding
+            current_y += row_heights[r_idx] + padding
+            
+        all_d.save_svg(f"{out_base}.all_chromosomes.svg")
+        
+    print("Finished generating structural plots.")
     sys.exit(0)
 
 
