@@ -297,17 +297,30 @@ def run_structure_mode(in_data, args):
             clusters = [1] * n_unique
             chromosome_linkages[chrom] = None
 
-        # Determine Major Cluster
+        # Determine Major Cluster and calculate Divergence Scores
         cluster_read_counts = defaultdict(int)
+        cluster_structures = defaultdict(list) # cid -> list of (encoded_structure, count)
         structure_to_cluster = {s: c for s, c in zip(unique_structure_list, clusters)}
         
         for s, reads in unique_structures.items():
             cid = structure_to_cluster[s]
-            cluster_read_counts[cid] += len(reads)
+            count = len(reads)
+            cluster_read_counts[cid] += count
+            cluster_structures[cid].append((s, count))
             
         major_cluster_id = max(cluster_read_counts, key=cluster_read_counts.get)
         
-        # Assign
+        # Find "centroid" (most abundant structure) for each cluster to calculate cross-cluster distance
+        cluster_centroids = {}
+        for cid, structs in cluster_structures.items():
+            # Sort by count desc, then structure string
+            structs.sort(key=lambda x: (-x[1], x[0]))
+            cluster_centroids[cid] = structs[0][0]
+            
+        major_centroid_s = cluster_centroids[major_cluster_id]
+        major_centroid_idx = unique_structure_list.index(major_centroid_s)
+        
+        # Assign with divergence score
         for s, reads in unique_structures.items():
             cid = structure_to_cluster[s]
             is_major = (cid == major_cluster_id)
@@ -315,11 +328,22 @@ def run_structure_mode(in_data, args):
             full_cluster_id = f"{chrom}_{c_type}"
             if not is_major:
                 full_cluster_id += f"_{cid}"
+            
+            # Distance from this structure's cluster centroid to the major cluster centroid
+            centroid_s = cluster_centroids[cid]
+            c_idx = unique_structure_list.index(centroid_s)
+            
+            # Use precalculated dist_matrix if available, else calculate
+            if n_unique > 1:
+                div_score = dist_matrix[c_idx, major_centroid_idx]
+            else:
+                div_score = 0.0
                 
             for r in reads:
                 all_cluster_assignments.append({
                     'read': r, 'chromosome': chrom, 
-                    'cluster_id': full_cluster_id, 'cluster_type': c_type,
+                    'cluster': full_cluster_id, 'cluster_type': c_type,
+                    'divergence_score': div_score,
                     'enrichment': c_type, 'sample': read_sample_map[r]
                 })
 
@@ -327,7 +351,6 @@ def run_structure_mode(in_data, args):
     matrix_file = f"{args.output_prefix}.feature_matrix.npz"
     assignments_file = f"{args.output_prefix}.read_assignments.tsv"
     assignment_df = pd.DataFrame(all_cluster_assignments)
-    assignment_df = assignment_df.rename(columns={'cluster_id': 'cluster'})
     if 'group' not in assignment_df.columns:
         assignment_df['group'] = assignment_df['sample']
     assignment_df.to_csv(assignments_file, sep='\t', index=False)
