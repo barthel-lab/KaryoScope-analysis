@@ -163,6 +163,8 @@ def parse_args():
                         help="Visualize the structural distance threshold on the dendrogram")
     parser.add_argument("--structural-threshold", "--st", dest="structural_threshold", type=float, default=0.25,
                         help="Threshold for structural outlier clustering (default: 0.25)")
+    parser.add_argument("--priority-samples", dest="priority_samples", default=None,
+                        help="Comma-separated list of sample names to prioritize as representatives for clusters.")
     parser.add_argument("--log-file", dest="log_file",
                         action=argparse.BooleanOptionalAction, default=True,
                         help="Save console output to {output}.log (default: True)")
@@ -3783,35 +3785,52 @@ def plot_structural_mode(args, matrix_data):
     chrom_drawings = [] # Store (drawing, height, width)
     padding = 60
     
+    # Priority samples list
+    priority_samples = []
+    if getattr(args, 'priority_samples', None):
+        priority_samples = [s.strip() for s in args.priority_samples.split(',')]
+        
     for chrom in chromosomes:
         chrom_df = reps_df[reps_df['chromosome'] == chrom]
-        unique_clusters = chrom_df['cluster'].unique()
+        unique_cids = chrom_df['cluster'].unique()
         
-        selected_reads = []
-        
-        # 1. Identify Major cluster and pick 1 rep
-        major_data = chrom_df[chrom_df['cluster_type'] == 'Major']
-        if not major_data.empty:
-            rep = major_data.iloc[0]
-            selected_reads.append({
+        # Helper to pick the best representative for a given cluster dataframe
+        def pick_cluster_rep(cluster_subset, c_type):
+            # First, check for priority samples
+            for ps in priority_samples:
+                match = cluster_subset[cluster_subset['sample'] == ps]
+                if not match.empty: return match.iloc[0]
+                match = cluster_subset[cluster_subset['read'].str.startswith(ps)]
+                if not match.empty: return match.iloc[0]
+                
+            if c_type == 'Major':
+                return cluster_subset.iloc[0]
+                
+            # For outliers, pick the one with highest raw_divergence
+            return cluster_subset.sort_values('raw_divergence', ascending=False).iloc[0]
+
+        cluster_reps = []
+        for cid in unique_cids:
+            c_data = chrom_df[chrom_df['cluster'] == cid]
+            if c_data.empty: continue
+            
+            c_type = c_data.iloc[0]['cluster_type']
+            rep = pick_cluster_rep(c_data, c_type)
+            
+            cluster_reps.append({
                 'read': rep['read'],
-                'cluster': rep['cluster'],
-                'type': 'Major'
+                'cluster': cid,
+                'type': c_type,
+                'sample': rep['sample'] if 'sample' in rep else 'unknown',
+                'raw_div': rep['raw_divergence'] if 'raw_divergence' in rep else 0.0,
+                'norm_div': rep['norm_divergence'] if 'norm_divergence' in rep else 0.0
             })
             
-        # 2. Identify Outlier reads, sort by divergence_score desc, pick top 5
-        outlier_data = chrom_df[chrom_df['cluster_type'] == 'Outlier']
-        if not outlier_data.empty:
-            # Sort all outlier reads by divergence_score descending
-            top_outliers = outlier_data.sort_values(by='divergence_score', ascending=False).head(5)
-            
-            for _, row in top_outliers.iterrows():
-                selected_reads.append({
-                    'read': row['read'],
-                    'cluster': row['cluster'],
-                    'type': 'Outlier'
-                })
-            
+        # Sort reps: Major first, then Outliers by raw_div descending
+        cluster_reps.sort(key=lambda x: (0 if x['type'] == 'Major' else 1, -x['raw_div']))
+        
+        selected_reads = cluster_reps
+                    
         if not selected_reads: continue
 
         if not getattr(args, 'show_dendrogram', False):
@@ -3835,7 +3854,7 @@ def plot_structural_mode(args, matrix_data):
         reads_needed = set(r['read'] for r in selected_reads)
         read_bed_data = load_bed_data(sample_bed_paths, database, featuresets, args.smoothness, reads_needed)
         
-        # Local clustering if requested
+        # Local clustering
         local_Z = None
         if getattr(args, 'show_dendrogram', False) and len(selected_reads) > 1:
             unique_f = sorted(list(set(f['feature'] for r in read_bed_data for fs in read_bed_data[r] for f in read_bed_data[r][fs])))
@@ -3879,7 +3898,7 @@ def plot_structural_mode(args, matrix_data):
         
         show_d = getattr(args, 'show_dendrogram', False)
         dendro_w = 250 if show_d else 20
-        label_w = 300
+        label_w = 400 # Slightly wider for detailed labels
         bars_x_start = margin_x + (dendro_w if show_d else 0) + label_w + 20
         ratio = (panel_width - (dendro_w if show_d else 0) - label_w - 60) / max_len
         
@@ -3895,7 +3914,21 @@ def plot_structural_mode(args, matrix_data):
         for j, r_obj in enumerate(selected_reads):
             read, ry = r_obj['read'], row_y_centers[j] - (len(featuresets)*fs_height)/2
             l_color = "#888888" if r_obj['type'] == "Major" else "#FF4444"
-            display_name = read if len(read) <= 45 else read[:20] + "..." + read[-20:]
+            
+            # Detailed label
+            sample_val = r_obj.get('sample', 'unknown')
+            if sample_val == 'pangenome' and '#' in read:
+                sample_val = read.split('#')[0]
+                
+            clean_cid = r_obj['cluster'].replace(f"{chrom}_", "")
+            raw_div = r_obj.get('raw_div', 0)
+            norm_div = r_obj.get('norm_div', 0)
+            
+            label_text = f"[{sample_val}] {clean_cid}"
+            if r_obj['type'] != "Major":
+                label_text += f" (raw:{int(raw_div)}, norm:{norm_div:.2f})"
+                
+            display_name = label_text if len(label_text) <= 65 else label_text[:35] + "..." + label_text[-25:]
             d.append(draw.Text(display_name, 12, margin_x + (dendro_w if show_d else 10), ry + (len(featuresets)*fs_height)/2 + 4, fill=l_color, font_family='monospace'))
             if read in read_bed_data:
                 for fs_idx, fs in enumerate(featuresets):
