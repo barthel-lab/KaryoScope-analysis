@@ -159,6 +159,8 @@ parser.add_argument("--analysis-mode", dest="analysis_mode", default="enrichment
                     help="Analysis mode:\n"
                          "  enrichment: Cluster all reads and test for group enrichment (original mode)\n"
                          "  structure: Cluster per-chromosome to identify structural outliers (default: enrichment)")
+parser.add_argument("--structural-threshold", "--st", dest="structural_threshold", type=float, default=0.25,
+                    help="Distance threshold for structural outlier clustering (default: 0.25)")
 
 args = parser.parse_args()
 
@@ -284,7 +286,15 @@ def run_structure_mode(in_data, args):
             # Clustering
             Z = linkage(squareform(dist_matrix), method='ward')
             chromosome_linkages[chrom] = Z
-            clusters = fcluster(Z, t=0.25, criterion='distance')
+            
+            # Use user-defined threshold
+            threshold = args.structural_threshold
+            clusters = fcluster(Z, t=threshold, criterion='distance')
+            
+            # Report diagnostics
+            d_vals = dist_matrix[np.triu_indices(n_unique, k=1)]
+            print(f"  Distance Stats (n={len(d_vals)}): min={np.min(d_vals):.3f}, med={np.median(d_vals):.3f}, max={np.max(d_vals):.3f}")
+            print(f"  Clustering with threshold={threshold} -> {len(set(clusters))} clusters")
         else:
             clusters = [1] * n_unique
             chromosome_linkages[chrom] = None
@@ -293,13 +303,27 @@ def run_structure_mode(in_data, args):
         cluster_read_counts = defaultdict(int)
         structure_to_cluster = {s: c for s, c in zip(unique_structure_list, clusters)}
         
+        # Track which structure is most abundant in the major cluster
+        major_cluster_struct_counts = defaultdict(int)
+        
         for s, reads in unique_structures.items():
             cid = structure_to_cluster[s]
             cluster_read_counts[cid] += len(reads)
             
         major_cluster_id = max(cluster_read_counts, key=cluster_read_counts.get)
         
-        # Assign
+        # Find the most abundant structure in the Major cluster to use as consensus
+        major_structs = []
+        for s, reads in unique_structures.items():
+            if structure_to_cluster[s] == major_cluster_id:
+                major_structs.append((s, len(reads)))
+        
+        # Sort by count desc
+        major_structs.sort(key=lambda x: (-x[1], x[0]))
+        major_consensus_s = major_structs[0][0]
+        major_consensus_idx = unique_structure_list.index(major_consensus_s)
+        
+        # Assign with divergence score
         for s, reads in unique_structures.items():
             cid = structure_to_cluster[s]
             is_major = (cid == major_cluster_id)
@@ -307,11 +331,20 @@ def run_structure_mode(in_data, args):
             full_cluster_id = f"{chrom}_{c_type}"
             if not is_major:
                 full_cluster_id += f"_{cid}"
+            
+            # Distance from this structure to the major consensus structure
+            s_idx = unique_structure_list.index(s)
+            
+            if n_unique > 1:
+                div_score = dist_matrix[s_idx, major_consensus_idx]
+            else:
+                div_score = 0.0
                 
             for r in reads:
                 all_cluster_assignments.append({
                     'read': r, 'chromosome': chrom, 
-                    'cluster_id': full_cluster_id, 'cluster_type': c_type,
+                    'cluster': full_cluster_id, 'cluster_type': c_type,
+                    'divergence_score': div_score,
                     'enrichment': c_type, 'sample': read_sample_map[r]
                 })
 
@@ -319,7 +352,6 @@ def run_structure_mode(in_data, args):
     matrix_file = f"{args.output_prefix}.feature_matrix.npz"
     assignments_file = f"{args.output_prefix}.read_assignments.tsv"
     assignment_df = pd.DataFrame(all_cluster_assignments)
-    assignment_df = assignment_df.rename(columns={'cluster_id': 'cluster'})
     if 'group' not in assignment_df.columns:
         assignment_df['group'] = assignment_df['sample']
     assignment_df.to_csv(assignments_file, sep='\t', index=False)
