@@ -276,14 +276,16 @@ def run_structure_mode(in_data, args):
         if n_unique > 1:
             print(f"  Computing distances for {n_unique} unique structures...")
             dist_matrix = np.zeros((n_unique, n_unique))
+            raw_dist_matrix = np.zeros((n_unique, n_unique))
             for i in range(n_unique):
                 for j in range(i + 1, n_unique):
-                    d = levenshtein_distance(unique_structure_list[i], unique_structure_list[j])
+                    raw_d = levenshtein_distance(unique_structure_list[i], unique_structure_list[j])
                     max_len = max(len(unique_structure_list[i]), len(unique_structure_list[j]))
+                    raw_dist_matrix[i, j] = raw_dist_matrix[j, i] = raw_d
                     if max_len > 0:
-                        dist_matrix[i, j] = dist_matrix[j, i] = d / max_len
+                        dist_matrix[i, j] = dist_matrix[j, i] = raw_d / max_len
 
-            # Clustering
+            # Clustering (still using normalized distance for Ward linkage)
             Z = linkage(squareform(dist_matrix), method='ward')
             chromosome_linkages[chrom] = Z
             
@@ -332,19 +334,22 @@ def run_structure_mode(in_data, args):
             if not is_major:
                 full_cluster_id += f"_{cid}"
             
-            # Distance from this structure to the major consensus structure
+            # Relative to the major consensus structure
             s_idx = unique_structure_list.index(s)
             
             if n_unique > 1:
-                div_score = dist_matrix[s_idx, major_consensus_idx]
+                norm_div = dist_matrix[s_idx, major_consensus_idx]
+                raw_div = raw_dist_matrix[s_idx, major_consensus_idx]
             else:
-                div_score = 0.0
+                norm_div = 0.0
+                raw_div = 0.0
                 
             for r in reads:
                 all_cluster_assignments.append({
                     'read': r, 'chromosome': chrom, 
                     'cluster': full_cluster_id, 'cluster_type': c_type,
-                    'divergence_score': div_score,
+                    'norm_divergence': norm_div,
+                    'raw_divergence': raw_div,
                     'enrichment': c_type, 'sample': read_sample_map[r]
                 })
 
