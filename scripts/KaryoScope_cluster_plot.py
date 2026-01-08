@@ -149,8 +149,6 @@ def parse_args():
                         help="Display featuresets as separate columns instead of stacked rows. "
                              "In vertical mode: each featureset gets its own column area. "
                              "In horizontal mode: each featureset gets its own row area.")
-    parser.add_argument("--n-per-cluster", dest="max_reps", type=int, default=None,
-                        help="Maximum number of sequences per cluster (optional, for fallback selection)")
     parser.add_argument("--curated-reps", dest="curated_reps", default=None,
                         help="TSV file with curated representative selection. Must have 'cluster_id' and "
                              "'curated_rep_i' columns. curated_rep_i indicates which rank (1-based) to plot "
@@ -163,8 +161,8 @@ def parse_args():
                         help="Visualize the structural distance threshold on the dendrogram")
     parser.add_argument("--structural-threshold", "--st", dest="structural_threshold", type=float, default=0.25,
                         help="Threshold for structural outlier clustering (default: 0.25)")
-    parser.add_argument("--priority-samples", dest="priority_samples", default=None,
-                        help="Comma-separated list of sample names to prioritize as representatives for clusters.")
+    parser.add_argument("--save-individual-chroms", action="store_true",
+                        help="Save separate SVG files for each chromosome in addition to the combined plot")
     parser.add_argument("--log-file", dest="log_file",
                         action=argparse.BooleanOptionalAction, default=True,
                         help="Save console output to {output}.log (default: True)")
@@ -3785,51 +3783,94 @@ def plot_structural_mode(args, matrix_data):
     chrom_drawings = [] # Store (drawing, height, width)
     padding = 60
     
-    # Priority samples list
-    priority_samples = []
-    if getattr(args, 'priority_samples', None):
-        priority_samples = [s.strip() for s in args.priority_samples.split(',')]
-        
+    all_selected_reads = [] # Store names of all reads plotted
+    
     for chrom in chromosomes:
-        chrom_df = reps_df[reps_df['chromosome'] == chrom]
-        unique_cids = chrom_df['cluster'].unique()
+        chrom_df = reps_df[reps_df['chromosome'] == chrom].copy()
+        if chrom_df.empty: continue
         
-        # Helper to pick the best representative for a given cluster dataframe
-        def pick_cluster_rep(cluster_subset, c_type):
-            # First, check for priority samples
-            for ps in priority_samples:
-                match = cluster_subset[cluster_subset['sample'] == ps]
-                if not match.empty: return match.iloc[0]
-                match = cluster_subset[cluster_subset['read'].str.startswith(ps)]
-                if not match.empty: return match.iloc[0]
-                
-            if c_type == 'Major':
-                return cluster_subset.iloc[0]
-                
-            # For outliers, pick the one with highest raw_divergence
-            return cluster_subset.sort_values('raw_divergence', ascending=False).iloc[0]
-
+        # Calculate BW Score (Binary x Length / 1e6)
+        chrom_df['bw_score'] = (chrom_df['binary_divergence'] * chrom_df['length_weighted_divergence']) / 1_000_000
+        
+        # Selection Logic: Global Norm + Global BW
         cluster_reps = []
-        for cid in unique_cids:
-            c_data = chrom_df[chrom_df['cluster'] == cid]
-            if c_data.empty: continue
-            
-            c_type = c_data.iloc[0]['cluster_type']
-            rep = pick_cluster_rep(c_data, c_type)
-            
+        
+        # 1. Major Cluster (Exactly 1)
+        major_df = chrom_df[chrom_df['cluster_type'] == 'Major']
+        if not major_df.empty:
+            rep = major_df.iloc[0]
             cluster_reps.append({
-                'read': rep['read'],
-                'cluster': cid,
-                'type': c_type,
-                'sample': rep['sample'] if 'sample' in rep else 'unknown',
-                'raw_div': rep['raw_divergence'] if 'raw_divergence' in rep else 0.0,
-                'norm_div': rep['norm_divergence'] if 'norm_divergence' in rep else 0.0
+                'read': rep['read'], 'cluster': rep['cluster'], 'type': 'Major',
+                'sample': rep['sample'] if 'sample' in rep else 'pangenome',
+                'raw_div': rep['raw_divergence'], 'norm_div': rep['norm_divergence'],
+                'bw_score': rep['bw_score']
             })
             
-        # Sort reps: Major first, then Outliers by raw_div descending
-        cluster_reps.sort(key=lambda x: (0 if x['type'] == 'Major' else 1, -x['raw_div']))
+        # 2. Outliers Selection
+        outlier_df = chrom_df[chrom_df['cluster_type'] == 'Outlier'].copy()
+        if not outlier_df.empty:
+            selected_ids = {r['read'] for r in cluster_reps}
+            
+            n_reps = args.max_reps if args.max_reps else 3
+            
+            def get_top_n_ranks(df, col, n=3, tolerance=0.02):
+                """Select top N ranks with tolerance for almost-identical scores, capping at 3 per rank."""
+                sorted_df = df.sort_values(by=col, ascending=False)
+                if sorted_df.empty: return pd.DataFrame()
+                
+                selected_indices = []
+                current_rank = 0
+                rank_start_score = -1
+                last_score = -1
+                rank_count = 0
+                
+                for idx, row in sorted_df.iterrows():
+                    score = row[col]
+                    # New rank level detection: anchor at the FIRST read of the rank
+                    # Using rank_start_score * (1.0 - tolerance) creates distinct Steps
+                    if last_score == -1 or score < rank_start_score * (1.0 - tolerance):
+                        current_rank += 1
+                        rank_count = 0
+                        rank_start_score = score
+                    
+                    if current_rank > n:
+                        break
+                    
+                    if rank_count < 3:
+                        selected_indices.append(idx)
+                        rank_count += 1
+                    last_score = score
+                return sorted_df.loc[selected_indices]
+
+            # Step A: Top N Norm Divergence (Simple Top N, no fancy rank logic)
+            norm_winners = outlier_df.sort_values(by='norm_divergence', ascending=False).head(n_reps)
+            for _, rep in norm_winners.iterrows():
+                if rep['read'] not in selected_ids:
+                    cluster_reps.append({
+                        'read': rep['read'], 'cluster': rep['cluster'], 'type': 'Outlier',
+                        'sample': rep['sample'] if 'sample' in rep else 'pangenome',
+                        'raw_div': rep['raw_divergence'], 'norm_div': rep['norm_divergence'],
+                        'bw_score': rep['bw_score']
+                    })
+                    selected_ids.add(rep['read'])
+            
+            # Step B: Top N BW Score (Rank-based with 3-read cap per rank)
+            bw_winners = get_top_n_ranks(outlier_df, 'bw_score', n=n_reps)
+            for _, rep in bw_winners.iterrows():
+                if rep['read'] not in selected_ids:
+                    cluster_reps.append({
+                        'read': rep['read'], 'cluster': rep['cluster'], 'type': 'Outlier',
+                        'sample': rep['sample'] if 'sample' in rep else 'pangenome',
+                        'raw_div': rep['raw_divergence'], 'norm_div': rep['norm_divergence'],
+                        'bw_score': rep['bw_score']
+                    })
+                    selected_ids.add(rep['read'])
         
+        # Sort reps for plotting: Major first, then Outliers by raw_div desc
+        cluster_reps.sort(key=lambda x: (0 if x['type'] == 'Major' else 1, -x['raw_div']))
         selected_reads = cluster_reps
+        for r in selected_reads:
+            all_selected_reads.append(r['read'])
                     
         if not selected_reads: continue
 
@@ -3837,7 +3878,7 @@ def plot_structural_mode(args, matrix_data):
             selected_reads.sort(key=lambda x: (0 if x['type'] == 'Major' else 1))
 
         fs_height = 14
-        row_spacing = 40
+        row_spacing = args.read_spacing if args.read_spacing else 40
         canvas_height = 120 + len(selected_reads) * (len(featuresets) * fs_height + row_spacing) + 120
         canvas_width = panel_width + 2 * margin_x
         
@@ -3915,20 +3956,8 @@ def plot_structural_mode(args, matrix_data):
             read, ry = r_obj['read'], row_y_centers[j] - (len(featuresets)*fs_height)/2
             l_color = "#888888" if r_obj['type'] == "Major" else "#FF4444"
             
-            # Detailed label
-            sample_val = r_obj.get('sample', 'unknown')
-            if sample_val == 'pangenome' and '#' in read:
-                sample_val = read.split('#')[0]
-                
-            clean_cid = r_obj['cluster'].replace(f"{chrom}_", "")
-            raw_div = r_obj.get('raw_div', 0)
-            norm_div = r_obj.get('norm_div', 0)
-            
-            label_text = f"[{sample_val}] {clean_cid}"
-            if r_obj['type'] != "Major":
-                label_text += f" (raw:{int(raw_div)}, norm:{norm_div:.2f})"
-                
-            display_name = label_text if len(label_text) <= 65 else label_text[:35] + "..." + label_text[-25:]
+            # Clean read name label
+            display_name = read if len(read) <= 45 else read[:20] + "..." + read[-20:]
             d.append(draw.Text(display_name, 12, margin_x + (dendro_w if show_d else 10), ry + (len(featuresets)*fs_height)/2 + 4, fill=l_color, font_family='monospace'))
             if read in read_bed_data:
                 for fs_idx, fs in enumerate(featuresets):
@@ -3943,7 +3972,9 @@ def plot_structural_mode(args, matrix_data):
         d.append(draw.Text("Major (Dominant)", 12, margin_x + 100, legend_y, fill="#888888"))
         d.append(draw.Text("Outlier (Variant)", 12, margin_x + 300, legend_y, fill="#FF4444"))
         if featuresets: d.append(draw.Text(f"Tracks: {', '.join(featuresets)}", 12, margin_x + 500, legend_y, fill=text_color))
-        d.save_svg(f"{out_base}.{chrom}.svg")
+        
+        if getattr(args, 'save_individual_chroms', False):
+            d.save_svg(f"{out_base}.{chrom}.svg")
         
         # Store for combined grid
         chrom_drawings.append((d, canvas_height, canvas_width))
@@ -3979,6 +4010,14 @@ def plot_structural_mode(args, matrix_data):
             current_y += row_heights[r_idx] + padding
             
         all_d.save_svg(f"{out_base}.all_chromosomes.svg")
+        
+        # Save sub-TSV of representatives
+        # Ensure BW score is available in the main df for output
+        reps_df['bw_score'] = (reps_df['binary_divergence'] * reps_df['length_weighted_divergence']) / 1_000_000
+        selected_reps_df = reps_df[reps_df['read'].isin(all_selected_reads)]
+        reps_out = f"{args.cluster_prefix}.representative_reads.tsv"
+        selected_reps_df.to_csv(reps_out, sep='\t', index=False)
+        print(f"Saved representative sub-TSV: {reps_out}")
         
     print("Finished generating structural plots.")
     sys.exit(0)
