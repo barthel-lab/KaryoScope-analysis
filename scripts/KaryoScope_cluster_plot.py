@@ -1798,14 +1798,30 @@ def plot_structural_mode(args, matrix_data):
         unique_clusters = chrom_df['cluster'].unique()
         
         selected_reads = []
-        for cid in unique_clusters:
-            c_data = chrom_df[chrom_df['cluster'] == cid]
-            if c_data.empty: continue
+        
+        # 1. Identify Major cluster and pick 1 rep
+        major_data = chrom_df[chrom_df['cluster_type'] == 'Major']
+        if not major_data.empty:
             selected_reads.append({
-                'read': c_data.iloc[0]['read'], 
-                'cluster': cid, 
-                'type': c_data.iloc[0]['cluster_type']
+                'read': major_data.iloc[0]['read'],
+                'cluster': major_data.iloc[0]['cluster'],
+                'type': 'Major'
             })
+            
+        # 2. Identify Outlier clusters, sort by divergence_score desc, pick top 10
+        outlier_clusters_df = chrom_df[chrom_df['cluster_type'] == 'Outlier']
+        if not outlier_clusters_df.empty:
+            # Group by cluster to get max divergence_score for each
+            cluster_scores = outlier_clusters_df.groupby('cluster')['divergence_score'].max().sort_values(ascending=False)
+            top_outlier_cids = cluster_scores.head(10).index.tolist()
+            
+            for cid in top_outlier_cids:
+                c_data = outlier_clusters_df[outlier_clusters_df['cluster'] == cid]
+                selected_reads.append({
+                    'read': c_data.iloc[0]['read'],
+                    'cluster': cid,
+                    'type': 'Outlier'
+                })
             
         if not selected_reads: continue
 
