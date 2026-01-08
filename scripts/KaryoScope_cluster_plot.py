@@ -5,7 +5,26 @@ KaryoScope Cluster Representative Plotting
 Plots representative reads from each cluster with sample and cluster annotations.
 Designed to work with outputs from KaryoScope_cluster_analysis.py.
 
-Usage with auto-discovery (recommended):
+Usage with pre-selected representative reads (recommended):
+  # Step 1: Select representative reads using KaryoScope_select_representatives.py
+  python KaryoScope_select_representatives.py \
+    --cluster-analysis tmp/analysis.cluster_analysis.tsv \
+    --read-assignments tmp/analysis.read_assignments.tsv \
+    --cluster-labels tmp/analysis.cluster_annotations.xlsx \
+    --bed-prefix results \
+    --n-per-cluster 5 \
+    --output tmp/analysis.representative_reads.tsv
+
+  # Step 2: Plot with pre-selected reads
+  python KaryoScope_cluster_plot.py \
+    --cluster-analysis-prefix tmp/analysis \
+    --input-bed-prefix results \
+    --colors resources/KS_human_CHM13 \
+    --featuresets repeat,region \
+    --reads-file tmp/analysis.representative_reads.reads.txt \
+    --output cluster_representatives.svg
+
+Usage with auto-discovery (all reads):
   python KaryoScope_cluster_plot.py \
     --cluster-analysis-prefix tmp/NHA_repeat_region_composite \
     --input-bed-prefix results \
@@ -14,24 +33,6 @@ Usage with auto-discovery (recommended):
     --featuresets repeat,region \
     --smoothness smoothed \
     --output cluster_representatives.svg
-
-Usage with explicit BED paths:
-  python KaryoScope_cluster_plot.py \
-    --cluster-analysis-prefix test_aligned \
-    --bed /path/to/pre/sample.bed /path/to/post/sample.bed \
-    --colors /path/to/KS_human_CHM13 \
-    --featuresets chromosome,region,subtelomeric \
-    --output cluster_representatives.svg
-
-With top-clusters filtering (select top N per category):
-  python KaryoScope_cluster_plot.py \
-    --cluster-analysis-prefix test_aligned \
-    --input-bed-prefix results \
-    --database KS_human_CHM13 \
-    --colors resources/KS_human_CHM13 \
-    --featuresets region,subtelomeric \
-    --output cluster_representatives.svg \
-    --top-clusters "post:4,pre:2,mixed:3"
 """
 
 import argparse
@@ -120,22 +121,11 @@ def parse_args():
     parser.add_argument("--smoothness", default="smoothed",
                         help="Smoothness level (default: smoothed)")
 
-    # Filtering options
-    parser.add_argument("--max-clusters", dest="max_clusters", type=int, default=None,
-                        help="Maximum number of clusters to plot")
-    parser.add_argument("--top-clusters", dest="top_clusters", default=None,
-                        help="Select top N clusters per category, format: 'post:4,pre:2,mixed:3'. "
-                             "Categories: group names from metadata (e.g., 'post', 'pre'), "
-                             "'mixed' for clusters with no clear enrichment")
-    parser.add_argument("--clusters", dest="clusters", default=None,
-                        help="Manually specify cluster IDs to plot, comma-separated (e.g., '1,5,17,23'). "
-                             "Overrides --top-clusters and --max-clusters.")
-    parser.add_argument("--include-mixed", dest="include_mixed", action="store_true",
-                        help="Include 'mixed' (non-significant) clusters in default selection. "
-                             "By default, only statistically enriched clusters are plotted.")
+    # Read selection (filtering is done by KaryoScope_select_representatives.py)
     parser.add_argument("--reads-file", dest="reads_file", default=None,
                         help="File containing read names to include (one per line). "
-                             "Only these reads will be plotted.")
+                             "Only these reads will be plotted. Use KaryoScope_select_representatives.py "
+                             "to pre-select representative reads.")
 
     # Mode options
     parser.add_argument("--show-dendrogram", dest="show_dendrogram", action="store_true",
@@ -144,6 +134,29 @@ def parse_args():
                         help="Hide cluster brackets and labels (cleaner dendrogram view)")
     parser.add_argument("--no-reorder", dest="no_reorder", action="store_true",
                         help="Disable dendrogram reordering - keep reads grouped by cluster")
+    parser.add_argument("--hide-dendrogram", dest="hide_dendrogram", action="store_true",
+                        help="Completely hide the dendrogram (sets dendrogram height to 0)")
+    parser.add_argument("--cluster-labels", dest="cluster_labels", default=None,
+                        help="TSV or Excel file with custom cluster labels. "
+                             "Must have 'cluster_id' and label column (default column: 'curated_annotation')")
+    parser.add_argument("--label-column", dest="label_column", default="curated_annotation",
+                        help="Column name for custom labels in --cluster-labels file (default: curated_annotation)")
+    parser.add_argument("--vertical", dest="vertical", action="store_true",
+                        help="Rotate plot 90 degrees (dendrogram on left, reads vertical)")
+    parser.add_argument("--show-matrix", dest="show_matrix", action="store_true",
+                        help="Show sample × cluster read count matrix (vertical mode only)")
+    parser.add_argument("--column-tracks", dest="column_tracks", action="store_true",
+                        help="Display featuresets as separate columns instead of stacked rows. "
+                             "In vertical mode: each featureset gets its own column area. "
+                             "In horizontal mode: each featureset gets its own row area.")
+    parser.add_argument("--n-per-cluster", dest="max_reps", type=int, default=None,
+                        help="Maximum number of sequences per cluster (optional, for fallback selection)")
+    parser.add_argument("--curated-reps", dest="curated_reps", default=None,
+                        help="TSV file with curated representative selection. Must have 'cluster_id' and "
+                             "'curated_rep_i' columns. curated_rep_i indicates which rank (1-based) to plot "
+                             "for each cluster. If not specified, plots rank 1 for each cluster.")
+    parser.add_argument("--show-read-indices", dest="show_read_indices", action="store_true",
+                        help="Show read index labels (1, 2, 3, ...) next to each read (default: hidden)")
     parser.add_argument("--n-per-cluster", dest="max_reps", type=int, default=5,
                         help="Number of sequences per cluster (default: 5)")
     parser.add_argument("--show-threshold", dest="show_threshold", action="store_true",
@@ -190,23 +203,62 @@ def load_sample_metadata(metadata_file):
     return sample_to_group, sample_colors, group_colors
 
 
+def load_cluster_labels(labels_file, label_column="curated_annotation"):
+    """Load custom cluster labels from TSV or Excel file.
+
+    Args:
+        labels_file: Path to TSV or Excel file with cluster_id and label columns
+        label_column: Column name containing the labels
+
+    Returns:
+        dict: cluster_id -> label mapping
+    """
+    labels = {}
+
+    if labels_file is None or not os.path.exists(labels_file):
+        return labels
+
+    try:
+        if labels_file.endswith('.xlsx') or labels_file.endswith('.xls'):
+            df = pd.read_excel(labels_file)
+        else:
+            df = pd.read_csv(labels_file, sep='\t')
+
+        if 'cluster_id' in df.columns and label_column in df.columns:
+            for _, row in df.iterrows():
+                if pd.notna(row[label_column]) and str(row[label_column]).strip():
+                    labels[int(row['cluster_id'])] = str(row[label_column])
+            print(f"  Loaded {len(labels)} custom cluster labels from {labels_file}")
+        else:
+            print(f"  Warning: Could not find 'cluster_id' or '{label_column}' columns in {labels_file}")
+    except Exception as e:
+        print(f"  Warning: Could not load cluster labels: {e}")
+
+    return labels
+
+
 def load_cluster_analysis(cluster_analysis_file):
     """Load cluster analysis results to get enrichment info and cluster order.
 
     Returns:
-        tuple: (cluster_enrichments dict, cluster_order list)
+        tuple: (cluster_enrichments dict, cluster_order list, cluster_stats dict, cluster_df DataFrame)
             - cluster_enrichments: cluster_id -> enrichment label
             - cluster_order: list of cluster_ids sorted by enrichment tier then p-value:
                 Tier 0: 100% enriched (perfect)
                 Tier 1: 80%+ enriched (strong)
                 Tier 2: all others
+            - cluster_stats: cluster_id -> {'odds_ratio': float, 'size': int, 'q_value': float}
+            - cluster_df: DataFrame with full cluster analysis (for feature info)
     """
     cluster_enrichments = {}
     cluster_order = []
+    cluster_stats = {}
+    cluster_df = None
 
     if cluster_analysis_file and os.path.exists(cluster_analysis_file):
         try:
             df = pd.read_csv(cluster_analysis_file, sep='\t')
+            cluster_df = df.copy()  # Keep original for feature info
 
             # Find percentage columns (they end with _pct)
             pct_cols = [c for c in df.columns if c.endswith('_pct')]
@@ -229,27 +281,374 @@ def load_cluster_analysis(cluster_analysis_file):
             df = df.sort_values(['enrichment_tier', 'p_value'], ascending=[True, True])
 
             for _, row in df.iterrows():
-                cluster_enrichments[row['cluster_id']] = row['enrichment']
-                cluster_order.append(row['cluster_id'])
+                cluster_id = row['cluster_id']
+                cluster_enrichments[cluster_id] = row['enrichment']
+                cluster_order.append(cluster_id)
+                # Store stats for bubble plots
+                cluster_stats[cluster_id] = {
+                    'odds_ratio': row.get('odds_ratio', 1.0),
+                    'size': row.get('size', 0),
+                    'q_value': row.get('q_value', 1.0)
+                }
             print(f"  Loaded cluster analysis: {len(df)} clusters")
         except Exception as e:
             print(f"  Warning: Could not load cluster analysis: {e}")
 
-    return cluster_enrichments, cluster_order
+    return cluster_enrichments, cluster_order, cluster_stats, cluster_df
 
 
-def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order=None, max_reps=None, top_clusters=None, max_clusters=None, clusters=None, include_mixed=False, reads_file=None):
+# =============================================================================
+# Helper Functions: Representative Read Selection Strategy
+# =============================================================================
+
+def parse_top_features(cluster_row, min_pct=10.0):
+    """Parse top features from cluster analysis row.
+
+    Considers: region_top, subtelomeric_top, repeat_top (in priority order)
+    Only includes features with >= min_pct% coverage.
+
+    Args:
+        cluster_row: Row from cluster_analysis.tsv (dict-like)
+        min_pct: Minimum percentage threshold for a feature to be considered characteristic
+
+    Returns:
+        list of (feature_name, coverage_pct, featureset) tuples
+    """
+    import re
+    features = []
+    for col in ['region_top', 'subtelomeric_top', 'repeat_top']:
+        top_string = cluster_row.get(col, '')
+        if pd.isna(top_string) or not top_string:
+            continue
+        featureset = col.replace('_top', '')
+        for part in str(top_string).split(';'):
+            match = re.match(r'\s*(\w+)\s*\(([\d.]+)%\)', part.strip())
+            if match:
+                feat_name, pct = match.group(1), float(match.group(2))
+                if pct >= min_pct:
+                    features.append((feat_name, pct, featureset))
+    return features
+
+
+def get_read_features(read_id, sample, bed_prefix, featuresets=['region', 'subtelomeric', 'repeat'], smoothness='smoothed', database='KS_human_CHM13'):
+    """Load features for a single read from BED files.
+
+    Args:
+        read_id: Read identifier
+        sample: Sample name
+        bed_prefix: Base directory for BED files
+        featuresets: List of featuresets to check
+        smoothness: 'smoothed' or 'presmoothed'
+        database: Database name
+
+    Returns:
+        dict: {featureset: {feature_name: total_bp}} mapping feature names to total base pairs
+    """
+    read_features = {}
+    for featureset in featuresets:
+        read_features[featureset] = defaultdict(int)
+        # Try both .gz and uncompressed
+        bed_patterns = [
+            f"{bed_prefix}/{sample}/telogator/1/KaryoScope/{database}/{sample}.telogator.1.{database}.{featureset}.{smoothness}.features.bed.gz",
+            f"{bed_prefix}/{sample}/telogator/1/KaryoScope/{database}/{sample}.telogator.1.{database}.{featureset}.{smoothness}.features.bed",
+        ]
+        for bed_path in bed_patterns:
+            if os.path.exists(bed_path):
+                try:
+                    open_func = gzip.open if bed_path.endswith('.gz') else open
+                    mode = 'rt' if bed_path.endswith('.gz') else 'r'
+                    with open_func(bed_path, mode) as f:
+                        for line in f:
+                            parts = line.strip().split('\t')
+                            if len(parts) >= 3 and parts[0] == read_id:
+                                start, end = int(parts[1]), int(parts[2])
+                                feature = parts[3] if len(parts) > 3 else 'unknown'
+                                read_features[featureset][feature] += (end - start)
+                except Exception:
+                    pass
+                break
+    return read_features
+
+
+def score_read_features(read_id, sample, cluster_features, bed_prefix, smoothness='smoothed', database='KS_human_CHM13'):
+    """Score how well a read matches the cluster's characteristic features.
+
+    Args:
+        read_id: Read identifier
+        sample: Sample name
+        cluster_features: List of (feature_name, pct, featureset) from parse_top_features()
+        bed_prefix: Base directory for BED files
+        smoothness: 'smoothed' or 'presmoothed'
+        database: Database name
+
+    Returns:
+        dict: {
+            'feature_score': fraction of top cluster features present in read (0-1),
+            'top_feature_bp': bp coverage of the #1 cluster feature,
+            'has_top_feature': bool
+        }
+    """
+    if not cluster_features:
+        return {'feature_score': 0.0, 'top_feature_bp': 0, 'has_top_feature': False}
+
+    # Get unique featuresets to check
+    featuresets = list(set(f[2] for f in cluster_features))
+    read_features = get_read_features(read_id, sample, bed_prefix, featuresets, smoothness, database)
+
+    # Count how many cluster features are present in the read
+    features_found = 0
+    top_feature_bp = 0
+
+    for i, (feat_name, pct, featureset) in enumerate(cluster_features):
+        bp = read_features.get(featureset, {}).get(feat_name, 0)
+        if bp > 0:
+            features_found += 1
+            if i == 0:  # Top feature
+                top_feature_bp = bp
+
+    feature_score = features_found / len(cluster_features) if cluster_features else 0.0
+    has_top_feature = top_feature_bp > 0
+
+    return {
+        'feature_score': feature_score,
+        'top_feature_bp': top_feature_bp,
+        'has_top_feature': has_top_feature
+    }
+
+
+def compute_balanced_score(feature_score, read_length, centroid_distance, max_length, max_distance):
+    """Compute composite score for balanced representative selection.
+
+    Weights (per user specification):
+      - feature_match: 0.5 (must contain cluster features at >10% coverage)
+      - length_norm: 0.4 (prefer longer reads for visualization)
+      - distance_inv: 0.1 (minor consideration for centroid proximity)
+
+    Args:
+        feature_score: Fraction of top cluster features present (0-1)
+        read_length: Read length in bp
+        centroid_distance: Distance from cluster centroid
+        max_length: Maximum read length in cluster (for normalization)
+        max_distance: Maximum centroid distance in cluster (for normalization)
+
+    Returns:
+        float: Composite score (higher is better)
+    """
+    length_norm = read_length / max_length if max_length > 0 else 0
+    distance_inv = 1 - (centroid_distance / max_distance) if max_distance > 0 else 0
+
+    return 0.5 * feature_score + 0.4 * length_norm + 0.1 * distance_inv
+
+
+def select_fallback_read(cluster_df):
+    """Fallback selection: longest read among those closest to centroid.
+
+    Used when no reads contain the cluster's characteristic features.
+
+    Args:
+        cluster_df: DataFrame of reads in the cluster
+
+    Returns:
+        Series: The selected read row
+    """
+    # Get top 25% by centroid distance, then select longest
+    n_candidates = max(1, len(cluster_df) // 4)
+    candidates = cluster_df.nsmallest(n_candidates, 'centroid_distance')
+    return candidates.loc[candidates['read_length'].idxmax()]
+
+
+def _select_by_centroid(cluster_data, max_reps):
+    """Original selection: by rank (centroid distance) with proportional sampling.
+
+    Args:
+        cluster_data: DataFrame of reads in the cluster
+        max_reps: Maximum number of representatives to select
+
+    Returns:
+        list of (read_id, sample) tuples
+    """
+    sample_counts = cluster_data['sample'].value_counts()
+    total_reads = len(cluster_data)
+
+    selected_reads = []
+    remaining_slots = max_reps
+
+    for sample in sample_counts.index:
+        proportion = sample_counts[sample] / total_reads
+        n_select = max(1, round(proportion * max_reps))
+        n_select = min(n_select, remaining_slots, sample_counts[sample])
+
+        if n_select > 0:
+            sample_reads = cluster_data[cluster_data['sample'] == sample].sort_values('rank')
+            selected = list(zip(sample_reads['read'].iloc[:n_select],
+                               sample_reads['sample'].iloc[:n_select]))
+            selected_reads.extend(selected)
+            remaining_slots -= n_select
+
+        if remaining_slots <= 0:
+            break
+
+    return selected_reads
+
+
+def _select_by_strategy(cluster_data, cluster_features, max_reps, strategy, bed_prefix, smoothness, database):
+    """Select representative reads using feature-based scoring.
+
+    Fast approach: prioritize long reads (16-20kb), check them one by one until
+    we find one that has the cluster's defining features. Stops early once enough
+    matches are found.
+
+    Args:
+        cluster_data: DataFrame of reads in the cluster
+        cluster_features: List of (feature_name, pct, featureset) tuples
+        max_reps: Maximum number of representatives to select
+        strategy: 'feature-match', 'longest', or 'balanced'
+        bed_prefix: Base directory for BED files
+        smoothness: 'smoothed' or 'presmoothed'
+        database: Database name
+
+    Returns:
+        list of (read_id, sample) tuples, or empty list if no reads match features
+    """
+    if not cluster_features:
+        # No features to match, return empty to trigger fallback
+        return []
+
+    # Sort reads by length (descending) - prefer longer reads
+    sorted_data = cluster_data.sort_values('read_length', ascending=False)
+
+    # Prioritize reads by length tiers (check longest first)
+    # Tier 1: 16-20kb (ideal visualization length)
+    # Tier 2: 10-16kb (good length)
+    # Tier 3: <10kb (shorter reads)
+    ideal_reads = sorted_data[(sorted_data['read_length'] >= 16000) & (sorted_data['read_length'] <= 20000)]
+    good_reads = sorted_data[(sorted_data['read_length'] >= 10000) & (sorted_data['read_length'] < 16000)]
+    other_reads = sorted_data[sorted_data['read_length'] < 10000]
+
+    selected = []
+
+    # Check reads in priority order until we find enough matches
+    for candidate_df in [ideal_reads, good_reads, other_reads]:
+        if len(selected) >= max_reps:
+            break
+
+        for _, row in candidate_df.iterrows():
+            if len(selected) >= max_reps:
+                break
+
+            read_id = row['read']
+            sample = row['sample']
+
+            # Check if this read has the cluster's defining features
+            score_info = score_read_features(
+                read_id, sample, cluster_features,
+                bed_prefix, smoothness, database
+            )
+
+            # Accept if read has the top feature or any matching features
+            if score_info['has_top_feature'] or score_info['feature_score'] > 0:
+                selected.append((read_id, sample))
+
+    return selected
+
+
+def _select_fallback(cluster_data, max_reps):
+    """Fallback selection: longest reads among those closest to centroid.
+
+    Args:
+        cluster_data: DataFrame of reads in the cluster
+        max_reps: Maximum number of representatives to select
+
+    Returns:
+        list of (read_id, sample) tuples
+    """
+    # Get top 25% by centroid distance
+    n_candidates = max(1, len(cluster_data) // 4)
+    candidates = cluster_data.nsmallest(n_candidates, 'centroid_distance')
+
+    # Sort by length (descending) and select top max_reps
+    candidates = candidates.sort_values('read_length', ascending=False)
+    selected = candidates.head(max_reps)
+
+    return list(zip(selected['read'], selected['sample']))
+
+
+def load_curated_representatives(curated_reps_file, cluster_labels_file=None):
+    """Load curated representative selection from TSV file.
+
+    Args:
+        curated_reps_file: Path to TSV file with cluster_id, rank, read columns.
+        cluster_labels_file: Optional path to TSV/Excel file with cluster_id and curated_rep_i columns.
+                            If provided, curated_rep_i is read from here instead of curated_reps_file.
+
+    Returns:
+        set: Read IDs to include (one per cluster based on curated_rep_i or rank=1)
+    """
+    df = pd.read_csv(curated_reps_file, sep='\t')
+
+    # Check required columns
+    if 'cluster_id' not in df.columns or 'rank' not in df.columns or 'read' not in df.columns:
+        print(f"  Warning: curated_reps file missing required columns (cluster_id, rank, read)")
+        return set()
+
+    # Load curated_rep_i from cluster_labels_file if provided
+    curated_rep_map = {}
+    if cluster_labels_file and os.path.exists(cluster_labels_file):
+        try:
+            if cluster_labels_file.endswith('.xlsx') or cluster_labels_file.endswith('.xls'):
+                labels_df = pd.read_excel(cluster_labels_file)
+            else:
+                labels_df = pd.read_csv(cluster_labels_file, sep='\t')
+
+            if 'cluster_id' in labels_df.columns and 'curated_rep_i' in labels_df.columns:
+                for _, row in labels_df.iterrows():
+                    if pd.notna(row.get('curated_rep_i')):
+                        curated_rep_map[row['cluster_id']] = int(row['curated_rep_i'])
+                print(f"  Loaded {len(curated_rep_map)} curated_rep_i values from {cluster_labels_file}")
+        except Exception as e:
+            print(f"  Warning: Could not load curated_rep_i from cluster_labels: {e}")
+
+    # Fallback: check if curated_rep_i exists in curated_reps_file itself
+    if not curated_rep_map and 'curated_rep_i' in df.columns:
+        for cluster_id in df['cluster_id'].unique():
+            cluster_df = df[df['cluster_id'] == cluster_id]
+            curated_vals = cluster_df['curated_rep_i'].dropna()
+            if len(curated_vals) > 0:
+                curated_rep_map[cluster_id] = int(curated_vals.iloc[0])
+
+    selected_reads = set()
+
+    for cluster_id in df['cluster_id'].unique():
+        cluster_df = df[df['cluster_id'] == cluster_id]
+        target_rank = curated_rep_map.get(cluster_id, 1)
+
+        # Select read with matching rank
+        target_row = cluster_df[cluster_df['rank'] == target_rank]
+        if len(target_row) > 0:
+            selected_reads.add(target_row.iloc[0]['read'])
+        elif len(cluster_df) > 0:
+            # Fallback to first available read
+            selected_reads.add(cluster_df.iloc[0]['read'])
+
+    print(f"  Selected {len(selected_reads)} curated representatives from {curated_reps_file}")
+
+    return selected_reads
+
+
+def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order=None, max_reps=None, reads_file=None, curated_reps_file=None, cluster_labels_file=None):
     """Load read assignments from TSV file.
+
+    Representative read selection should be done beforehand using KaryoScope_select_representatives.py.
+    This function loads the selected reads and groups them by cluster.
 
     Args:
         reps_file: Path to read_assignments.tsv (all reads with cluster assignments and stats)
         cluster_enrichments: Dict of cluster_id -> enrichment label from cluster_analysis.tsv
-        cluster_order: List of cluster_ids in priority order (100% enriched first, then 80%+, then by p-value)
-        max_reps: Maximum representatives per cluster (selects by rank, closest to centroid first)
-        top_clusters: Dict of {category: n_clusters} where category is a group name or 'mixed'
-        max_clusters: Maximum total clusters to include
-        clusters: List of specific cluster IDs to plot (overrides top_clusters and max_clusters)
+        cluster_order: List of cluster_ids in priority order (for ordering output)
+        max_reps: Maximum representatives per cluster (optional fallback if no reads_file)
         reads_file: Path to file with read names to include (one per line)
+        curated_reps_file: Path to TSV with cluster_id, rank, read columns for selecting specific reads
+        cluster_labels_file: Path to TSV/Excel with curated_rep_i column (optional)
 
     Returns:
         tuple: (cluster_reads OrderedDict, unique_enrichments set)
@@ -258,8 +657,34 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
     reps_df = pd.read_csv(reps_file, sep='\t')
     print(f"  Total reads: {len(reps_df)}")
 
-    # Filter by reads file if provided
-    if reads_file:
+    # Load rank info from curated_reps_file or infer from reads_file
+    read_ranks = {}
+    rank_source = None
+    if curated_reps_file and os.path.exists(curated_reps_file):
+        rank_source = curated_reps_file
+    elif reads_file:
+        # Check if there's a .tsv version with rank info
+        tsv_path = reads_file.replace('.reads.txt', '.tsv')
+        if os.path.exists(tsv_path):
+            rank_source = tsv_path
+
+    if rank_source:
+        try:
+            rank_df = pd.read_csv(rank_source, sep='\t')
+            if 'read' in rank_df.columns and 'rank' in rank_df.columns:
+                for _, row in rank_df.iterrows():
+                    read_ranks[row['read']] = row['rank']
+        except Exception:
+            pass  # Silently ignore if rank loading fails
+
+    # Load curated representatives if provided (takes precedence over reads_file)
+    if curated_reps_file and os.path.exists(curated_reps_file):
+        allowed_reads = load_curated_representatives(curated_reps_file, cluster_labels_file)
+        if allowed_reads:
+            reps_df = reps_df[reps_df['read'].isin(allowed_reads)]
+            print(f"  After curated filter: {len(reps_df)} reads")
+    # Otherwise filter by reads file if provided
+    elif reads_file:
         if not os.path.exists(reads_file):
             print(f"  Warning: reads_file not found: {reads_file}")
         else:
@@ -286,130 +711,40 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
     unique_enrichments = set(reps_df['enrichment'].unique())
     print(f"  Available enrichment categories: {sorted(unique_enrichments)}")
 
-    # Handle --clusters manual selection (overrides top_clusters and max_clusters)
-    if clusters:
-        available_clusters = set(reps_df['cluster'].unique())
-        valid_clusters = [c for c in clusters if c in available_clusters]
-        missing_clusters = [c for c in clusters if c not in available_clusters]
-        if missing_clusters:
-            print(f"  Warning: Clusters not found in data: {missing_clusters}")
-        reps_df = reps_df[reps_df['cluster'].isin(valid_clusters)]
-        print(f"  Manual cluster selection: {valid_clusters}")
-        print(f"  Total reads after selection: {len(reps_df)}")
-    # Handle --top-clusters selection
-    elif top_clusters:
-        selected_clusters = []
-        for category, n_clusters in top_clusters.items():
-            # Map category to enrichment label(s)
-            # 'mixed' -> 'mixed'
-            # 'post' -> 'post-enriched'
-            # 'pre' -> 'pre-enriched'
-            if category.lower() == 'mixed':
-                target_enrichments = ['mixed']
-            else:
-                # Try to match group name to enrichment label
-                target_enrichments = []
-                for enrich in unique_enrichments:
-                    # Match "post" to "post-enriched", case-insensitive
-                    if enrich.lower() == f"{category.lower()}-enriched":
-                        target_enrichments.append(enrich)
-                    # Also allow direct match (e.g., if enrichment is just "post")
-                    elif enrich.lower() == category.lower():
-                        target_enrichments.append(enrich)
-
-            for target_enrich in target_enrichments:
-                type_df = reps_df[reps_df['enrichment'] == target_enrich]
-                # Use cluster_order to get most significant clusters first
-                if cluster_order:
-                    type_clusters_set = set(type_df['cluster'].unique())
-                    type_clusters = [c for c in cluster_order if c in type_clusters_set][:n_clusters]
-                else:
-                    type_clusters = list(type_df['cluster'].unique()[:n_clusters])
-                selected_clusters.extend(type_clusters)
-                print(f"  Selected top {len(type_clusters)} {target_enrich} clusters")
-
-            if not target_enrichments:
-                print(f"  Warning: No enrichment category matches '{category}'")
-
-        reps_df = reps_df[reps_df['cluster'].isin(selected_clusters)]
-        print(f"  Total after --top-clusters selection: {len(reps_df)}")
-    else:
-        # Default behavior: only plot enriched clusters (exclude 'mixed' and 'unknown')
-        if include_mixed:
-            enriched_labels = [e for e in unique_enrichments if e not in ('unknown',)]
-            print(f"  Including all clusters (enriched + mixed)")
-        else:
-            enriched_labels = [e for e in unique_enrichments if e not in ('mixed', 'unknown')]
-            print(f"  Default: plotting enriched clusters only ({', '.join(sorted(enriched_labels))})")
-        if enriched_labels:
-            reps_df = reps_df[reps_df['enrichment'].isin(enriched_labels)]
-            print(f"  Total reads after filtering: {len(reps_df)}")
-
     # Get unique clusters - use priority order from cluster_analysis.tsv if available
-    # (sorted by: 100% enriched first, then 80%+, then by p-value)
     available_clusters = set(reps_df['cluster'].unique())
-    if clusters:
-        # Manual selection: use provided order
-        clusters_to_plot = [c for c in clusters if c in available_clusters]
-    elif cluster_order:
+    if cluster_order:
         clusters_to_plot = [c for c in cluster_order if c in available_clusters]
     else:
         clusters_to_plot = list(reps_df['cluster'].unique())
-
-    # Apply max_clusters limit (only if not using manual --clusters)
-    if max_clusters and not clusters:
-        clusters_to_plot = clusters_to_plot[:max_clusters]
     print(f"  Clusters to plot: {len(clusters_to_plot)}")
 
     # Group reads by cluster
     cluster_reads = OrderedDict()
+
     for cluster_id in clusters_to_plot:
-        cluster_data = reps_df[reps_df['cluster'] == cluster_id]
+        cluster_data = reps_df[reps_df['cluster'] == cluster_id].copy()
         if cluster_data.empty:
-            print(f"  Warning: Cluster {cluster_id} has no reads after filtering, skipping")
             continue
         enrichment = cluster_data['enrichment'].iloc[0]
 
-        # Apply max_reps limit using rank (rank 1 = closest to centroid)
-        # with proportional sampling by sample to maintain representation
+        # Optionally limit to max_reps per cluster (simple centroid-based fallback)
         if max_reps is not None and len(cluster_data) > max_reps:
-            # Count reads per sample in this cluster
-            sample_counts = cluster_data['sample'].value_counts()
-            total_reads = len(cluster_data)
-
-            # Calculate proportional allocation for each sample
-            selected_reads = []
-            remaining_slots = max_reps
-
-            # Sort samples by count (descending) for consistent ordering
-            for sample in sample_counts.index:
-                # Proportional allocation, at least 1 if sample has reads and slots remain
-                proportion = sample_counts[sample] / total_reads
-                n_select = max(1, round(proportion * max_reps))
-                n_select = min(n_select, remaining_slots, sample_counts[sample])
-
-                if n_select > 0:
-                    # Select reads with lowest rank (closest to centroid) for this sample
-                    sample_reads = cluster_data[cluster_data['sample'] == sample].sort_values('rank')
-                    selected = list(zip(sample_reads['read'].iloc[:n_select],
-                                       sample_reads['sample'].iloc[:n_select]))
-                    selected_reads.extend(selected)
-                    remaining_slots -= n_select
-
-                if remaining_slots <= 0:
-                    break
-
-            reads = selected_reads
+            selected_reads = _select_by_centroid(cluster_data, max_reps)
         else:
-            reads = list(zip(cluster_data['read'], cluster_data['sample']))
+            selected_reads = list(zip(cluster_data['read'], cluster_data['sample']))
+
+        # Sort by rank if rank info is available
+        if read_ranks:
+            selected_reads = sorted(selected_reads, key=lambda x: read_ranks.get(x[0], 999))
 
         cluster_reads[cluster_id] = {
             'enrichment': enrichment,
-            'reads': reads
+            'reads': selected_reads
         }
 
     if max_reps is not None:
-        print(f"  Limited to max {max_reps} representatives per cluster (by centroid proximity, proportional sampling)")
+        print(f"  Limited to max {max_reps} representatives per cluster")
 
     return cluster_reads, unique_enrichments
 
@@ -803,32 +1138,146 @@ def compute_cluster_dendrogram_order(feature_matrix_data, cluster_reads):
         displayed_centroid_indices = [cluster_ids_ordered.index(cid) for cid in displayed_clusters_in_order]
         subset_centroids = cluster_centroids[displayed_centroid_indices]
 
-        # Compute pairwise distances between displayed cluster centroids
-        from scipy.spatial.distance import pdist
-        from scipy.cluster.hierarchy import linkage
+        # Use Bio.Phylo to extract subtree from the full dendrogram
+        # This preserves the original tree structure for displayed clusters
+        from scipy.cluster.hierarchy import to_tree
+        from io import StringIO
+        from Bio import Phylo
 
-        if len(subset_centroids) > 1:
-            subset_distances = pdist(subset_centroids, metric='euclidean')
+        def parse_terminal_name(name):
+            """Parse cluster ID from terminal name with validation."""
+            if name is None:
+                raise ValueError("Terminal name is None")
+            if not name.startswith('n'):
+                raise ValueError(f"Invalid terminal name format: {name}")
+            try:
+                return int(name[1:])
+            except ValueError:
+                raise ValueError(f"Cannot parse cluster ID from: {name}")
 
-            # Get linkage method
-            linkage_method = feature_matrix_data.get('linkage_method', 'ward')
-            if hasattr(linkage_method, 'item'):
-                linkage_method = linkage_method.item()
-            linkage_method = str(linkage_method)
+        def linkage_to_newick(linkage_matrix, labels):
+            """Convert scipy linkage matrix to Newick format with proper branch lengths."""
+            tree = to_tree(linkage_matrix)
 
-            # Compute linkage on subset
-            subset_linkage = linkage(subset_distances, method=linkage_method)
+            def to_newick(node):
+                if node.is_leaf():
+                    return f"n{labels[node.id]}"  # Prefix with 'n' to ensure valid names
+                else:
+                    left_child = node.get_left()
+                    right_child = node.get_right()
+                    # Branch length = parent height - child height
+                    # For leaves, child height is 0
+                    left_height = 0 if left_child.is_leaf() else left_child.dist
+                    right_height = 0 if right_child.is_leaf() else right_child.dist
+                    left_branch = node.dist - left_height
+                    right_branch = node.dist - right_height
+                    left = to_newick(left_child)
+                    right = to_newick(right_child)
+                    return f'({left}:{left_branch:.6f},{right}:{right_branch:.6f})'
 
-            # Apply optimal leaf ordering
-            optimized_linkage = optimal_leaf_ordering(subset_linkage, subset_distances)
+            return to_newick(tree) + ';'
 
-            # Get leaf order
-            leaf_order = leaves_list(optimized_linkage)
+        def phylo_tree_to_linkage(tree, label_to_idx):
+            """Convert Bio.Phylo tree back to scipy linkage matrix format."""
+            n = len(label_to_idx)
+            linkage_rows = []
+            node_counter = [n]  # Next internal node ID
 
-            # Reorder clusters
-            reordered_cluster_ids = [displayed_clusters_in_order[i] for i in leaf_order]
+            def get_node_info(clade):
+                """Recursively build linkage. Returns (node_id, height, count)."""
+                if clade.is_terminal():
+                    # Leaf node - extract cluster ID from name (remove 'n' prefix)
+                    cluster_id = parse_terminal_name(clade.name)
+                    if cluster_id not in label_to_idx:
+                        raise ValueError(f"Unknown cluster ID: {cluster_id}")
+                    return label_to_idx[cluster_id], 0, 1
 
-            print(f"  Ordered {len(reordered_cluster_ids)} clusters using cluster-level dendrogram")
+                # Internal node - process children
+                children = clade.clades
+                if len(children) == 0:
+                    raise ValueError("Internal node has no children")
+
+                if len(children) != 2:
+                    # Handle non-binary nodes by sequential merging
+                    left_id, left_h, left_c = get_node_info(children[0])
+                    for child in children[1:]:
+                        right_id, right_h, right_c = get_node_info(child)
+                        height = max(left_h, right_h) + (clade.branch_length or 0.1)
+                        linkage_rows.append([left_id, right_id, height, left_c + right_c])
+                        left_id = node_counter[0]
+                        node_counter[0] += 1
+                        left_h = height
+                        left_c = left_c + right_c
+                    return left_id, left_h, left_c
+
+                left_id, left_h, left_c = get_node_info(children[0])
+                right_id, right_h, right_c = get_node_info(children[1])
+
+                # Height is the max child height plus branch length
+                height = max(left_h, right_h) + (clade.branch_length or 0.1)
+                linkage_rows.append([left_id, right_id, height, left_c + right_c])
+
+                new_id = node_counter[0]
+                node_counter[0] += 1
+                return new_id, height, left_c + right_c
+
+            get_node_info(tree.root)
+            return np.array(linkage_rows) if linkage_rows else None
+
+        original_full_linkage = feature_matrix_data['cluster_linkage']
+
+        if len(displayed_clusters_in_order) > 1:
+            # Convert full linkage to Newick and load with Bio.Phylo
+            newick_str = linkage_to_newick(original_full_linkage, cluster_ids_ordered)
+            full_tree = Phylo.read(StringIO(newick_str), 'newick')
+
+            # Get terminal names to keep (with 'n' prefix)
+            terminals_to_keep = {f"n{cid}" for cid in displayed_cluster_ids}
+
+            # Prune tree to only displayed clusters
+            # Remove terminals not in our set
+            all_terminals = list(full_tree.get_terminals())
+            for terminal in all_terminals:
+                if terminal.name not in terminals_to_keep:
+                    full_tree.prune(terminal)
+
+            # Collapse internal nodes with single children
+            def collapse_single_children(clade):
+                if clade.is_terminal():
+                    return
+                # Recursively process children first
+                for child in list(clade.clades):
+                    collapse_single_children(child)
+                # If this node has only one child, bypass it
+                while len(clade.clades) == 1:
+                    child = clade.clades[0]
+                    # Accumulate branch lengths (handle None values)
+                    clade.branch_length = (clade.branch_length or 0) + (child.branch_length or 0)
+                    clade.clades = list(child.clades)  # Explicit copy
+
+            collapse_single_children(full_tree.root)
+
+            # Check for degenerate tree after collapse
+            if not full_tree.root.clades and not full_tree.root.is_terminal():
+                print("  Warning: Tree collapsed to empty root, falling back to single cluster")
+                reordered_cluster_ids = displayed_clusters_in_order
+                optimized_linkage = None
+            else:
+                # Get leaf order from pruned tree (left-to-right traversal)
+                terminals = list(full_tree.get_terminals())
+                reordered_cluster_ids = []
+                for t in terminals:
+                    if t.name is not None:
+                        reordered_cluster_ids.append(parse_terminal_name(t.name))
+
+                print(f"  Extracted subtree with {len(reordered_cluster_ids)} clusters using Bio.Phylo")
+
+                # Convert pruned tree back to linkage format
+                label_to_idx = {cid: i for i, cid in enumerate(reordered_cluster_ids)}
+                optimized_linkage = phylo_tree_to_linkage(full_tree, label_to_idx)
+
+            # Identity mapping since we built linkage in display order
+            leaf_order = list(range(len(reordered_cluster_ids)))
         else:
             reordered_cluster_ids = displayed_clusters_in_order
             optimized_linkage = None
@@ -1007,7 +1456,8 @@ def draw_cluster_dendrogram(d, cluster_dendro_data, cluster_x_start, cluster_x_e
         """Convert distance to Y pixel coordinate (higher distance = higher up)."""
         return dendro_base_y - (dist / max_distance) * (dendrogram_height - 15)
 
-    line_color = '#AAAAAA' if background_color == 'black' else '#444444'
+    # Thin white lines
+    line_color = '#FFFFFF'
 
     # Build mapping from linkage index to display x-center
     # cluster_order[i] is the cluster_id at display position i
@@ -1100,22 +1550,27 @@ def draw_cluster_dendrogram(d, cluster_dendro_data, cluster_x_start, cluster_x_e
 
         # Draw vertical lines from each child's x-position up to merge height
         # Then horizontal line connecting at merge height
-        d.append(draw.Line(x1, y_bottom_left, x1, y_top, stroke=line_color, stroke_width=2))
-        d.append(draw.Line(x2, y_bottom_right, x2, y_top, stroke=line_color, stroke_width=2))
-        d.append(draw.Line(x1, y_top, x2, y_top, stroke=line_color, stroke_width=2))
+        d.append(draw.Line(x1, y_bottom_left, x1, y_top, stroke=line_color, stroke_width=1))
+        d.append(draw.Line(x2, y_bottom_right, x2, y_top, stroke=line_color, stroke_width=1))
+        d.append(draw.Line(x1, y_top, x2, y_top, stroke=line_color, stroke_width=1))
 
     n_branches = len(linkage_matrix)
     print(f"  Drew cluster dendrogram for {n_clusters} clusters ({n_branches} branches)")
 
 
 def draw_cluster_brackets(d, cluster_reads, cluster_x_start, cluster_x_end,
-                          enrichment_colors, read_heights, label_height, text_color):
+                          enrichment_colors, read_heights, label_height, text_color,
+                          cluster_labels=None):
     """Draw cluster brackets and labels below the feature bars (inverted, pointing up).
 
     Args:
         read_heights: Dict of read -> (min_y, max_y, x_start, total_width) for y-positioning
         label_height: Height of rotated featureset labels below bars
+        cluster_labels: Optional dict of cluster_id -> custom label string
     """
+    if cluster_labels is None:
+        cluster_labels = {}
+
     for cluster_id, data in cluster_reads.items():
         if cluster_id == 'all':  # Skip when in dendrogram mode
             continue
@@ -1143,9 +1598,18 @@ def draw_cluster_brackets(d, cluster_reads, cluster_x_start, cluster_x_end,
 
         # Labels below the bracket
         label_x = (x_start + x_end) / 2
+
+        # Use custom label if available, otherwise default to cluster ID
+        if cluster_id in cluster_labels:
+            label_text = cluster_labels[cluster_id]
+            label_font_size = 9  # slightly smaller for longer labels
+        else:
+            label_text = f"c{cluster_id}"
+            label_font_size = 10
+
         d.append(draw.Text(
-            f"c{cluster_id}",
-            font_size=10, x=label_x, y=bracket_y + 15,
+            label_text,
+            font_size=label_font_size, x=label_x, y=bracket_y + 15,
             fill=color, font_family='sans-serif',
             text_anchor='middle', font_weight='bold'
         ))
@@ -1154,6 +1618,1275 @@ def draw_cluster_brackets(d, cluster_reads, cluster_x_start, cluster_x_end,
             enrichment,
             font_size=8, x=label_x, y=bracket_y + 27,
             fill=color, font_family='sans-serif', text_anchor='middle'
+        ))
+
+
+# =============================================================================
+# Vertical Mode Drawing Functions
+# =============================================================================
+
+def draw_cluster_dendrogram_vertical(d, cluster_dendro_data, cluster_y_start, cluster_y_end,
+                                     left_margin, dendrogram_width, background_color):
+    """Draw cluster-level dendrogram on the LEFT side for vertical mode.
+
+    Clusters are arranged vertically, dendrogram branches extend horizontally from left.
+
+    Key insight: The linkage matrix indices refer to the ORIGINAL order before
+    optimal_leaf_ordering. We need to map these to DISPLAY positions using leaf_order.
+    """
+    if cluster_dendro_data is None or cluster_dendro_data.get('linkage') is None:
+        return
+
+    linkage_matrix = cluster_dendro_data['linkage']
+    cluster_order = cluster_dendro_data['cluster_order']
+    leaf_order = cluster_dendro_data.get('leaf_order')
+    n_clusters = len(cluster_order)
+
+    if n_clusters <= 1 or len(linkage_matrix) == 0:
+        return
+
+    # Map cluster display position to y-center
+    display_pos_y_center = {}
+    for display_idx, cluster_id in enumerate(cluster_order):
+        y_start = cluster_y_start.get(cluster_id, 0)
+        y_end = cluster_y_end.get(cluster_id, 0)
+        y_center = (y_start + y_end) / 2
+        display_pos_y_center[display_idx] = y_center
+
+    # Build mapping from linkage index to display position
+    # leaf_order[i] is the linkage index at display position i
+    linkage_idx_to_display_pos = {}
+    if leaf_order is not None:
+        for display_pos, linkage_idx in enumerate(leaf_order):
+            linkage_idx_to_display_pos[linkage_idx] = display_pos
+    else:
+        for i in range(n_clusters):
+            linkage_idx_to_display_pos[i] = i
+
+    max_distance = linkage_matrix[:, 2].max() if len(linkage_matrix) > 0 else 1
+    max_distance = max(max_distance, 1)
+
+    # Dendrogram base X (rightmost point, where leaves attach)
+    # The dendrogram occupies x=50 to x=50+dendrogram_width
+    dendro_base_x = 50 + dendrogram_width
+
+    def distance_to_x(dist):
+        """Convert distance to X pixel coordinate (higher distance = further left)."""
+        return dendro_base_x - (dist / max_distance) * (dendrogram_width - 15)
+
+    # Thin white lines
+    line_color = '#FFFFFF'
+
+    # Track node positions
+    node_y_center = {}
+    node_height = {}
+    node_display_positions = {}
+
+    def get_node_info(node_idx):
+        """Recursively get y-center, height, and display positions for a node."""
+        if node_idx in node_y_center:
+            return node_y_center[node_idx], node_height[node_idx], node_display_positions[node_idx]
+
+        if node_idx < n_clusters:
+            # Leaf node - map linkage index to display position
+            display_pos = linkage_idx_to_display_pos.get(node_idx)
+            if display_pos is None:
+                return None, 0, []
+            y = display_pos_y_center.get(display_pos, 0)
+            node_y_center[node_idx] = y
+            node_height[node_idx] = 0
+            node_display_positions[node_idx] = [display_pos]
+            return y, 0, [display_pos]
+
+        # Internal node
+        row_idx = node_idx - n_clusters
+        if row_idx >= len(linkage_matrix):
+            return None, 0, []
+
+        idx1, idx2, dist, count = linkage_matrix[row_idx]
+        idx1, idx2 = int(idx1), int(idx2)
+
+        y1, h1, positions1 = get_node_info(idx1)
+        y2, h2, positions2 = get_node_info(idx2)
+
+        if y1 is None or y2 is None:
+            return None, dist, []
+
+        all_positions = positions1 + positions2
+        # Internal node y-center should be midpoint between its two children
+        y_center = (y1 + y2) / 2
+
+        node_y_center[node_idx] = y_center
+        node_height[node_idx] = dist
+        node_display_positions[node_idx] = all_positions
+
+        return y_center, dist, all_positions
+
+    # First pass: compute all node info
+    root_idx = n_clusters + len(linkage_matrix) - 1
+    get_node_info(root_idx)
+
+    # Draw the dendrogram (horizontal lines from each child, vertical line connecting)
+    for row_idx, (idx1, idx2, dist, count) in enumerate(linkage_matrix):
+        idx1, idx2 = int(idx1), int(idx2)
+
+        y1 = node_y_center.get(idx1)
+        y2 = node_y_center.get(idx2)
+        h1 = node_height.get(idx1, 0)
+        h2 = node_height.get(idx2, 0)
+
+        if y1 is None or y2 is None:
+            continue
+
+        x_right_top = distance_to_x(h1)
+        x_right_bottom = distance_to_x(h2)
+        x_left = distance_to_x(dist)
+
+        # Horizontal lines from each child to merge point
+        d.append(draw.Line(x_right_top, y1, x_left, y1, stroke=line_color, stroke_width=1))
+        d.append(draw.Line(x_right_bottom, y2, x_left, y2, stroke=line_color, stroke_width=1))
+        # Vertical line connecting at merge point
+        d.append(draw.Line(x_left, y1, x_left, y2, stroke=line_color, stroke_width=1))
+
+    print(f"  Drew vertical dendrogram for {n_clusters} clusters")
+
+
+def draw_feature_bars_vertical(d, drawing_data, featuresets, bar_width, read_positions,
+                               num_featuresets, bar_spacing=2, background_color='black'):
+    """Draw feature bars VERTICALLY (top to bottom) for vertical mode.
+
+    In vertical mode:
+    - Reads are stacked vertically (y varies per read)
+    - Each read has horizontal feature bars extending to the right
+    - Features are drawn as horizontal rectangles at y positions based on scaled coordinates
+    - Multiple featuresets are stacked vertically within each read's bar area
+    """
+    stroke_width = 0.5
+
+    # First, draw all feature rectangles
+    for read, (x_start, y_start, bar_length) in read_positions.items():
+        if read not in drawing_data:
+            continue
+
+        for fs_idx, fs in enumerate(featuresets):
+            y_offset = fs_idx * (bar_width + bar_spacing)  # Stack featuresets vertically
+
+            for feat in drawing_data[read].get(fs, []):
+                x = x_start + feat['scaled_start']
+                width = max(2, feat['scaled_stop'] - feat['scaled_start'])  # Minimum 2px width
+
+                d.append(draw.Rectangle(
+                    x, y_start + y_offset,
+                    width, bar_width,
+                    fill=feat['color'],
+                    fill_opacity=feat.get('fill_opacity', 1.0)
+                ))
+
+    # Draw borders around each read's bar area
+    for read, (x_start, y_start, bar_length) in read_positions.items():
+        if read not in drawing_data:
+            continue
+
+        total_height = num_featuresets * bar_width + (num_featuresets - 1) * bar_spacing
+
+        # Outer border
+        d.append(draw.Rectangle(
+            x_start, y_start,
+            bar_length, total_height,
+            fill='none',
+            stroke='black',
+            stroke_width=stroke_width
+        ))
+
+        # Horizontal lines between featureset bars
+        for i in range(1, num_featuresets):
+            line_y = y_start + i * (bar_width + bar_spacing) - bar_spacing / 2
+            d.append(draw.Line(
+                x_start, line_y, x_start + bar_length, line_y,
+                stroke='black',
+                stroke_width=stroke_width
+            ))
+
+
+def draw_scale_bar(d, x_start, y_pos, ratio, text_color='white'):
+    """Draw a scale bar showing read length scale.
+
+    Args:
+        d: Drawing object
+        x_start: X position for scale bar start
+        y_pos: Y position for scale bar
+        ratio: Pixels per base pair (used for scaling)
+        text_color: Color for text and bar
+    """
+    # Choose a nice round scale bar length based on what would fit
+    # Common choices: 1kb, 2kb, 5kb, 10kb, 20kb
+    scale_options = [1000, 2000, 5000, 10000, 20000]
+
+    # Find a scale bar that's reasonably sized (50-150 pixels wide)
+    chosen_bp = 5000  # Default 5kb
+    for bp in scale_options:
+        bar_width_px = bp * ratio
+        if 50 <= bar_width_px <= 150:
+            chosen_bp = bp
+            break
+
+    bar_width_px = chosen_bp * ratio
+
+    # Format label
+    if chosen_bp >= 1000:
+        label = f"{chosen_bp // 1000} kb"
+    else:
+        label = f"{chosen_bp} bp"
+
+    # Draw scale bar line (same stroke_width=1 as dendrogram)
+    d.append(draw.Line(x_start, y_pos, x_start + bar_width_px, y_pos,
+                       stroke=text_color, stroke_width=1))
+
+    # Draw end ticks
+    tick_height = 4
+    d.append(draw.Line(x_start, y_pos - tick_height/2, x_start, y_pos + tick_height/2,
+                       stroke=text_color, stroke_width=1))
+    d.append(draw.Line(x_start + bar_width_px, y_pos - tick_height/2, x_start + bar_width_px, y_pos + tick_height/2,
+                       stroke=text_color, stroke_width=1))
+
+    # Draw label centered above
+    d.append(draw.Text(
+        label,
+        font_size=8, x=x_start + bar_width_px / 2, y=y_pos - 5,
+        fill=text_color, font_family='sans-serif', text_anchor='middle'
+    ))
+
+
+def draw_feature_bars_column_mode(d, drawing_data, featuresets, bar_width, read_y_positions,
+                                   x_start, max_bar_length, column_spacing=10, background_color='black'):
+    """Draw feature bars with each featureset in its own column.
+
+    In column mode:
+    - Each featureset gets its own column
+    - Within each column, reads are stacked vertically (one bar per read)
+    - Features extend horizontally along the read length axis
+    - Columns are separated by column_spacing
+
+    Args:
+        d: Drawing object
+        drawing_data: Dict of read -> featureset -> feature list
+        featuresets: List of featuresets to draw
+        bar_width: Height of each feature bar
+        read_y_positions: Dict of read -> y position
+        x_start: Starting x position for first column
+        max_bar_length: Maximum bar length (for consistent column width)
+        column_spacing: Gap between columns
+        background_color: Background color
+    """
+    stroke_width = 0.5
+    num_fs = len(featuresets)
+
+    # Draw each featureset as a separate column
+    for fs_idx, fs in enumerate(featuresets):
+        # Column x position
+        col_x = x_start + fs_idx * (max_bar_length + column_spacing)
+
+        # Draw features for each read in this column
+        for read, y_pos in read_y_positions.items():
+            if read not in drawing_data:
+                continue
+
+            for feat in drawing_data[read].get(fs, []):
+                x = col_x + feat['scaled_start']
+                width = max(2, feat['scaled_stop'] - feat['scaled_start'])
+
+                d.append(draw.Rectangle(
+                    x, y_pos,
+                    width, bar_width,
+                    fill=feat['color'],
+                    fill_opacity=feat.get('fill_opacity', 1.0)
+                ))
+
+        # Draw border around this column's bars for each read
+        for read, y_pos in read_y_positions.items():
+            if read not in drawing_data:
+                continue
+
+            # Get read's bar length from drawing data
+            read_bar_length = 0
+            for fs_check in featuresets:
+                for feat in drawing_data[read].get(fs_check, []):
+                    read_bar_length = max(read_bar_length, feat['scaled_stop'])
+
+            d.append(draw.Rectangle(
+                col_x, y_pos,
+                read_bar_length, bar_width,
+                fill='none',
+                stroke='black',
+                stroke_width=stroke_width
+            ))
+
+    # Calculate total width used
+    total_width = num_fs * (max_bar_length + column_spacing) - column_spacing
+    return total_width
+
+
+def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_metadata,
+                       read_assignments_file, x_start, cell_width, cell_height, text_color,
+                       background_color='black'):
+    """Draw sample × cluster read count matrix for vertical mode.
+
+    Uses FULL cluster read counts from read_assignments file, not just representatives.
+
+    Args:
+        d: Drawing object
+        cluster_ids: List of cluster IDs to include in matrix
+        cluster_y_start: Dict of cluster_id -> y start position
+        cluster_y_end: Dict of cluster_id -> y end position
+        sample_metadata: DataFrame with 'sample' and 'group' columns
+        read_assignments_file: Path to read_assignments.tsv with all reads
+        x_start: X position for matrix start
+        cell_width: Width of each cell (sample column)
+        cell_height: Height of each cell (matches bar_width typically)
+        text_color: Color for text
+        background_color: Background color ('black' or 'white')
+
+    Returns:
+        float: Total width of the matrix (for layout calculation)
+    """
+    # Load full read assignments to get complete cluster counts
+    full_df = pd.read_csv(read_assignments_file, sep='\t')
+
+    # Get all samples from metadata, ordered by group
+    if sample_metadata is not None and 'group' in sample_metadata.columns:
+        # Sort samples by group (Normal first, then Tumor/other)
+        sorted_metadata = sample_metadata.sort_values(
+            by='group',
+            key=lambda x: x.map({'Normal': 0, 'Control': 0}).fillna(1)
+        )
+        all_samples = sorted_metadata['sample'].tolist()
+        sample_groups = sorted_metadata.set_index('sample')['group'].to_dict()
+    else:
+        # Extract all unique samples from read assignments
+        all_samples = sorted(full_df['sample'].unique().tolist())
+        sample_groups = {}
+
+    n_samples = len(all_samples)
+
+    # Calculate x positions with gaps between groups
+    group_gap = 5  # Gap between Normal and Tumor groups
+    sample_x_positions = {}
+    current_x = 0
+    prev_group = None
+    for sample in all_samples:
+        group = sample_groups.get(sample)
+        if prev_group is not None and group != prev_group:
+            current_x += group_gap  # Add gap when group changes
+        sample_x_positions[sample] = current_x
+        current_x += cell_width
+        prev_group = group
+
+    total_matrix_width = current_x  # Total width including gaps
+
+    # Compute FULL read counts per cluster × sample from all assignments
+    cluster_sample_counts = {}
+    max_count = 1  # Avoid division by zero
+
+    for cluster_id in cluster_ids:
+        cluster_df = full_df[full_df['cluster'] == cluster_id]
+        counts = {sample: 0 for sample in all_samples}
+        for sample in cluster_df['sample']:
+            if sample in counts:
+                counts[sample] += 1
+        cluster_sample_counts[cluster_id] = counts
+        max_count = max(max_count, max(counts.values()) if counts.values() else 1)
+
+    # Cluster samples within each group by their count profiles
+    from scipy.cluster.hierarchy import linkage, leaves_list
+
+    # Group samples by their group
+    group_to_samples = {}
+    for sample in all_samples:
+        group = sample_groups.get(sample, 'Unknown')
+        if group not in group_to_samples:
+            group_to_samples[group] = []
+        group_to_samples[group].append(sample)
+
+    # Store linkage matrices and sample orders for dendrograms
+    # group_name -> (Z, original_samples, ordered_samples)
+    group_linkages = {}
+
+    # Cluster samples within each group
+    clustered_samples = []
+    for group_name in ['Normal', 'Control']:  # Normal/Control first
+        if group_name in group_to_samples:
+            group_samples = group_to_samples.pop(group_name)
+            original_samples = group_samples.copy()  # Keep original order for linkage indices
+            if len(group_samples) > 2:
+                # Build count matrix: samples × clusters
+                count_matrix = np.array([
+                    [cluster_sample_counts[cid].get(s, 0) for cid in cluster_ids]
+                    for s in group_samples
+                ])
+                # Cluster using log-transformed counts (but display absolute)
+                if count_matrix.sum() > 0:  # Only cluster if there's data
+                    log_matrix = np.log1p(count_matrix)  # log(1 + count)
+                    Z = linkage(log_matrix, method='ward')
+                    order = leaves_list(Z)
+                    ordered_samples = [group_samples[i] for i in order]
+                    group_linkages[group_name] = (Z, original_samples, ordered_samples)
+                    group_samples = ordered_samples
+            clustered_samples.extend(group_samples)
+
+    # Add remaining groups (Tumor, etc.) - also clustered
+    for group_name in sorted(group_to_samples.keys()):
+        group_samples = group_to_samples[group_name]
+        original_samples = group_samples.copy()
+        if len(group_samples) > 2:
+            count_matrix = np.array([
+                [cluster_sample_counts[cid].get(s, 0) for cid in cluster_ids]
+                for s in group_samples
+            ])
+            # Cluster using log-transformed counts (but display absolute)
+            if count_matrix.sum() > 0:
+                log_matrix = np.log1p(count_matrix)  # log(1 + count)
+                Z = linkage(log_matrix, method='ward')
+                order = leaves_list(Z)
+                ordered_samples = [group_samples[i] for i in order]
+                group_linkages[group_name] = (Z, original_samples, ordered_samples)
+                group_samples = ordered_samples
+        clustered_samples.extend(group_samples)
+
+    all_samples = clustered_samples
+
+    # Recalculate x positions with gaps between groups
+    sample_x_positions = {}
+    current_x = 0
+    prev_group = None
+    for sample in all_samples:
+        group = sample_groups.get(sample)
+        if prev_group is not None and group != prev_group:
+            current_x += group_gap  # Add gap when group changes
+        sample_x_positions[sample] = current_x
+        current_x += cell_width
+        prev_group = group
+
+    total_matrix_width = current_x
+
+    # Draw column headers (rotated sample names)
+    header_y = min(cluster_y_start.values()) - 5 if cluster_y_start else 30
+    for sample in all_samples:
+        x = x_start + sample_x_positions[sample] + cell_width / 2
+
+        # Sample name, rotated 90 degrees
+        d.append(draw.Text(
+            sample, font_size=7, x=x, y=header_y,
+            fill=text_color, font_family='sans-serif',
+            transform=f"rotate(-90 {x} {header_y})",
+            text_anchor='start'
+        ))
+
+    # Draw cells for each cluster
+    for cluster_id in cluster_y_start:
+        if cluster_id not in cluster_sample_counts:
+            continue
+
+        y_mid = (cluster_y_start[cluster_id] + cluster_y_end[cluster_id]) / 2
+        y = y_mid - cell_height / 2
+
+        for sample in all_samples:
+            x = x_start + sample_x_positions[sample]
+            count = cluster_sample_counts[cluster_id].get(sample, 0)
+
+            # Heatmap color intensity based on count (log-scaled)
+            # Use 2-color sequential scale: dark -> yellow (for black background)
+            # Log scaling helps visualize low values when max is high
+            import math
+            if count == 0:
+                intensity = 0
+            elif max_count > 1:
+                # log1p scaling: log(1+count) / log(1+max_count)
+                intensity = math.log1p(count) / math.log1p(max_count)
+            else:
+                intensity = 1.0
+
+            if count == 0:
+                # Zero counts: dark background
+                fill_color = '#1a1a1a' if background_color == 'black' else '#f0f0f0'
+            else:
+                # Sequential 2-color: dark gray -> yellow
+                # Interpolate from #333333 (dark) to #ffff00 (yellow)
+                r = int(51 + intensity * (255 - 51))  # 51 -> 255
+                g = int(51 + intensity * (255 - 51))  # 51 -> 255
+                b = int(51 * (1 - intensity))          # 51 -> 0
+                fill_color = f'#{r:02x}{g:02x}{b:02x}'
+
+            # Draw cell with white border
+            d.append(draw.Rectangle(
+                x, y,
+                cell_width, cell_height,
+                fill=fill_color,
+                stroke='#FFFFFF',
+                stroke_width=0.5
+            ))
+
+            # Draw count text - always show the number
+            if count > 0:
+                # Text color contrasts with cell - white for dark cells, black for bright
+                count_text_color = '#000000' if intensity > 0.4 else '#ffffff'
+                font_size = 5 if cell_width >= 10 else 4
+                d.append(draw.Text(
+                    str(count), font_size=font_size, x=x + cell_width / 2, y=y + cell_height / 2 + 2,
+                    fill=count_text_color, font_family='sans-serif',
+                    text_anchor='middle'
+                ))
+            else:
+                # Always show "0" for zero counts - lighter color for visibility
+                d.append(draw.Text(
+                    '0', font_size=4, x=x + cell_width / 2, y=y + cell_height / 2 + 1.5,
+                    fill='#666666', font_family='sans-serif',
+                    text_anchor='middle'
+                ))
+
+    # Return data needed for bar plot and dendrogram
+    return {
+        'width': total_matrix_width,
+        'sample_x_positions': sample_x_positions,
+        'cluster_sample_counts': cluster_sample_counts,
+        'all_samples': all_samples,
+        'sample_groups': sample_groups,
+        'group_linkages': group_linkages,
+        'cell_width': cell_width,
+        'max_count': max_count
+    }
+
+
+def draw_matrix_legend(d, x_start, y_start, max_count, text_color='white', background_color='black'):
+    """Draw a legend for the matrix color scale (log-scaled).
+
+    Args:
+        d: Drawing object
+        x_start: X position for legend start
+        y_start: Y position for legend
+        max_count: Maximum count value in the matrix
+        text_color: Color for text
+        background_color: Background color ('black' or 'white')
+    """
+    import math
+
+    legend_width = 100
+    legend_height = 10
+    n_steps = 20
+
+    # Title
+    d.append(draw.Text(
+        "Read Count (log scale)",
+        font_size=9, x=x_start, y=y_start,
+        fill=text_color, font_family='sans-serif', font_weight='bold'
+    ))
+
+    bar_y = y_start + 12
+
+    # Draw gradient bar (using same log scaling as matrix)
+    step_width = legend_width / n_steps
+    for i in range(n_steps):
+        intensity = i / (n_steps - 1)
+        # Same color calculation as matrix cells
+        r = int(51 + intensity * (255 - 51))
+        g = int(51 + intensity * (255 - 51))
+        b = int(51 * (1 - intensity))
+        fill_color = f'#{r:02x}{g:02x}{b:02x}'
+
+        d.append(draw.Rectangle(
+            x_start + i * step_width, bar_y,
+            step_width + 0.5, legend_height,  # +0.5 to avoid gaps
+            fill=fill_color, stroke='none'
+        ))
+
+    # Border around gradient bar
+    d.append(draw.Rectangle(
+        x_start, bar_y, legend_width, legend_height,
+        fill='none', stroke=text_color, stroke_width=0.5
+    ))
+
+    # Labels - show a few tick marks on log scale
+    label_y = bar_y + legend_height + 10
+    d.append(draw.Text(
+        "0", font_size=7, x=x_start, y=label_y,
+        fill=text_color, font_family='sans-serif', text_anchor='start'
+    ))
+
+    # Add intermediate tick at log midpoint
+    if max_count > 10:
+        mid_val = int(math.sqrt(max_count))  # Geometric midpoint
+        mid_intensity = math.log1p(mid_val) / math.log1p(max_count)
+        mid_x = x_start + mid_intensity * legend_width
+        d.append(draw.Text(
+            str(mid_val), font_size=7, x=mid_x, y=label_y,
+            fill=text_color, font_family='sans-serif', text_anchor='middle'
+        ))
+
+    d.append(draw.Text(
+        str(max_count), font_size=7, x=x_start + legend_width, y=label_y,
+        fill=text_color, font_family='sans-serif', text_anchor='end'
+    ))
+
+
+def draw_sample_bar_plot(d, matrix_data, cluster_ids, cluster_enrichments, x_start, y_start,
+                          cell_width, bar_height, text_color, background_color='black'):
+    """Draw stacked vertical bar plot showing reads per sample by enrichment type.
+
+    Args:
+        d: Drawing object
+        matrix_data: Dict returned from draw_sample_matrix containing sample info
+        cluster_ids: List of cluster IDs included in the matrix
+        cluster_enrichments: Dict of cluster_id -> enrichment type
+        x_start: X position for bar plot start (same as matrix)
+        y_start: Y position for bar plot top
+        cell_width: Width of each bar (matches matrix cell width)
+        bar_height: Maximum height of bars
+        text_color: Color for text labels
+        background_color: Background color ('black' or 'white')
+    """
+    sample_x_positions = matrix_data['sample_x_positions']
+    cluster_sample_counts = matrix_data['cluster_sample_counts']
+    all_samples = matrix_data['all_samples']
+
+    # Colors for enrichment types
+    enrichment_colors = {
+        'Normal-enriched': '#3b82f6',  # Blue
+        'Tumor-enriched': '#ef4444',   # Red
+        'mixed': '#9ca3af'             # Gray
+    }
+
+    # Compute reads per sample by enrichment type
+    sample_enrichment_counts = {sample: {'Normal-enriched': 0, 'Tumor-enriched': 0, 'mixed': 0}
+                                 for sample in all_samples}
+    sample_totals = {sample: 0 for sample in all_samples}
+
+    for cid in cluster_ids:
+        enrichment = cluster_enrichments.get(cid, 'mixed')
+        for sample in all_samples:
+            count = cluster_sample_counts.get(cid, {}).get(sample, 0)
+            sample_enrichment_counts[sample][enrichment] += count
+            sample_totals[sample] += count
+
+    max_total = max(sample_totals.values()) if sample_totals.values() else 1
+
+    # Draw stacked bars growing downward from y_start
+    # Use thinner bars (max 8px) to match row barplot thickness
+    thin_bar_width = min(cell_width - 2, 8)
+
+    for sample in all_samples:
+        # Center the thin bar within the cell
+        x = x_start + sample_x_positions[sample] + (cell_width - thin_bar_width) / 2
+        current_y = y_start
+
+        # Stack order: Normal-enriched, mixed, Tumor-enriched (bottom to top visually = top to bottom in y)
+        for enrichment in ['Normal-enriched', 'mixed', 'Tumor-enriched']:
+            count = sample_enrichment_counts[sample][enrichment]
+            if count > 0:
+                bar_len = (count / max_total) * bar_height
+                color = enrichment_colors.get(enrichment, '#888888')
+
+                d.append(draw.Rectangle(
+                    x, current_y,
+                    thin_bar_width, bar_len,
+                    fill=color,
+                    stroke='none'
+                ))
+                current_y += bar_len
+
+    # Draw axis line on the left
+    axis_x = x_start - 3
+    d.append(draw.Line(
+        axis_x, y_start, axis_x, y_start + bar_height,
+        stroke=text_color, stroke_width=1
+    ))
+
+    # Add tick marks and labels for axis
+    tick_values = [0, max_total // 2, max_total]
+    for val in tick_values:
+        tick_y = y_start + (val / max_total) * bar_height if max_total > 0 else y_start
+        # Tick mark
+        d.append(draw.Line(
+            axis_x - 3, tick_y, axis_x, tick_y,
+            stroke=text_color, stroke_width=1
+        ))
+        # Label
+        d.append(draw.Text(
+            str(val), font_size=6,
+            x=axis_x - 5, y=tick_y + 2,
+            fill=text_color, font_family='sans-serif',
+            text_anchor='end'
+        ))
+
+
+def draw_cluster_bar_plot(d, matrix_data, cluster_ids, cluster_y_start, cluster_y_end,
+                          cluster_enrichments, x_start, bar_max_width, text_color, background_color='black'):
+    """Draw horizontal stacked bar plot showing tumor vs normal reads per cluster (row sums).
+
+    Args:
+        d: Drawing object
+        matrix_data: Dict returned from draw_sample_matrix containing sample info
+        cluster_ids: List of cluster IDs
+        cluster_y_start: Dict of cluster_id -> y_start position
+        cluster_y_end: Dict of cluster_id -> y_end position
+        cluster_enrichments: Dict of cluster_id -> enrichment type (unused, kept for API compat)
+        x_start: X position for bar plot start (right edge of matrix)
+        bar_max_width: Maximum width of bars
+        text_color: Color for text labels
+        background_color: Background color ('black' or 'white')
+    """
+    cluster_sample_counts = matrix_data['cluster_sample_counts']
+    all_samples = matrix_data['all_samples']
+    sample_groups = matrix_data.get('sample_groups', {})
+
+    # Colors for sample groups
+    group_colors = {
+        'Normal': '#3b82f6',  # Blue
+        'Tumor': '#ef4444',   # Red
+    }
+
+    # Separate samples by group
+    normal_samples = [s for s in all_samples if sample_groups.get(s) == 'Normal']
+    tumor_samples = [s for s in all_samples if sample_groups.get(s) == 'Tumor']
+
+    # Compute reads per cluster by group
+    cluster_group_counts = {}
+    cluster_totals = {}
+    for cid in cluster_ids:
+        normal_count = sum(cluster_sample_counts.get(cid, {}).get(sample, 0) for sample in normal_samples)
+        tumor_count = sum(cluster_sample_counts.get(cid, {}).get(sample, 0) for sample in tumor_samples)
+        cluster_group_counts[cid] = {'Normal': normal_count, 'Tumor': tumor_count}
+        cluster_totals[cid] = normal_count + tumor_count
+
+    max_total = max(cluster_totals.values()) if cluster_totals.values() else 1
+
+    # Draw horizontal stacked bars for each cluster
+    for cid in cluster_ids:
+        if cid not in cluster_y_start:
+            continue
+
+        y_start = cluster_y_start[cid]
+        y_end = cluster_y_end[cid]
+        y_center = (y_start + y_end) / 2
+        bar_height = min(y_end - y_start - 2, 8)  # Bar height, max 8px
+
+        current_x = x_start
+        # Stack order: Normal first (blue), then Tumor (red)
+        for group in ['Normal', 'Tumor']:
+            count = cluster_group_counts.get(cid, {}).get(group, 0)
+            if count > 0:
+                bar_width = (count / max_total) * bar_max_width
+                color = group_colors.get(group, '#888888')
+
+                d.append(draw.Rectangle(
+                    current_x, y_center - bar_height / 2,
+                    bar_width, bar_height,
+                    fill=color,
+                    stroke='none'
+                ))
+                current_x += bar_width
+
+    # Draw axis line on top
+    axis_y = min(cluster_y_start.values()) - 5
+    d.append(draw.Line(
+        x_start, axis_y, x_start + bar_max_width, axis_y,
+        stroke=text_color, stroke_width=1
+    ))
+
+    # Add tick marks and labels for axis
+    tick_values = [0, max_total // 2, max_total]
+    for val in tick_values:
+        tick_x = x_start + (val / max_total) * bar_max_width if max_total > 0 else x_start
+        # Tick mark
+        d.append(draw.Line(
+            tick_x, axis_y - 3, tick_x, axis_y,
+            stroke=text_color, stroke_width=1
+        ))
+        # Label
+        d.append(draw.Text(
+            str(val), font_size=6,
+            x=tick_x, y=axis_y - 5,
+            fill=text_color, font_family='sans-serif',
+            text_anchor='middle'
+        ))
+
+
+def draw_sample_dendrogram(d, matrix_data, x_start, y_bottom, dendro_height, line_color='#FFFFFF'):
+    """Draw horizontal dendrogram above sample columns for each group.
+
+    Args:
+        d: Drawing object
+        matrix_data: Dict returned from draw_sample_matrix
+        x_start: X position where matrix starts
+        y_bottom: Y position of dendrogram bottom (top of matrix headers)
+        dendro_height: Height of dendrogram area
+        line_color: Color for dendrogram lines
+    """
+    group_linkages = matrix_data.get('group_linkages', {})
+    sample_x_positions = matrix_data['sample_x_positions']
+    cell_width = matrix_data['cell_width']
+
+    if not group_linkages:
+        return
+
+    # Draw dendrogram for each group
+    for group_name, (Z, original_samples, ordered_samples) in group_linkages.items():
+        n = len(original_samples)
+        if n < 2:
+            continue
+
+        # Build sample to x-center mapping using DISPLAY positions
+        sample_to_x = {}
+        for sample in ordered_samples:
+            sample_to_x[sample] = x_start + sample_x_positions[sample] + cell_width / 2
+
+        # Normalize heights to fit in dendro_height
+        max_height = Z[:, 2].max() if len(Z) > 0 else 1
+        height_scale = (dendro_height - 5) / max_height if max_height > 0 else 1
+
+        # Track node positions: node_id -> x_center
+        # Leaf nodes are 0 to n-1 (indices into ORIGINAL sample order)
+        # Internal nodes are n to 2n-2
+        node_x = {}
+        node_y = {}  # y position of the node (bottom of its subtree connection)
+
+        # Initialize leaf nodes - linkage index i refers to original_samples[i]
+        # but we need to look up the x position from the reordered display
+        for i, sample in enumerate(original_samples):
+            node_x[i] = sample_to_x[sample]  # Use display position of this sample
+            node_y[i] = y_bottom
+
+        # Process each merge in the linkage matrix
+        for i, (left, right, height, _) in enumerate(Z):
+            left, right = int(left), int(right)
+            new_node = n + i
+
+            # X position is midpoint of children
+            x_left = node_x[left]
+            x_right = node_x[right]
+            x_mid = (x_left + x_right) / 2
+            node_x[new_node] = x_mid
+
+            # Y position based on height (growing upward from y_bottom)
+            y_node = y_bottom - height * height_scale
+            node_y[new_node] = y_node
+
+            # Draw horizontal line connecting children
+            d.append(draw.Line(
+                x_left, y_node, x_right, y_node,
+                stroke=line_color, stroke_width=1
+            ))
+
+            # Draw vertical lines down to children
+            d.append(draw.Line(
+                x_left, y_node, x_left, node_y[left],
+                stroke=line_color, stroke_width=1
+            ))
+            d.append(draw.Line(
+                x_right, y_node, x_right, node_y[right],
+                stroke=line_color, stroke_width=1
+            ))
+
+
+def draw_cluster_labels_vertical(d, cluster_y_start, cluster_y_end, x_start, text_color,
+                                  cluster_labels=None, enrichment_colors=None, cluster_enrichments=None):
+    """Draw cluster labels on the RIGHT side for vertical mode (names only, no brackets).
+
+    Args:
+        d: Drawing object
+        cluster_y_start: Dict of cluster_id -> y start position
+        cluster_y_end: Dict of cluster_id -> y end position
+        x_start: X position for labels
+        text_color: Default text color
+        cluster_labels: Dict of cluster_id -> custom label text
+        enrichment_colors: Optional dict of enrichment -> color for coloring labels
+        cluster_enrichments: Optional dict of cluster_id -> enrichment for coloring
+    """
+    if cluster_labels is None:
+        cluster_labels = {}
+
+    for cluster_id in cluster_y_start:
+        y_start = cluster_y_start[cluster_id]
+        y_end = cluster_y_end[cluster_id]
+        label_y = (y_start + y_end) / 2
+
+        # Get label text - include cluster ID in parenthesis for named clusters
+        if cluster_id in cluster_labels and cluster_labels[cluster_id]:
+            label_text = f"{cluster_labels[cluster_id]} ({cluster_id})"
+        else:
+            label_text = f"Cluster {cluster_id}"
+
+        # Get color based on enrichment if available
+        if enrichment_colors and cluster_enrichments and cluster_id in cluster_enrichments:
+            enrichment = cluster_enrichments[cluster_id]
+            color = enrichment_colors.get(enrichment, text_color)
+        else:
+            color = text_color
+
+        d.append(draw.Text(
+            label_text,
+            font_size=9, x=x_start, y=label_y + 3,
+            fill=color, font_family='sans-serif',
+            text_anchor='start', font_weight='bold'
+        ))
+
+
+def draw_read_index_labels(d, cluster_reads, read_y_positions, x_position, bar_width, text_color='white'):
+    """Draw index labels (1, 2, 3, ...) for each read within each cluster.
+
+    Args:
+        d: Drawing object
+        cluster_reads: OrderedDict of cluster_id -> {'enrichment': str, 'reads': list of (read, sample)}
+        read_y_positions: Dict of read -> y position
+        x_position: X position for the labels (right side of feature bars)
+        bar_width: Height of each read bar (for vertical centering)
+        text_color: Color for the labels
+    """
+    for cluster_id, data in cluster_reads.items():
+        if cluster_id == 'all':
+            continue
+        for idx, (read, sample) in enumerate(data['reads'], 1):
+            if read not in read_y_positions:
+                continue
+            y_pos = read_y_positions[read]
+            # Center the label vertically on the read bar
+            label_y = y_pos + bar_width / 2 + 3
+            d.append(draw.Text(
+                str(idx),
+                font_size=7, x=x_position, y=label_y,
+                fill=text_color, font_family='sans-serif',
+                text_anchor='start'
+            ))
+
+
+def draw_enrichment_bubbles(d, cluster_y_start, cluster_y_end, x_center, cluster_stats,
+                            max_radius=8, min_radius=2):
+    """Draw enrichment bubbles next to tree tips in vertical mode.
+
+    Args:
+        d: Drawing object
+        cluster_y_start: Dict of cluster_id -> y start position
+        cluster_y_end: Dict of cluster_id -> y end position
+        x_center: X position for bubble centers
+        cluster_stats: Dict of cluster_id -> {'odds_ratio': float, 'size': int, 'q_value': float}
+        max_radius: Maximum bubble radius in pixels
+        min_radius: Minimum bubble radius in pixels
+
+    Bubble encoding:
+        - Color: log2(odds_ratio) mapped to diverging colormap (blue=Normal, red=Tumor)
+        - Size: cluster size (number of reads)
+        - Alpha: -log10(q_value) mapped to opacity (more significant = more opaque)
+    """
+    import math
+
+    if not cluster_stats:
+        return
+
+    # Get ranges for normalization
+    sizes = [s['size'] for s in cluster_stats.values() if s['size'] > 0]
+    if not sizes:
+        return
+
+    min_size = min(sizes)
+    max_size = max(sizes)
+    size_range = max_size - min_size if max_size > min_size else 1
+
+    # Max log2(OR) for color scaling (cap at 4 for visualization)
+    max_log2_or = 4.0
+
+    for cluster_id in cluster_y_start:
+        if cluster_id not in cluster_stats:
+            continue
+
+        stats = cluster_stats[cluster_id]
+        odds_ratio = stats.get('odds_ratio', 1.0)
+        size = stats.get('size', 0)
+        q_value = stats.get('q_value', 1.0)
+
+        if size == 0:
+            continue
+
+        # Y position (center of cluster)
+        y_start = cluster_y_start[cluster_id]
+        y_end = cluster_y_end[cluster_id]
+        y_center = (y_start + y_end) / 2
+
+        # Size -> radius (linear scaling)
+        size_norm = (size - min_size) / size_range if size_range > 0 else 0.5
+        radius = min_radius + size_norm * (max_radius - min_radius)
+
+        # log2(OR) -> color (diverging: red for OR<1 Tumor, blue for OR>1 Normal)
+        log2_or = math.log2(odds_ratio) if odds_ratio > 0 else 0
+        # Clamp to [-max_log2_or, max_log2_or]
+        log2_or_clamped = max(-max_log2_or, min(max_log2_or, log2_or))
+        # Normalize to [-1, 1]
+        color_norm = log2_or_clamped / max_log2_or
+
+        # Diverging colormap: red (Tumor-enriched, OR<1) to blue (Normal-enriched, OR>1)
+        if color_norm < 0:
+            # Red side (Tumor-enriched, OR<1): interpolate white to red
+            intensity = abs(color_norm)
+            r = 255
+            g = int(255 * (1 - intensity))
+            b = int(255 * (1 - intensity))
+        else:
+            # Blue side (Normal-enriched, OR>1): interpolate white to blue
+            intensity = color_norm
+            r = int(255 * (1 - intensity))
+            g = int(255 * (1 - intensity))
+            b = 255
+
+        color = f'rgb({r},{g},{b})'
+
+        # q_value -> alpha (more significant = more opaque)
+        # Use -log10(q_value), capped at 10 (q=1e-10)
+        if q_value > 0:
+            neg_log_q = -math.log10(q_value)
+        else:
+            neg_log_q = 10  # Very significant
+        neg_log_q = min(10, max(0, neg_log_q))
+        # Map to alpha: 0.3 (q=1) to 1.0 (q<=1e-10)
+        alpha = 0.3 + 0.7 * (neg_log_q / 10)
+
+        # Draw the bubble
+        d.append(draw.Circle(
+            x_center, y_center, radius,
+            fill=color, fill_opacity=alpha,
+            stroke='white', stroke_width=0.5
+        ))
+
+
+def draw_bubble_legend(d, x_start, y_start, cluster_stats, text_color='white', max_radius=8, min_radius=2):
+    """Draw a legend explaining the enrichment bubble encoding.
+
+    Args:
+        d: Drawing object
+        x_start: X position to start the legend
+        y_start: Y position for legend
+        cluster_stats: Dict with cluster stats (for computing size range)
+        text_color: Color for legend text
+        max_radius: Maximum bubble radius
+        min_radius: Minimum bubble radius
+    """
+    import math
+
+    if not cluster_stats:
+        return
+
+    # Get size range for legend
+    sizes = [s['size'] for s in cluster_stats.values() if s['size'] > 0]
+    if not sizes:
+        return
+    min_size = min(sizes)
+    max_size = max(sizes)
+
+    font_size = 9
+    legend_y = y_start
+
+    # Title
+    d.append(draw.Text(
+        "Enrichment Bubble Legend",
+        font_size=10, x=x_start, y=legend_y,
+        fill=text_color, font_family='sans-serif', font_weight='bold'
+    ))
+    legend_y += 18
+
+    # --- Color legend (log2 FC) ---
+    d.append(draw.Text(
+        "Color: log₂(Odds Ratio)",
+        font_size=font_size, x=x_start, y=legend_y,
+        fill=text_color, font_family='sans-serif'
+    ))
+    legend_y += 14
+
+    # Draw color gradient with labels
+    gradient_width = 120
+    gradient_height = 10
+    n_steps = 20
+    step_width = gradient_width / n_steps
+
+    for i in range(n_steps):
+        # Map i to [-1, 1]
+        color_norm = (i / (n_steps - 1)) * 2 - 1
+        # Red (Tumor, OR<1) on left, Blue (Normal, OR>1) on right
+        if color_norm < 0:
+            # Red side (Tumor)
+            intensity = abs(color_norm)
+            r = 255
+            g = int(255 * (1 - intensity))
+            b = int(255 * (1 - intensity))
+        else:
+            # Blue side (Normal)
+            intensity = color_norm
+            r = int(255 * (1 - intensity))
+            g = int(255 * (1 - intensity))
+            b = 255
+        color = f'rgb({r},{g},{b})'
+
+        d.append(draw.Rectangle(
+            x_start + i * step_width, legend_y,
+            step_width + 1, gradient_height,
+            fill=color, stroke='none'
+        ))
+
+    # Gradient labels
+    legend_y += gradient_height + 12
+    d.append(draw.Text("-4", font_size=8, x=x_start, y=legend_y,
+                       fill=text_color, font_family='sans-serif', text_anchor='start'))
+    d.append(draw.Text("0", font_size=8, x=x_start + gradient_width/2, y=legend_y,
+                       fill=text_color, font_family='sans-serif', text_anchor='middle'))
+    d.append(draw.Text("+4", font_size=8, x=x_start + gradient_width, y=legend_y,
+                       fill=text_color, font_family='sans-serif', text_anchor='end'))
+    d.append(draw.Text("(Tumor)", font_size=7, x=x_start, y=legend_y + 10,
+                       fill='#ff6666', font_family='sans-serif', text_anchor='start'))
+    d.append(draw.Text("(Normal)", font_size=7, x=x_start + gradient_width, y=legend_y + 10,
+                       fill='#6666ff', font_family='sans-serif', text_anchor='end'))
+
+    # --- Size legend ---
+    size_x = x_start + gradient_width + 40
+    size_y = y_start + 18
+
+    d.append(draw.Text(
+        "Size: # reads",
+        font_size=font_size, x=size_x, y=size_y,
+        fill=text_color, font_family='sans-serif'
+    ))
+    size_y += 16
+
+    # Create sensible size breakpoints based on data range
+    size_range = max_size - min_size
+    if size_range > 0:
+        # Pick 3 representative sizes: small, medium, large
+        size_values = [min_size, int(min_size + size_range * 0.5), max_size]
+        # Remove duplicates and sort
+        size_values = sorted(set(size_values))
+    else:
+        size_values = [min_size]
+
+    # Draw example bubbles for each size
+    bubble_x_offset = 0
+    for size_val in size_values:
+        size_norm = (size_val - min_size) / size_range if size_range > 0 else 0.5
+        radius = min_radius + size_norm * (max_radius - min_radius)
+        d.append(draw.Circle(size_x + bubble_x_offset + radius, size_y + 5, radius,
+                             fill='white', fill_opacity=0.8, stroke='gray', stroke_width=0.5))
+        d.append(draw.Text(f"{size_val}", font_size=7, x=size_x + bubble_x_offset + radius, y=size_y + 18,
+                           fill=text_color, font_family='sans-serif', text_anchor='middle'))
+        bubble_x_offset += radius * 2 + 15
+
+    # --- Alpha/FDR legend ---
+    alpha_x = size_x + bubble_x_offset + 20
+    alpha_y = y_start + 18
+
+    d.append(draw.Text(
+        "Opacity: FDR",
+        font_size=font_size, x=alpha_x, y=alpha_y,
+        fill=text_color, font_family='sans-serif'
+    ))
+    alpha_y += 16
+
+    # Draw example bubbles for alpha
+    for i, (alpha, label) in enumerate([(0.3, "1"), (0.65, "0.01"), (1.0, "<1e-10")]):
+        cx = alpha_x + i * 40
+        d.append(draw.Circle(cx + 5, alpha_y + 5, 5,
+                             fill='white', fill_opacity=alpha, stroke='gray', stroke_width=0.5))
+        d.append(draw.Text(label, font_size=7, x=cx + 5, y=alpha_y + 18,
+                           fill=text_color, font_family='sans-serif', text_anchor='middle'))
+
+
+def draw_enrichment_text_legend(d, x_start, y_start, enrichment_colors, text_color='white'):
+    """Draw a legend explaining the text color encoding for cluster labels.
+
+    Args:
+        d: Drawing object
+        x_start: X position to start the legend
+        y_start: Y position for legend
+        enrichment_colors: Dict of enrichment -> color
+        text_color: Color for legend text
+    """
+    if not enrichment_colors:
+        return
+
+    font_size = 9
+    legend_y = y_start
+
+    # Title
+    d.append(draw.Text(
+        "Cluster Label Colors",
+        font_size=10, x=x_start, y=legend_y,
+        fill=text_color, font_family='sans-serif', font_weight='bold'
+    ))
+    legend_y += 16
+
+    # Draw color legend entries horizontally
+    entry_spacing = 120
+    x_offset = 0
+
+    for enrichment, color in sorted(enrichment_colors.items()):
+        # Draw colored square
+        d.append(draw.Rectangle(
+            x_start + x_offset, legend_y - 7,
+            10, 10,
+            fill=color, stroke='none'
+        ))
+        # Draw label
+        d.append(draw.Text(
+            enrichment,
+            font_size=font_size, x=x_start + x_offset + 14, y=legend_y,
+            fill=text_color, font_family='sans-serif'
+        ))
+        x_offset += entry_spacing
+
+
+def draw_cluster_brackets_vertical(d, cluster_reads, cluster_y_start, cluster_y_end,
+                                   enrichment_colors, read_positions, label_width, text_color,
+                                   right_margin, cluster_labels=None):
+    """Draw cluster brackets on the RIGHT side for vertical mode (with brackets and enrichment)."""
+    if cluster_labels is None:
+        cluster_labels = {}
+
+    for cluster_id, data in cluster_reads.items():
+        if cluster_id == 'all':
+            continue
+
+        y_start = cluster_y_start[cluster_id]
+        y_end = cluster_y_end[cluster_id]
+        enrichment = data['enrichment']
+        color = enrichment_colors.get(enrichment, '#999999')
+
+        # Find the rightmost x of reads in this cluster
+        cluster_max_x = 0
+        for read, sample in data['reads']:
+            if read in read_positions:
+                x_start, _, _ = read_positions[read]
+                cluster_max_x = max(cluster_max_x, x_start + label_width)
+
+        bracket_x = cluster_max_x + 10
+
+        # Draw bracket (vertical line on right, horizontal lines pointing left)
+        d.append(draw.Line(bracket_x, y_start, bracket_x, y_end, stroke=color, stroke_width=3))
+        d.append(draw.Line(bracket_x, y_start, bracket_x - 8, y_start, stroke=color, stroke_width=2))
+        d.append(draw.Line(bracket_x, y_end, bracket_x - 8, y_end, stroke=color, stroke_width=2))
+
+        # Labels to the right of bracket
+        label_y = (y_start + y_end) / 2
+
+        if cluster_id in cluster_labels:
+            label_text = cluster_labels[cluster_id]
+            label_font_size = 9
+        else:
+            label_text = f"c{cluster_id}"
+            label_font_size = 10
+
+        d.append(draw.Text(
+            label_text,
+            font_size=label_font_size, x=bracket_x + 5, y=label_y - 8,
+            fill=color, font_family='sans-serif',
+            text_anchor='start', font_weight='bold'
+        ))
+
+        d.append(draw.Text(
+            enrichment,
+            font_size=8, x=bracket_x + 5, y=label_y + 8,
+            fill=color, font_family='sans-serif', text_anchor='start'
         ))
 
 
@@ -1537,27 +3270,171 @@ def draw_density_line_legend(d, density_line_colors, rect_plot_colors, legend_x,
             current_x += 25 + len(display_name) * 6 + 20
 
 
+def _find_common_label(feature_names):
+    """
+    Find a common/generic label for multiple features that share a color.
+
+    Examples:
+        - ['multigroup1', 'multigroup2', 'multigroup3'] → 'multigroup'
+        - ['centromeric_multigroup1', 'hsat_multigroup1'] → 'multigroup'
+        - ['p_arm_specific', 'q_arm_specific'] → 'arm'
+        - ['chr1_specific', 'chr2_specific'] → 'chromosome'
+    """
+    import re
+
+    if not feature_names:
+        return 'unknown'
+
+    # Clean up names: remove _specific suffix and replace _ with space
+    def clean_name(f):
+        name = f.replace('_specific', '').replace('_', ' ')
+        # Strip trailing numbers from multigroup names
+        if 'multigroup' in name.lower():
+            name = re.sub(r'\s*\d+$', '', name).rstrip()
+        return name
+
+    cleaned = [clean_name(f) for f in feature_names]
+
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_cleaned = []
+    for name in cleaned:
+        if name not in seen:
+            seen.add(name)
+            unique_cleaned.append(name)
+
+    # Check if all unique features are just "multigroup" variants
+    if all('multigroup' in name.lower() for name in unique_cleaned):
+        return 'multigroup'
+
+    # Check if all features contain "arm" - use generic "arm"
+    if all('arm' in name.lower() for name in unique_cleaned):
+        return 'arm'
+
+    # If only one unique name after cleaning, return it
+    if len(unique_cleaned) == 1:
+        return unique_cleaned[0]
+
+    # Check for numbered suffixes with same base
+    base_names = set()
+    for name in unique_cleaned:
+        base = re.sub(r'\d+$', '', name).strip()
+        base_names.add(base)
+
+    if len(base_names) == 1:
+        return base_names.pop()
+
+    # Find longest common prefix
+    if unique_cleaned:
+        prefix = unique_cleaned[0]
+        for name in unique_cleaned[1:]:
+            while not name.startswith(prefix) and prefix:
+                prefix = prefix[:-1]
+        if len(prefix) >= 3:  # Minimum meaningful prefix
+            return prefix.rstrip()
+
+    # Fallback: use first cleaned name
+    return unique_cleaned[0] if unique_cleaned else 'unknown'
+
+
 def draw_color_legends(d, featuresets, featureset_colors, featureset_color_order,
-                       fs_display_names, color_legend_y_start, left_margin, text_color):
-    """Draw featureset color legends at bottom."""
+                       fs_display_names, color_legend_y_start, left_margin, text_color,
+                       displayed_features=None):
+    """Draw featureset color legends at bottom.
+
+    Args:
+        d: Drawing object
+        featuresets: List of featuresets to include
+        featureset_colors: Dict of fs -> feature -> (color, opacity)
+        featureset_color_order: Dict of fs -> list of feature names (ordering)
+        fs_display_names: Dict of fs -> display name
+        color_legend_y_start: Y position to start legend
+        left_margin: Left margin for positioning
+        text_color: Color for text
+        displayed_features: Optional dict of fs -> set of actually displayed features.
+                           If provided, only these features are shown in the legend,
+                           grouped by color with common labels.
+    """
+    import re
+
     color_box_size = 10
     color_text_offset = 14
     colors_per_column = 12  # More items per column = fewer columns
     item_width = 120  # Narrower columns
     row_height = 14  # Tighter row spacing
 
+    # Build legend items for each featureset
+    # If displayed_features is provided, filter and group by color
+    legend_items = {}  # fs -> list of (color, display_name)
+
+    for fs in featuresets:
+        fs_colors = featureset_colors.get(fs, {})
+
+        if displayed_features is not None and fs in displayed_features:
+            # Filter to only displayed features, group by color
+            fs_displayed = displayed_features.get(fs, set())
+            if not fs_displayed:
+                legend_items[fs] = []
+                continue
+
+            # Group features by color
+            color_to_features = {}
+            for feature_name in fs_displayed:
+                color_info = fs_colors.get(feature_name)
+                if color_info is None:
+                    color_hex = '#808080'  # Default gray for unknown features
+                elif isinstance(color_info, tuple):
+                    color_hex = color_info[0]
+                else:
+                    color_hex = color_info
+                if color_hex not in color_to_features:
+                    color_to_features[color_hex] = []
+                color_to_features[color_hex].append(feature_name)
+
+            # Sort by feature name for consistency
+            sorted_items = sorted(color_to_features.items(), key=lambda x: x[1][0] if x[1] else '')
+
+            items = []
+            for color_hex, feature_names in sorted_items:
+                if len(feature_names) > 1:
+                    display_name = _find_common_label(feature_names)
+                else:
+                    # Single feature - clean up and strip trailing numbers from multigroup names
+                    display_name = feature_names[0].replace('_', ' ').replace(' specific', '')
+                    if 'multigroup' in display_name.lower():
+                        display_name = re.sub(r'\d+$', '', display_name).rstrip()
+                items.append((color_hex, display_name))
+            legend_items[fs] = items
+        else:
+            # No filtering - use all features in order
+            items = []
+            for feature_name in featureset_color_order.get(fs, []):
+                color, opacity = fs_colors.get(feature_name, ("#ffffff", 1.0))
+                items.append((color, feature_name))
+            legend_items[fs] = items
+
     def get_featureset_width(fs):
-        num_items = len(featureset_color_order[fs])
+        num_items = len(legend_items.get(fs, []))
+        if num_items == 0:
+            return 0
         num_cols = (num_items + colors_per_column - 1) // colors_per_column
         return max(num_cols * item_width, 100)
 
+    # Calculate x positions for each featureset
     featureset_legend_x = {}
     current_legend_x = left_margin
     for fs in featuresets:
+        if not legend_items.get(fs):
+            continue
         featureset_legend_x[fs] = current_legend_x
         current_legend_x += get_featureset_width(fs) + 15  # Reduced spacing between sections
 
+    # Draw legends
     for fs in featuresets:
+        items = legend_items.get(fs, [])
+        if not items:
+            continue
+
         section_x = featureset_legend_x[fs]
         display_name = fs_display_names.get(fs, fs)
 
@@ -1566,9 +3443,7 @@ def draw_color_legends(d, featuresets, featureset_colors, featureset_color_order
             fill=text_color, font_family='sans-serif', font_weight='bold'
         ))
 
-        for i, feature_name in enumerate(featureset_color_order[fs]):
-            color, opacity = featureset_colors[fs].get(feature_name, ("#ffffff", 1.0))
-
+        for i, (color, feature_label) in enumerate(items):
             row = i % colors_per_column
             col = i // colors_per_column
 
@@ -1581,9 +3456,124 @@ def draw_color_legends(d, featuresets, featureset_colors, featureset_color_order
             ))
 
             d.append(draw.Text(
-                feature_name, font_size=7, x=item_x + color_text_offset, y=item_y,
+                feature_label, font_size=7, x=item_x + color_text_offset, y=item_y,
                 fill=text_color, font_family='sans-serif'
             ))
+
+
+def draw_color_legends_vertical(d, featuresets, featureset_colors, featureset_color_order,
+                                fs_display_names, legend_x, legend_y_start, text_color,
+                                displayed_features=None):
+    """Draw featureset color legends vertically on the right side.
+
+    Args:
+        d: Drawing object
+        featuresets: List of featuresets to include
+        featureset_colors: Dict of fs -> feature -> (color, opacity)
+        featureset_color_order: Dict of fs -> list of feature names (ordering)
+        fs_display_names: Dict of fs -> display name
+        legend_x: X position for legend (right side)
+        legend_y_start: Y position to start legend
+        text_color: Color for text
+        displayed_features: Optional dict of fs -> set of actually displayed features.
+
+    Returns:
+        float: Total height used by the legend
+    """
+    import re
+
+    swatch_size = 8
+    item_height = 11
+    section_gap = 15  # Gap between featureset sections
+
+    # Build legend items for each featureset (same logic as horizontal version)
+    legend_items = {}
+
+    for fs in featuresets:
+        fs_colors = featureset_colors.get(fs, {})
+
+        if displayed_features is not None and fs in displayed_features:
+            fs_displayed = displayed_features.get(fs, set())
+            if not fs_displayed:
+                legend_items[fs] = []
+                continue
+
+            # Group features by color
+            color_to_features = {}
+            for feature_name in fs_displayed:
+                color_info = fs_colors.get(feature_name)
+                if color_info is None:
+                    color_hex = '#808080'
+                elif isinstance(color_info, tuple):
+                    color_hex = color_info[0]
+                else:
+                    color_hex = color_info
+                if color_hex not in color_to_features:
+                    color_to_features[color_hex] = []
+                color_to_features[color_hex].append(feature_name)
+
+            # Sort by feature name for consistency
+            sorted_items = sorted(color_to_features.items(), key=lambda x: x[1][0] if x[1] else '')
+
+            items = []
+            for color_hex, feature_names in sorted_items:
+                if len(feature_names) > 1:
+                    display_name = _find_common_label(feature_names)
+                else:
+                    display_name = feature_names[0].replace('_', ' ').replace(' specific', '')
+                    if 'multigroup' in display_name.lower():
+                        display_name = re.sub(r'\d+$', '', display_name).rstrip()
+                items.append((color_hex, display_name))
+            legend_items[fs] = items
+        else:
+            items = []
+            for feature_name in featureset_color_order.get(fs, []):
+                color, opacity = fs_colors.get(feature_name, ("#ffffff", 1.0))
+                items.append((color, feature_name))
+            legend_items[fs] = items
+
+    # Draw legends vertically
+    current_y = legend_y_start
+    first_section = True
+
+    for fs in featuresets:
+        items = legend_items.get(fs, [])
+        if not items:
+            continue
+
+        # Add gap before section (except first)
+        if not first_section:
+            current_y += section_gap
+        first_section = False
+
+        # Section header
+        display_name = fs_display_names.get(fs, fs.title())
+        d.append(draw.Text(
+            display_name, font_size=7, x=legend_x, y=current_y,
+            fill=text_color, font_family='sans-serif',
+            text_anchor='start', font_weight='bold'
+        ))
+        current_y += 4  # Small gap after header
+
+        # Draw each item
+        for color_hex, feature_label in items:
+            current_y += item_height
+
+            # Color swatch
+            d.append(draw.Rectangle(
+                legend_x + 3, current_y - swatch_size, swatch_size, swatch_size,
+                fill=color_hex
+            ))
+
+            # Label
+            d.append(draw.Text(
+                feature_label, font_size=6, x=legend_x + swatch_size + 6,
+                y=current_y - swatch_size/2 + 1,
+                fill=text_color, font_family='sans-serif',
+                text_anchor='start', dominant_baseline='middle'
+            ))
+
+    return current_y - legend_y_start  # Return total height used
 
 
 # =============================================================================
@@ -2161,41 +4151,21 @@ def main():
     # Load sample metadata
     sample_to_group, sample_colors, group_colors = load_sample_metadata(sample_metadata_file)
 
-    # Load cluster analysis to get enrichment info and cluster priority order
-    cluster_enrichments, cluster_order = load_cluster_analysis(cluster_analysis_file)
+    # Load cluster analysis to get enrichment info, cluster priority order, stats for bubbles, and full df for features
+    cluster_enrichments, cluster_order, cluster_stats, cluster_analysis_df = load_cluster_analysis(cluster_analysis_file)
 
-    # Parse top_clusters if provided
-    top_clusters = None
-    if args.top_clusters:
-        top_clusters = {}
-        for part in args.top_clusters.split(','):
-            part = part.strip()
-            if ':' not in part:
-                print(f"  Warning: Invalid top_clusters format '{part}', expected 'category:N'")
-                continue
-            try:
-                key, val = part.split(':', 1)
-                top_clusters[key.strip()] = int(val)
-            except ValueError as e:
-                print(f"  Warning: Invalid top_clusters value '{part}': {e}")
+    # Load custom cluster labels if provided
+    cluster_labels = load_cluster_labels(args.cluster_labels, args.label_column)
 
-    # Parse clusters if provided (manual selection)
-    clusters = None
-    if args.clusters:
-        clusters = [int(c.strip()) for c in args.clusters.split(',')]
-        print(f"Manual cluster selection: {clusters}")
-
-    # Load read assignments
+    # Load read assignments (filtering via --curated-reps or --reads-file)
     cluster_reads, unique_enrichments = load_representative_reads(
         representatives_file,
         cluster_enrichments=cluster_enrichments,
         cluster_order=cluster_order,
         max_reps=max_reps,
-        top_clusters=top_clusters,
-        max_clusters=args.max_clusters,
-        clusters=clusters,
-        include_mixed=args.include_mixed,
-        reads_file=args.reads_file
+        reads_file=args.reads_file,
+        curated_reps_file=args.curated_reps,
+        cluster_labels_file=args.cluster_labels
     )
 
     # Load feature matrix
@@ -2256,6 +4226,329 @@ def main():
     elif args.no_reorder:
         print("  Dendrogram reordering disabled (--no-reorder)")
 
+    # Hide dendrogram if requested (but still use ordering)
+    if args.hide_dendrogram:
+        cluster_dendro_data = None
+        print("  Dendrogram hidden (--hide-dendrogram)")
+
+    # ==========================================================================
+    # VERTICAL MODE - Separate drawing path
+    # ==========================================================================
+    if args.vertical:
+        # Build mappings if not already done
+        if not read_to_original_cluster:
+            for cluster_id, data in cluster_reads.items():
+                for read, sample in data['reads']:
+                    read_to_original_cluster[read] = cluster_id
+                    read_to_original_enrichment[read] = data['enrichment']
+
+        unique_clusters = set(read_to_original_cluster.values())
+        cluster_colors = get_cluster_colors(unique_clusters)
+
+        # Vertical layout parameters
+        dendrogram_width = 100 if cluster_dendro_data is not None else 0
+        bubble_radius = 8
+        dendrogram_to_bubble_gap = 1  # Gap from dendrogram tip to bubble left edge
+        bubble_to_bars_gap = 12  # Gap from bubble right edge to feature bars
+        bubble_space = dendrogram_to_bubble_gap + bubble_radius * 2 + bubble_to_bars_gap
+        left_margin = 50 + dendrogram_width + bubble_space
+        sample_dendro_height = 40 if args.show_matrix else 0  # Space for sample dendrogram
+        top_margin = 80 + sample_dendro_height  # More space for rotated sample headers + dendrogram
+        bar_width = args.bar_width
+        num_fs = len(featuresets)
+        column_spacing = 10  # Space between columns in column mode
+
+        # In column mode, each read only needs one bar height
+        # In row mode (default), each read has all featuresets stacked
+        if args.column_tracks:
+            group_height = bar_width
+        else:
+            group_height = bar_width * num_fs + args.bar_spacing * (num_fs - 1)
+
+        # Use compact spacing when matrix is shown or column-tracks mode
+        if args.show_matrix or args.column_tracks:
+            row_spacing = 2  # Minimal spacing between reads
+            cluster_gap = 4  # Small gap between clusters
+        else:
+            row_spacing = args.read_spacing
+            cluster_gap = args.cluster_spacing
+
+        # Calculate y positions (reads stacked vertically by cluster)
+        read_y_positions = {}
+        cluster_y_start = {}
+        cluster_y_end = {}
+        current_y = top_margin
+
+        for cluster_id, data in cluster_reads.items():
+            cluster_y_start[cluster_id] = current_y
+            for read, sample in data['reads']:
+                read_y_positions[read] = current_y
+                current_y += group_height + row_spacing
+            cluster_y_end[cluster_id] = current_y - row_spacing
+            current_y += cluster_gap
+
+        # Calculate scaffold lengths and max length for uniform bar width
+        max_read_length = 0
+        scaffold_lengths = {}
+        scaffold_min_starts = {}
+
+        for read in read_data:
+            for fs in read_data[read]:
+                for feat in read_data[read][fs]:
+                    scaffold_lengths[read] = max(scaffold_lengths.get(read, 0), feat['stop'])
+                    if read not in scaffold_min_starts:
+                        scaffold_min_starts[read] = feat['start']
+                    else:
+                        scaffold_min_starts[read] = min(scaffold_min_starts[read], feat['start'])
+            if read in scaffold_lengths:
+                max_read_length = max(max_read_length, scaffold_lengths[read] - scaffold_min_starts.get(read, 0))
+
+        ratio = args.ratio
+        max_bar_length = floor(max_read_length * ratio)
+
+        # Build drawing data for vertical mode
+        drawing_data_vertical = defaultdict(lambda: defaultdict(list))
+        uncolored_features = defaultdict(set)
+        displayed_features = defaultdict(set)  # Track actually displayed features for legend filtering
+
+        for read in read_data:
+            if read not in read_y_positions:
+                continue
+
+            base_y = read_y_positions[read]
+            scaffold_min_start = scaffold_min_starts.get(read, 0)
+
+            for fs in featuresets:
+                features = read_data[read].get(fs, [])
+
+                for feat in features:
+                    final_start = feat['start'] - scaffold_min_start
+                    final_stop = feat['stop'] - scaffold_min_start
+                    scaled_start = floor(final_start * ratio)
+                    scaled_stop = floor(final_stop * ratio)
+
+                    feature_name = feat.get('feature', 'unknown')
+                    displayed_features[fs].add(feature_name)  # Track displayed feature
+                    color_info = featureset_colors.get(fs, {}).get(feature_name)
+                    if color_info is None:
+                        color = '#444444'
+                        fill_opacity = 1.0
+                        uncolored_features[fs].add(feature_name)
+                    else:
+                        color, fill_opacity = color_info
+
+                    drawing_data_vertical[read][fs].append({
+                        'scaled_start': scaled_start,
+                        'scaled_stop': scaled_stop,
+                        'color': color,
+                        'fill_opacity': fill_opacity
+                    })
+
+        # Calculate read positions dict for vertical drawing: (x_start, y_start, bar_length)
+        read_positions_vertical = {}
+        for read in read_y_positions:
+            y_pos = read_y_positions[read]
+            read_length = scaffold_lengths.get(read, 0) - scaffold_min_starts.get(read, 0)
+            bar_length = floor(read_length * ratio)
+            read_positions_vertical[read] = (left_margin, y_pos, bar_length)
+
+        # Calculate feature bar width (changes in column mode)
+        if args.column_tracks:
+            # In column mode: total width = num_featuresets * (max_bar_length + spacing)
+            feature_bars_width = num_fs * (max_bar_length + column_spacing) - column_spacing
+        else:
+            # In row mode: total width = max_bar_length
+            feature_bars_width = max_bar_length
+
+        # Calculate matrix parameters if enabled
+        matrix_width = 0
+        matrix_x_start = left_margin + feature_bars_width + 15  # After feature bars
+        # Square cells: size matches the row height (group_height)
+        cell_size = group_height + row_spacing  # Square cells matching row spacing
+        cell_width = cell_size
+        cell_height = cell_size
+
+        if args.show_matrix:
+            # Load sample metadata for matrix
+            meta_df = pd.read_csv(sample_metadata_file, sep='\t')
+            n_samples = len(meta_df)
+            matrix_width = n_samples * cell_width + 15  # Small padding
+            print(f"  Matrix enabled: {n_samples} samples × {len(cluster_y_start)} clusters (cell size: {cell_size}px)")
+
+        # Image dimensions
+        label_width = 200  # Space for cluster labels
+        right_legend_width = 120  # Space for vertical color legend on right
+        bubble_legend_height = 150  # Space for bubble legend + enrichment text legend at bottom
+        bar_plot_height = 100 if args.show_matrix else 0  # Space for bar plot below matrix
+        row_bar_width = 60 if args.show_matrix else 0  # Space for row barplot to right of matrix
+        image_width = left_margin + feature_bars_width + 20 + matrix_width + row_bar_width + label_width + right_legend_width
+        image_height = current_y + 50 + bar_plot_height + bubble_legend_height
+
+        if args.column_tracks:
+            print(f"\nVertical mode (column tracks): {num_fs} columns × {image_width} x {image_height}")
+        else:
+            print(f"\nVertical mode image dimensions: {image_width} x {image_height}")
+
+        # Create drawing
+        d = draw.Drawing(image_width, image_height)
+        d.append(draw.Rectangle(0, 0, image_width, image_height, fill=background_color))
+
+        # Draw vertical dendrogram on left
+        if cluster_dendro_data is not None:
+            draw_cluster_dendrogram_vertical(d, cluster_dendro_data, cluster_y_start, cluster_y_end,
+                                             left_margin, dendrogram_width, background_color)
+
+        # Draw scale bar above first featureset column
+        if args.column_tracks:
+            scale_bar_y = min(cluster_y_start.values()) - 15  # Position above first cluster
+            draw_scale_bar(d, left_margin, scale_bar_y, ratio, text_color)
+
+        # Draw feature bars
+        if args.column_tracks:
+            # Column mode: each featureset in its own column
+            draw_feature_bars_column_mode(d, drawing_data_vertical, featuresets, bar_width,
+                                          read_y_positions, left_margin, max_bar_length,
+                                          column_spacing, background_color)
+        else:
+            # Row mode (default): featuresets stacked as rows within each read
+            draw_feature_bars_vertical(d, drawing_data_vertical, featuresets, bar_width,
+                                       read_positions_vertical, num_fs, args.bar_spacing, background_color)
+
+        # Draw read index labels (1, 2, 3, ...) after feature bars (if enabled)
+        if args.show_read_indices:
+            read_index_x = left_margin + feature_bars_width + 5
+            draw_read_index_labels(d, cluster_reads, read_y_positions, read_index_x, bar_width, text_color)
+
+        # Draw sample matrix if enabled
+        matrix_data = None
+        if args.show_matrix:
+            cluster_ids = list(cluster_y_start.keys())
+            matrix_data = draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, meta_df,
+                              representatives_file, matrix_x_start, cell_width, cell_height,
+                              text_color, background_color)
+
+            # Draw sample dendrogram just above sample labels
+            header_y = min(cluster_y_start.values()) - 5
+            dendro_bottom = header_y - 30  # Above sample name labels with spacing
+            draw_sample_dendrogram(d, matrix_data, matrix_x_start, dendro_bottom, sample_dendro_height)
+
+            # Draw bar plot below matrix (column sums)
+            bar_plot_y = max(cluster_y_end.values()) + cell_height / 2 + 5
+            draw_sample_bar_plot(d, matrix_data, cluster_ids, cluster_enrichments, matrix_x_start, bar_plot_y,
+                                cell_width, 40, text_color, background_color)
+
+            # Draw row bar plot to right of matrix (row sums)
+            row_bar_x_start = matrix_x_start + matrix_width + 5
+            draw_cluster_bar_plot(d, matrix_data, cluster_ids, cluster_y_start, cluster_y_end,
+                                 cluster_enrichments, row_bar_x_start, row_bar_width - 10,
+                                 text_color, background_color)
+
+        # Draw enrichment bubbles (to the RIGHT of dendrogram tips, before feature bars)
+        # Dendrogram tips are at 50 + dendrogram_width (consistent with draw_cluster_dendrogram_vertical)
+        dendro_tip_x = 50 + dendrogram_width
+        bubble_x = dendro_tip_x + dendrogram_to_bubble_gap + bubble_radius
+
+        # Draw faint gray connecting lines from dendrogram tips to bubble centers (BEFORE bubbles so bubbles overlay)
+        connector_color = '#555555'  # Faint gray, lighter than white tree
+        for cluster_id in cluster_y_start:
+            y_start = cluster_y_start[cluster_id]
+            y_end = cluster_y_end[cluster_id]
+            y_center = (y_start + y_end) / 2
+            # Line from dendrogram tip to bubble center (bubble will be drawn on top)
+            d.append(draw.Line(
+                dendro_tip_x, y_center,
+                bubble_x, y_center,
+                stroke=connector_color, stroke_width=0.5
+            ))
+
+        # Draw bubbles on top of connector lines
+        draw_enrichment_bubbles(d, cluster_y_start, cluster_y_end, bubble_x, cluster_stats,
+                                max_radius=bubble_radius, min_radius=2)
+
+        # Draw cluster labels on right (after feature bars and read indices)
+        if not args.hide_brackets:
+            if args.show_matrix:
+                label_x = matrix_x_start + matrix_width + row_bar_width + 10
+            else:
+                label_x = left_margin + feature_bars_width + 20  # Extra space for read index labels
+            # Build cluster_enrichments dict for coloring labels
+            cluster_enrichments_dict = {cid: data['enrichment'] for cid, data in cluster_reads.items() if cid != 'all'}
+            draw_cluster_labels_vertical(d, cluster_y_start, cluster_y_end, label_x, text_color,
+                                         cluster_labels=cluster_labels,
+                                         enrichment_colors=enrichment_colors,
+                                         cluster_enrichments=cluster_enrichments_dict)
+
+        # Draw bubble legend at bottom
+        legend_y = max(cluster_y_end.values()) + bar_plot_height + 30
+        draw_bubble_legend(d, left_margin, legend_y, cluster_stats, text_color,
+                          max_radius=bubble_radius, min_radius=2)
+
+        # Draw enrichment text color legend below bubble legend
+        enrichment_legend_y = legend_y + 75  # Below bubble legend (bubble legend is ~65px tall)
+        draw_enrichment_text_legend(d, left_margin, enrichment_legend_y, enrichment_colors, text_color)
+
+        # Draw matrix color legend if matrix is enabled (to the right of enrichment legend)
+        if args.show_matrix and matrix_data:
+            matrix_legend_x = left_margin + 400  # Position to the right of enrichment legend
+            draw_matrix_legend(d, matrix_legend_x, enrichment_legend_y, matrix_data['max_count'],
+                              text_color, background_color)
+
+        # Draw featureset color legends vertically on the right side
+        color_legend_x = image_width - right_legend_width + 10
+        color_legend_y_start = top_margin
+        draw_color_legends_vertical(d, featuresets, featureset_colors, featureset_color_order,
+                                    fs_display_names, color_legend_x, color_legend_y_start, text_color,
+                                    displayed_features=displayed_features)
+
+        # Save vertical plot
+        d.save_svg(args.output)
+
+        # Report warnings
+        for fs in featuresets:
+            if uncolored_features[fs]:
+                sys.stderr.write(f"Warning: {fs} - features not in colors file:\n")
+                for feature in sorted(list(uncolored_features[fs])):
+                    sys.stderr.write(f"  - {feature}\n")
+
+        print(f"\n--- Summary ---")
+        original_cluster_count = len(set(read_to_original_cluster.values())) if read_to_original_cluster else len(cluster_reads)
+        print(f"Clusters plotted: {original_cluster_count}")
+        total_reads = sum(len(data['reads']) for data in cluster_reads.values())
+        print(f"Total reads plotted: {total_reads}")
+        print(f"\n✅ Saved to {args.output}")
+
+        # Print parameters
+        params = [
+            ("cluster-analysis-prefix", args.cluster_prefix),
+            ("output", args.output),
+            ("featuresets", ','.join(featuresets)),
+            ("smoothness", args.smoothness),
+            ("background", background_color),
+            ("reads-file", args.reads_file if args.reads_file else "None"),
+            ("curated-reps", args.curated_reps if args.curated_reps else "None"),
+            ("show-read-indices", args.show_read_indices),
+            ("hide-brackets", args.hide_brackets),
+            ("hide-dendrogram", args.hide_dendrogram),
+            ("cluster-labels", args.cluster_labels if args.cluster_labels else "None"),
+            ("vertical", args.vertical),
+            ("show-matrix", args.show_matrix),
+            ("column-tracks", args.column_tracks),
+            ("n-per-cluster", args.max_reps if args.max_reps else "None"),
+        ]
+        print(f"\n{'='*60}")
+        print("Parameters")
+        print(f"{'='*60}")
+        print(f"{'Parameter':<25} {'Value':<35}")
+        print(f"{'-'*25} {'-'*35}")
+        for param, value in params:
+            print(f"{param:<25} {str(value):<35}")
+
+        return  # Exit main after vertical mode
+
+    # ==========================================================================
+    # HORIZONTAL MODE (original code continues below)
+    # ==========================================================================
+
     # If not reordered, build mappings
     if not read_to_original_cluster:
         for cluster_id, data in cluster_reads.items():
@@ -2308,6 +4601,7 @@ def main():
     density_line_data = defaultdict(lambda: defaultdict(list))  # read -> featureset -> [(y, x_offset)]
     rect_plot_data = defaultdict(lambda: defaultdict(list))  # read -> featureset -> [{y, height, color}]
     uncolored_features = defaultdict(set)
+    displayed_features = defaultdict(set)  # Track actually displayed features for legend filtering
 
     # Get colors for density line plot featuresets
     density_line_colors = {
@@ -2439,9 +4733,11 @@ def main():
                 start_y = top_margin + 50 + floor(final_start * ratio)
                 stop_y = top_margin + 50 + floor(final_stop * ratio)
 
-                color, fill_opacity = featureset_colors[fs].get(feat['feature'], ("#ffffff", 1.0))
-                if feat['feature'] not in featureset_colors[fs]:
-                    uncolored_features[fs].add(feat['feature'])
+                feature_name = feat['feature']
+                displayed_features[fs].add(feature_name)  # Track displayed feature
+                color, fill_opacity = featureset_colors[fs].get(feature_name, ("#ffffff", 1.0))
+                if feature_name not in featureset_colors[fs]:
+                    uncolored_features[fs].add(feature_name)
 
                 drawing_data[read][fs].append({
                     "x": base_x + x_offset,
@@ -2506,7 +4802,8 @@ def main():
     label_height = longest_label * 4.5  # font_size=6, tight fit
     if not args.hide_brackets:
         draw_cluster_brackets(d, cluster_reads, cluster_x_start, cluster_x_end,
-                             enrichment_colors, read_heights, label_height, text_color)
+                             enrichment_colors, read_heights, label_height, text_color,
+                             cluster_labels=cluster_labels)
 
     # Annotation bars
     draw_annotation_bars(d, cluster_reads, read_x_positions, read_to_original_cluster,
@@ -2562,7 +4859,8 @@ def main():
     color_legend_y_start = max_stop_y + 130
     bottom_legend_featuresets = [fs for fs in featuresets if fs != density_line_plot_name]
     draw_color_legends(d, bottom_legend_featuresets, featureset_colors, featureset_color_order,
-                      fs_display_names, color_legend_y_start, left_margin, text_color)
+                      fs_display_names, color_legend_y_start, left_margin, text_color,
+                      displayed_features=displayed_features)
 
     # --- Save ---
     d.save_svg(args.output)
@@ -2601,13 +4899,13 @@ def main():
         ("cluster-spacing", args.cluster_spacing),
         ("ratio", args.ratio),
         ("smoothness", args.smoothness),
-        ("max-clusters", args.max_clusters if args.max_clusters else "None"),
-        ("top-clusters", args.top_clusters if args.top_clusters else "None"),
-        ("clusters", args.clusters if args.clusters else "None"),
-        ("include-mixed", args.include_mixed),
+        ("reads-file", args.reads_file if args.reads_file else "None"),
         ("hide-brackets", args.hide_brackets),
+        ("hide-dendrogram", args.hide_dendrogram),
         ("no-reorder", args.no_reorder),
-        ("n-per-cluster", args.max_reps),
+        ("cluster-labels", args.cluster_labels if args.cluster_labels else "None"),
+        ("vertical", args.vertical),
+        ("n-per-cluster", args.max_reps if args.max_reps else "None"),
         ("log-file", args.log_file),
     ]
     print(f"{'Parameter':<25} {'Value':<35}")
