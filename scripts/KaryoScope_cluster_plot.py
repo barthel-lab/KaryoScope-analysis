@@ -1800,6 +1800,55 @@ def draw_feature_bars_vertical(d, drawing_data, featuresets, bar_width, read_pos
             ))
 
 
+def draw_scale_bar(d, x_start, y_pos, ratio, text_color='white'):
+    """Draw a scale bar showing read length scale.
+
+    Args:
+        d: Drawing object
+        x_start: X position for scale bar start
+        y_pos: Y position for scale bar
+        ratio: Pixels per base pair (used for scaling)
+        text_color: Color for text and bar
+    """
+    # Choose a nice round scale bar length based on what would fit
+    # Common choices: 1kb, 2kb, 5kb, 10kb, 20kb
+    scale_options = [1000, 2000, 5000, 10000, 20000]
+
+    # Find a scale bar that's reasonably sized (50-150 pixels wide)
+    chosen_bp = 5000  # Default 5kb
+    for bp in scale_options:
+        bar_width_px = bp * ratio
+        if 50 <= bar_width_px <= 150:
+            chosen_bp = bp
+            break
+
+    bar_width_px = chosen_bp * ratio
+
+    # Format label
+    if chosen_bp >= 1000:
+        label = f"{chosen_bp // 1000} kb"
+    else:
+        label = f"{chosen_bp} bp"
+
+    # Draw scale bar line (same stroke_width=1 as dendrogram)
+    d.append(draw.Line(x_start, y_pos, x_start + bar_width_px, y_pos,
+                       stroke=text_color, stroke_width=1))
+
+    # Draw end ticks
+    tick_height = 4
+    d.append(draw.Line(x_start, y_pos - tick_height/2, x_start, y_pos + tick_height/2,
+                       stroke=text_color, stroke_width=1))
+    d.append(draw.Line(x_start + bar_width_px, y_pos - tick_height/2, x_start + bar_width_px, y_pos + tick_height/2,
+                       stroke=text_color, stroke_width=1))
+
+    # Draw label centered above
+    d.append(draw.Text(
+        label,
+        font_size=8, x=x_start + bar_width_px / 2, y=y_pos - 5,
+        fill=text_color, font_family='sans-serif', text_anchor='middle'
+    ))
+
+
 def draw_feature_bars_column_mode(d, drawing_data, featuresets, bar_width, read_y_positions,
                                    x_start, max_bar_length, column_spacing=10, background_color='black'):
     """Draw feature bars with each featureset in its own column.
@@ -4181,6 +4230,11 @@ def main():
         if cluster_dendro_data is not None:
             draw_cluster_dendrogram_vertical(d, cluster_dendro_data, cluster_y_start, cluster_y_end,
                                              left_margin, dendrogram_width, background_color)
+
+        # Draw scale bar above first featureset column
+        if args.column_tracks:
+            scale_bar_y = min(cluster_y_start.values()) - 15  # Position above first cluster
+            draw_scale_bar(d, left_margin, scale_bar_y, ratio, text_color)
 
         # Draw feature bars
         if args.column_tracks:
