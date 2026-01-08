@@ -565,12 +565,13 @@ def _select_fallback(cluster_data, max_reps):
     return list(zip(selected['read'], selected['sample']))
 
 
-def load_curated_representatives(curated_reps_file):
+def load_curated_representatives(curated_reps_file, cluster_labels_file=None):
     """Load curated representative selection from TSV file.
 
     Args:
         curated_reps_file: Path to TSV file with cluster_id, rank, read columns.
-                          May have curated_rep_i column to specify which rank to use.
+        cluster_labels_file: Optional path to TSV/Excel file with cluster_id and curated_rep_i columns.
+                            If provided, curated_rep_i is read from here instead of curated_reps_file.
 
     Returns:
         set: Read IDs to include (one per cluster based on curated_rep_i or rank=1)
@@ -582,23 +583,36 @@ def load_curated_representatives(curated_reps_file):
         print(f"  Warning: curated_reps file missing required columns (cluster_id, rank, read)")
         return set()
 
-    selected_reads = set()
+    # Load curated_rep_i from cluster_labels_file if provided
+    curated_rep_map = {}
+    if cluster_labels_file and os.path.exists(cluster_labels_file):
+        try:
+            if cluster_labels_file.endswith('.xlsx') or cluster_labels_file.endswith('.xls'):
+                labels_df = pd.read_excel(cluster_labels_file)
+            else:
+                labels_df = pd.read_csv(cluster_labels_file, sep='\t')
 
-    # Check if curated_rep_i column exists
-    has_curated = 'curated_rep_i' in df.columns
+            if 'cluster_id' in labels_df.columns and 'curated_rep_i' in labels_df.columns:
+                for _, row in labels_df.iterrows():
+                    if pd.notna(row.get('curated_rep_i')):
+                        curated_rep_map[row['cluster_id']] = int(row['curated_rep_i'])
+                print(f"  Loaded {len(curated_rep_map)} curated_rep_i values from {cluster_labels_file}")
+        except Exception as e:
+            print(f"  Warning: Could not load curated_rep_i from cluster_labels: {e}")
+
+    # Fallback: check if curated_rep_i exists in curated_reps_file itself
+    if not curated_rep_map and 'curated_rep_i' in df.columns:
+        for cluster_id in df['cluster_id'].unique():
+            cluster_df = df[df['cluster_id'] == cluster_id]
+            curated_vals = cluster_df['curated_rep_i'].dropna()
+            if len(curated_vals) > 0:
+                curated_rep_map[cluster_id] = int(curated_vals.iloc[0])
+
+    selected_reads = set()
 
     for cluster_id in df['cluster_id'].unique():
         cluster_df = df[df['cluster_id'] == cluster_id]
-
-        if has_curated:
-            # Get curated_rep_i for this cluster (use first non-NaN value)
-            curated_vals = cluster_df['curated_rep_i'].dropna()
-            if len(curated_vals) > 0:
-                target_rank = int(curated_vals.iloc[0])
-            else:
-                target_rank = 1
-        else:
-            target_rank = 1
+        target_rank = curated_rep_map.get(cluster_id, 1)
 
         # Select read with matching rank
         target_row = cluster_df[cluster_df['rank'] == target_rank]
@@ -609,13 +623,11 @@ def load_curated_representatives(curated_reps_file):
             selected_reads.add(cluster_df.iloc[0]['read'])
 
     print(f"  Selected {len(selected_reads)} curated representatives from {curated_reps_file}")
-    if has_curated:
-        print(f"  Using curated_rep_i column for selection")
 
     return selected_reads
 
 
-def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order=None, max_reps=None, reads_file=None, curated_reps_file=None):
+def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order=None, max_reps=None, reads_file=None, curated_reps_file=None, cluster_labels_file=None):
     """Load read assignments from TSV file.
 
     Representative read selection should be done beforehand using KaryoScope_select_representatives.py.
@@ -627,7 +639,8 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
         cluster_order: List of cluster_ids in priority order (for ordering output)
         max_reps: Maximum representatives per cluster (optional fallback if no reads_file)
         reads_file: Path to file with read names to include (one per line)
-        curated_reps_file: Path to TSV with curated_rep_i column for selecting specific reads
+        curated_reps_file: Path to TSV with cluster_id, rank, read columns for selecting specific reads
+        cluster_labels_file: Path to TSV/Excel with curated_rep_i column (optional)
 
     Returns:
         tuple: (cluster_reads OrderedDict, unique_enrichments set)
@@ -636,9 +649,29 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
     reps_df = pd.read_csv(reps_file, sep='\t')
     print(f"  Total reads: {len(reps_df)}")
 
+    # Load rank info from curated_reps_file or infer from reads_file
+    read_ranks = {}
+    rank_source = None
+    if curated_reps_file and os.path.exists(curated_reps_file):
+        rank_source = curated_reps_file
+    elif reads_file:
+        # Check if there's a .tsv version with rank info
+        tsv_path = reads_file.replace('.reads.txt', '.tsv')
+        if os.path.exists(tsv_path):
+            rank_source = tsv_path
+
+    if rank_source:
+        try:
+            rank_df = pd.read_csv(rank_source, sep='\t')
+            if 'read' in rank_df.columns and 'rank' in rank_df.columns:
+                for _, row in rank_df.iterrows():
+                    read_ranks[row['read']] = row['rank']
+        except Exception:
+            pass  # Silently ignore if rank loading fails
+
     # Load curated representatives if provided (takes precedence over reads_file)
     if curated_reps_file and os.path.exists(curated_reps_file):
-        allowed_reads = load_curated_representatives(curated_reps_file)
+        allowed_reads = load_curated_representatives(curated_reps_file, cluster_labels_file)
         if allowed_reads:
             reps_df = reps_df[reps_df['read'].isin(allowed_reads)]
             print(f"  After curated filter: {len(reps_df)} reads")
@@ -692,6 +725,10 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
             selected_reads = _select_by_centroid(cluster_data, max_reps)
         else:
             selected_reads = list(zip(cluster_data['read'], cluster_data['sample']))
+
+        # Sort by rank if rank info is available
+        if read_ranks:
+            selected_reads = sorted(selected_reads, key=lambda x: read_ranks.get(x[0], 999))
 
         cluster_reads[cluster_id] = {
             'enrichment': enrichment,
@@ -1999,27 +2036,27 @@ def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_me
             x = x_start + sample_x_positions[sample]
             count = cluster_sample_counts[cluster_id].get(sample, 0)
 
-            # Heatmap color intensity based on count
-            # Use blue (low) -> red (high) heatmap
-            intensity = count / max_count if max_count > 0 else 0
+            # Heatmap color intensity based on count (log-scaled)
+            # Use 2-color sequential scale: dark -> yellow (for black background)
+            # Log scaling helps visualize low values when max is high
+            import math
+            if count == 0:
+                intensity = 0
+            elif max_count > 1:
+                # log1p scaling: log(1+count) / log(1+max_count)
+                intensity = math.log1p(count) / math.log1p(max_count)
+            else:
+                intensity = 1.0
 
             if count == 0:
                 # Zero counts: dark background
                 fill_color = '#1a1a1a' if background_color == 'black' else '#f0f0f0'
             else:
-                # Heatmap: interpolate from blue (low) through yellow to red (high)
-                if intensity < 0.5:
-                    # Blue to yellow
-                    t = intensity * 2
-                    r = int(t * 255)
-                    g = int(t * 255)
-                    b = int(255 * (1 - t))
-                else:
-                    # Yellow to red
-                    t = (intensity - 0.5) * 2
-                    r = 255
-                    g = int(255 * (1 - t))
-                    b = 0
+                # Sequential 2-color: dark gray -> yellow
+                # Interpolate from #333333 (dark) to #ffff00 (yellow)
+                r = int(51 + intensity * (255 - 51))  # 51 -> 255
+                g = int(51 + intensity * (255 - 51))  # 51 -> 255
+                b = int(51 * (1 - intensity))          # 51 -> 0
                 fill_color = f'#{r:02x}{g:02x}{b:02x}'
 
             # Draw cell with white border
@@ -2057,8 +2094,80 @@ def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_me
         'all_samples': all_samples,
         'sample_groups': sample_groups,
         'group_linkages': group_linkages,
-        'cell_width': cell_width
+        'cell_width': cell_width,
+        'max_count': max_count
     }
+
+
+def draw_matrix_legend(d, x_start, y_start, max_count, text_color='white', background_color='black'):
+    """Draw a legend for the matrix color scale (log-scaled).
+
+    Args:
+        d: Drawing object
+        x_start: X position for legend start
+        y_start: Y position for legend
+        max_count: Maximum count value in the matrix
+        text_color: Color for text
+        background_color: Background color ('black' or 'white')
+    """
+    import math
+
+    legend_width = 100
+    legend_height = 10
+    n_steps = 20
+
+    # Title
+    d.append(draw.Text(
+        "Read Count (log scale)",
+        font_size=9, x=x_start, y=y_start,
+        fill=text_color, font_family='sans-serif', font_weight='bold'
+    ))
+
+    bar_y = y_start + 12
+
+    # Draw gradient bar (using same log scaling as matrix)
+    step_width = legend_width / n_steps
+    for i in range(n_steps):
+        intensity = i / (n_steps - 1)
+        # Same color calculation as matrix cells
+        r = int(51 + intensity * (255 - 51))
+        g = int(51 + intensity * (255 - 51))
+        b = int(51 * (1 - intensity))
+        fill_color = f'#{r:02x}{g:02x}{b:02x}'
+
+        d.append(draw.Rectangle(
+            x_start + i * step_width, bar_y,
+            step_width + 0.5, legend_height,  # +0.5 to avoid gaps
+            fill=fill_color, stroke='none'
+        ))
+
+    # Border around gradient bar
+    d.append(draw.Rectangle(
+        x_start, bar_y, legend_width, legend_height,
+        fill='none', stroke=text_color, stroke_width=0.5
+    ))
+
+    # Labels - show a few tick marks on log scale
+    label_y = bar_y + legend_height + 10
+    d.append(draw.Text(
+        "0", font_size=7, x=x_start, y=label_y,
+        fill=text_color, font_family='sans-serif', text_anchor='start'
+    ))
+
+    # Add intermediate tick at log midpoint
+    if max_count > 10:
+        mid_val = int(math.sqrt(max_count))  # Geometric midpoint
+        mid_intensity = math.log1p(mid_val) / math.log1p(max_count)
+        mid_x = x_start + mid_intensity * legend_width
+        d.append(draw.Text(
+            str(mid_val), font_size=7, x=mid_x, y=label_y,
+            fill=text_color, font_family='sans-serif', text_anchor='middle'
+        ))
+
+    d.append(draw.Text(
+        str(max_count), font_size=7, x=x_start + legend_width, y=label_y,
+        fill=text_color, font_family='sans-serif', text_anchor='end'
+    ))
 
 
 def draw_sample_bar_plot(d, matrix_data, cluster_ids, cluster_enrichments, x_start, y_start,
@@ -3840,7 +3949,8 @@ def main():
         cluster_order=cluster_order,
         max_reps=max_reps,
         reads_file=args.reads_file,
-        curated_reps_file=args.curated_reps
+        curated_reps_file=args.curated_reps,
+        cluster_labels_file=args.cluster_labels
     )
 
     # Load feature matrix
@@ -4053,8 +4163,8 @@ def main():
         # Image dimensions
         label_width = 200  # Space for cluster labels
         right_legend_width = 120  # Space for vertical color legend on right
-        bubble_legend_height = 130  # Space for bubble legend + enrichment text legend at bottom
-        bar_plot_height = 50 if args.show_matrix else 0  # Space for bar plot below matrix
+        bubble_legend_height = 150  # Space for bubble legend + enrichment text legend at bottom
+        bar_plot_height = 100 if args.show_matrix else 0  # Space for bar plot below matrix
         image_width = left_margin + feature_bars_width + 20 + matrix_width + label_width + right_legend_width
         image_height = current_y + 50 + bar_plot_height + bubble_legend_height
 
@@ -4147,8 +4257,14 @@ def main():
                           max_radius=bubble_radius, min_radius=2)
 
         # Draw enrichment text color legend below bubble legend
-        enrichment_legend_y = legend_y + 60  # Below bubble legend
+        enrichment_legend_y = legend_y + 75  # Below bubble legend (bubble legend is ~65px tall)
         draw_enrichment_text_legend(d, left_margin, enrichment_legend_y, enrichment_colors, text_color)
+
+        # Draw matrix color legend if matrix is enabled (to the right of enrichment legend)
+        if args.show_matrix and matrix_data:
+            matrix_legend_x = left_margin + 400  # Position to the right of enrichment legend
+            draw_matrix_legend(d, matrix_legend_x, enrichment_legend_y, matrix_data['max_count'],
+                              text_color, background_color)
 
         # Draw featureset color legends vertically on the right side
         color_legend_x = image_width - right_legend_width + 10
