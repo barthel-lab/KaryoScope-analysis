@@ -81,6 +81,8 @@ parser.add_argument("--davies-bouldin", dest="compute_davies_bouldin",
                     help="Compute Davies-Bouldin index (not recommended, favors high k) (default: False)")
 parser.add_argument("--min-read-length", dest="min_read_length", type=int, default=10000,
                     help="Minimum read length in bp to include (default: 10000)")
+parser.add_argument("--max-read-length", dest="max_read_length", type=int, default=None,
+                    help="Maximum read length in bp to include (default: no limit)")
 parser.add_argument("--exclude-features", dest="exclude_features", default="novel,unknown,canonical_telomere*",
                     help="Comma-separated list of features to exclude, supports wildcards (* and ?) (default: 'novel,unknown,canonical_telomere*')")
 parser.add_argument("--linkage-method", dest="linkage_method", default="ward",
@@ -931,16 +933,24 @@ if args.exclude_features:
 read_lengths = in_data.groupby('read')['length'].sum()
 read_length_dict = read_lengths.to_dict()
 
-# --- Filter by minimum annotated length ---
-if args.min_read_length > 0:
+# --- Filter by annotated length ---
+if args.min_read_length > 0 or args.max_read_length is not None:
     print(f"\n--- Filtering reads by annotated length ---")
     reads_before = in_data['read'].nunique()
-    valid_reads = set(r for r, l in read_length_dict.items() if l >= args.min_read_length)
+
+    # Apply min and max filters
+    if args.max_read_length is not None:
+        valid_reads = set(r for r, l in read_length_dict.items()
+                         if l >= args.min_read_length and l <= args.max_read_length)
+        print(f"  Length range: {args.min_read_length:,} - {args.max_read_length:,} bp")
+    else:
+        valid_reads = set(r for r, l in read_length_dict.items() if l >= args.min_read_length)
+        print(f"  Minimum annotated length: {args.min_read_length:,} bp")
+
     in_data = in_data[in_data['read'].isin(valid_reads)]
     read_to_sample = {r: s for r, s in read_to_sample.items() if r in valid_reads}
     read_length_dict = {r: l for r, l in read_length_dict.items() if r in valid_reads}
     reads_after = in_data['read'].nunique()
-    print(f"  Minimum annotated length: {args.min_read_length:,} bp")
     print(f"  Reads before filter: {reads_before:,}")
     print(f"  Reads after filter: {reads_after:,}")
     print(f"  Reads removed: {reads_before - reads_after:,}")
@@ -2840,6 +2850,7 @@ print(f"{'max-k':<25} {args.max_k}")
 print(f"{'k-selection':<25} {args.k_selection}")
 print(f"{'min-cluster-size':<25} {args.min_cluster_size}")
 print(f"{'min-read-length':<25} {args.min_read_length}")
+print(f"{'max-read-length':<25} {args.max_read_length}")
 print(f"{'exclude-features':<25} {args.exclude_features}")
 print(f"{'linkage-method':<25} {args.linkage_method}")
 print(f"{'matrix-type':<25} {args.matrix_type}")
