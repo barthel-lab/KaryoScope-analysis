@@ -4024,7 +4024,7 @@ def plot_structural_mode(args, matrix_data):
         d.append(draw.Text(f"KaryoScope: {chrom} Structural Analysis", 24, canvas_width/2, 40, 
                           fill=text_color, font_weight='bold', text_anchor='middle'))
         
-        panel_bg = "#111111" if bg_color == "black" else "#F5F5F5"
+        panel_bg = "#000000" if bg_color == "black" else "#F5F5F5"
         d.append(draw.Rectangle(margin_x - 5, 75, panel_width + 10, canvas_height - 180, fill=panel_bg, rx=10, ry=10))
 
         reads_needed = set(r['read'] for r in selected_reads)
