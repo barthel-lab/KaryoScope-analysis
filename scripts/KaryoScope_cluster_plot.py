@@ -3883,6 +3883,10 @@ def plot_structural_mode(args, matrix_data):
         sample_bed_paths = {}
         database = args.database
 
+    # Override database if explicitly provided
+    if args.database:
+        database = args.database
+
     featuresets = args.featuresets.split(',')
     featureset_colors, _ = load_color_files(args.colors_dir, database, featuresets)
     
@@ -4025,6 +4029,11 @@ def plot_structural_mode(args, matrix_data):
 
         reads_needed = set(r['read'] for r in selected_reads)
         read_bed_data = load_bed_data(sample_bed_paths, database, featuresets, args.smoothness, reads_needed)
+
+        # Fallback: if no BED data loaded but we have raw BED files, load directly
+        if not read_bed_data and args.bed_files:
+            custom_beds = {featuresets[0]: args.bed_files[0]}
+            read_bed_data = load_custom_bed_files(custom_beds, reads_needed)
         
         # Local clustering
         local_Z = None
