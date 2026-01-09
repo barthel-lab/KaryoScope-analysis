@@ -4093,6 +4093,10 @@ def plot_structural_mode(args, matrix_data):
         d.append(draw.Text("Major (Dominant)", 12, margin_x + 100, legend_y, fill="#888888"))
         d.append(draw.Text("Outlier (Variant)", 12, margin_x + 300, legend_y, fill="#FF4444"))
         if featuresets: d.append(draw.Text(f"Tracks: {', '.join(featuresets)}", 12, margin_x + 500, legend_y, fill=text_color))
+        # Threshold legend with red dashed line indicator
+        thresh_x = margin_x + 700
+        d.append(draw.Line(thresh_x, legend_y - 4, thresh_x + 30, legend_y - 4, stroke="#FF4444", stroke_width=2, stroke_dasharray="5,5"))
+        d.append(draw.Text(f"Threshold: {getattr(args, 'structural_threshold', 0.25)}", 12, thresh_x + 35, legend_y, fill=text_color))
         
         if getattr(args, 'save_individual_chroms', False):
             d.save_svg(f"{out_base}.{chrom}.svg")
