@@ -166,6 +166,10 @@ def parse_args():
     parser.add_argument("--log-file", dest="log_file",
                         action=argparse.BooleanOptionalAction, default=True,
                         help="Save console output to {output}.log (default: True)")
+    parser.add_argument("--show-clade-id", action="store_true",
+                        help="Show clade ID in structural plot labels (e.g., [C20])")
+    parser.add_argument("--show-clade-count", action="store_true",
+                        help="Show count of reads in each clade (e.g., [n=15])")
 
     return parser.parse_args()
 
@@ -3899,7 +3903,19 @@ def plot_structural_mode(args, matrix_data):
         
         # Calculate BW Score (Binary x Length / 1e6)
         chrom_df['bw_score'] = (chrom_df['binary_divergence'] * chrom_df['length_weighted_divergence']) / 1_000_000
-        
+
+        # Compute cluster counts for clade display
+        cluster_counts = chrom_df.groupby('cluster').size().to_dict()
+
+        def extract_clade_id(cluster_name):
+            """Extract clade ID from cluster name (e.g., 'chr1_Outlier_20' -> '20', 'chr1_Major' -> 'M')"""
+            if '_Major' in cluster_name:
+                return 'M'
+            parts = cluster_name.split('_')
+            if len(parts) >= 3:
+                return parts[-1]  # e.g., '20' from 'chr1_Outlier_20'
+            return '?'
+
         # Selection Logic: Global Norm + Global BW
         cluster_reps = []
         
@@ -3976,6 +3992,13 @@ def plot_structural_mode(args, matrix_data):
         
         # Sort reps for plotting: Major first, then Outliers by raw_div desc
         cluster_reps.sort(key=lambda x: (0 if x['type'] == 'Major' else 1, -x['raw_div']))
+
+        # Add clade info to each rep
+        for r in cluster_reps:
+            cluster_name = r['cluster']
+            r['clade_id'] = extract_clade_id(cluster_name)
+            r['clade_count'] = cluster_counts.get(cluster_name, 0)
+
         selected_reads = cluster_reps
         for r in selected_reads:
             all_selected_reads.append(r['read'])
@@ -4077,7 +4100,19 @@ def plot_structural_mode(args, matrix_data):
             l_color = "#888888" if r_obj['type'] == "Major" else "#FF4444"
             
             # Clean read name label - truncate to fit compact label area
-            display_name = read if len(read) <= 28 else read[:12] + "..." + read[-12:]
+            short_name = read if len(read) <= 20 else read[:8] + "..." + read[-8:]
+
+            # Optionally append clade info
+            clade_suffix = ""
+            if getattr(args, 'show_clade_id', False) or getattr(args, 'show_clade_count', False):
+                parts = []
+                if getattr(args, 'show_clade_id', False):
+                    parts.append(f"C{r_obj.get('clade_id', '?')}")
+                if getattr(args, 'show_clade_count', False):
+                    parts.append(f"n={r_obj.get('clade_count', '?')}")
+                if parts:
+                    clade_suffix = f" [{', '.join(parts)}]"
+            display_name = short_name + clade_suffix
             d.append(draw.Text(display_name, 10, margin_x + (dendro_w if show_d else 10), ry + (len(featuresets)*fs_height)/2 + 3, fill=l_color, font_family='monospace'))
             if read in read_bed_data:
                 for fs_idx, fs in enumerate(featuresets):
