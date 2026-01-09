@@ -2068,17 +2068,35 @@ def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_me
 
     total_matrix_width = current_x
 
-    # Draw column headers (rotated sample names)
+    # Define group colors for sample labels (different from enrichment colors)
+    # Use teal/orange scheme to distinguish from enrichment blue/red
+    sample_group_colors = {}
+    unique_groups = sorted(set(sample_groups.values())) if sample_groups else []
+    for group in unique_groups:
+        group_lower = group.lower()
+        if any(x in group_lower for x in ['normal', 'primary', 'control', 'pbmc']):
+            sample_group_colors[group] = '#22d3ee'  # Cyan/teal for control
+        else:
+            sample_group_colors[group] = '#fb923c'  # Orange for treatment
+
+    # Draw column headers (rotated sample names) - colored by group
     header_y = min(cluster_y_start.values()) - 5 if cluster_y_start else 30
     for sample in all_samples:
+        # Center text on column: left edge + half cell width
         x = x_start + sample_x_positions[sample] + cell_width / 2
 
-        # Sample name, rotated 90 degrees
+        # Get color based on sample group
+        group = sample_groups.get(sample, '')
+        label_color = sample_group_colors.get(group, text_color)
+
+        # Sample name, rotated 90 degrees, centered on column
+        # Use dominant_baseline='middle' for vertical centering after rotation
         d.append(draw.Text(
             sample, font_size=7, x=x, y=header_y,
-            fill=text_color, font_family='sans-serif',
+            fill=label_color, font_family='sans-serif',
             transform=f"rotate(-90 {x} {header_y})",
-            text_anchor='start'
+            text_anchor='start',
+            dominant_baseline='middle'
         ))
 
     # Draw cells for each cluster
@@ -2150,6 +2168,7 @@ def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_me
         'cluster_sample_counts': cluster_sample_counts,
         'all_samples': all_samples,
         'sample_groups': sample_groups,
+        'sample_group_colors': sample_group_colors,
         'group_linkages': group_linkages,
         'cell_width': cell_width,
         'max_count': max_count
@@ -2227,6 +2246,44 @@ def draw_matrix_legend(d, x_start, y_start, max_count, text_color='white', backg
     ))
 
 
+def draw_sample_group_legend(d, sample_group_colors, x_start, y_start, text_color='white'):
+    """Draw a legend for sample group colors.
+
+    Args:
+        d: Drawing object
+        sample_group_colors: Dict of group name -> color
+        x_start: X position for legend start
+        y_start: Y position for legend
+        text_color: Color for text
+    """
+    if not sample_group_colors:
+        return
+
+    # Title
+    d.append(draw.Text(
+        "Sample Group",
+        font_size=9, x=x_start, y=y_start,
+        fill=text_color, font_family='sans-serif', font_weight='bold'
+    ))
+
+    # Draw legend items
+    item_y = y_start + 14
+    box_size = 10
+    for group, color in sorted(sample_group_colors.items()):
+        # Color box
+        d.append(draw.Rectangle(
+            x_start, item_y - box_size + 2,
+            box_size, box_size,
+            fill=color, stroke='none'
+        ))
+        # Label
+        d.append(draw.Text(
+            group, font_size=8, x=x_start + box_size + 4, y=item_y,
+            fill=text_color, font_family='sans-serif'
+        ))
+        item_y += 14
+
+
 def draw_sample_bar_plot(d, matrix_data, cluster_ids, cluster_enrichments, x_start, y_start,
                           cell_width, bar_height, text_color, background_color='black'):
     """Draw stacked vertical bar plot showing reads per sample by enrichment type.
@@ -2247,15 +2304,26 @@ def draw_sample_bar_plot(d, matrix_data, cluster_ids, cluster_enrichments, x_sta
     cluster_sample_counts = matrix_data['cluster_sample_counts']
     all_samples = matrix_data['all_samples']
 
-    # Colors for enrichment types
-    enrichment_colors = {
-        'Normal-enriched': '#3b82f6',  # Blue
-        'Tumor-enriched': '#ef4444',   # Red
-        'mixed': '#9ca3af'             # Gray
-    }
+    # Detect unique enrichment categories from data
+    unique_enrichments = set()
+    for cid in cluster_ids:
+        enrichment = cluster_enrichments.get(cid, 'mixed')
+        unique_enrichments.add(enrichment)
+
+    # Dynamic colors for enrichment types (control=blue, treatment=red, mixed=gray)
+    # Identify control-enriched (contains "Normal", "primary", "control") and treatment-enriched
+    enrichment_colors = {'mixed': '#9ca3af'}  # Gray for mixed
+    for enrich in unique_enrichments:
+        if enrich == 'mixed':
+            continue
+        enrich_lower = enrich.lower()
+        if any(x in enrich_lower for x in ['normal', 'primary', 'control']):
+            enrichment_colors[enrich] = '#3b82f6'  # Blue for control
+        else:
+            enrichment_colors[enrich] = '#ef4444'  # Red for treatment
 
     # Compute reads per sample by enrichment type
-    sample_enrichment_counts = {sample: {'Normal-enriched': 0, 'Tumor-enriched': 0, 'mixed': 0}
+    sample_enrichment_counts = {sample: {e: 0 for e in unique_enrichments}
                                  for sample in all_samples}
     sample_totals = {sample: 0 for sample in all_samples}
 
@@ -2272,13 +2340,24 @@ def draw_sample_bar_plot(d, matrix_data, cluster_ids, cluster_enrichments, x_sta
     # Use thinner bars (max 8px) to match row barplot thickness
     thin_bar_width = min(cell_width - 2, 8)
 
+    # Sort enrichment categories: control first, mixed, treatment last
+    def enrich_sort_key(e):
+        e_lower = e.lower()
+        if any(x in e_lower for x in ['normal', 'primary', 'control']):
+            return 0
+        elif e == 'mixed':
+            return 1
+        else:
+            return 2
+    sorted_enrichments = sorted(unique_enrichments, key=enrich_sort_key)
+
     for sample in all_samples:
         # Center the thin bar within the cell
         x = x_start + sample_x_positions[sample] + (cell_width - thin_bar_width) / 2
         current_y = y_start
 
-        # Stack order: Normal-enriched, mixed, Tumor-enriched (bottom to top visually = top to bottom in y)
-        for enrichment in ['Normal-enriched', 'mixed', 'Tumor-enriched']:
+        # Stack order: control-enriched, mixed, treatment-enriched (bottom to top visually = top to bottom in y)
+        for enrichment in sorted_enrichments:
             count = sample_enrichment_counts[sample][enrichment]
             if count > 0:
                 bar_len = (count / max_total) * bar_height
@@ -2319,7 +2398,7 @@ def draw_sample_bar_plot(d, matrix_data, cluster_ids, cluster_enrichments, x_sta
 
 def draw_cluster_bar_plot(d, matrix_data, cluster_ids, cluster_y_start, cluster_y_end,
                           cluster_enrichments, x_start, bar_max_width, text_color, background_color='black'):
-    """Draw horizontal stacked bar plot showing tumor vs normal reads per cluster (row sums).
+    """Draw horizontal stacked bar plot showing reads per cluster by group (row sums).
 
     Args:
         d: Drawing object
@@ -2337,28 +2416,42 @@ def draw_cluster_bar_plot(d, matrix_data, cluster_ids, cluster_y_start, cluster_
     all_samples = matrix_data['all_samples']
     sample_groups = matrix_data.get('sample_groups', {})
 
-    # Colors for sample groups
-    group_colors = {
-        'Normal': '#3b82f6',  # Blue
-        'Tumor': '#ef4444',   # Red
-    }
+    # Detect unique groups dynamically
+    unique_groups = sorted(set(sample_groups.values()))
+
+    # Dynamic colors for groups (teal/orange scheme to match sample labels)
+    group_colors = {}
+    for group in unique_groups:
+        group_lower = group.lower()
+        if any(x in group_lower for x in ['normal', 'primary', 'control', 'pbmc']):
+            group_colors[group] = '#22d3ee'  # Cyan/teal for control
+        else:
+            group_colors[group] = '#fb923c'  # Orange for treatment
 
     # Separate samples by group
-    normal_samples = [s for s in all_samples if sample_groups.get(s) == 'Normal']
-    tumor_samples = [s for s in all_samples if sample_groups.get(s) == 'Tumor']
+    samples_by_group = {g: [s for s in all_samples if sample_groups.get(s) == g] for g in unique_groups}
 
     # Compute reads per cluster by group
     cluster_group_counts = {}
     cluster_totals = {}
     for cid in cluster_ids:
-        normal_count = sum(cluster_sample_counts.get(cid, {}).get(sample, 0) for sample in normal_samples)
-        tumor_count = sum(cluster_sample_counts.get(cid, {}).get(sample, 0) for sample in tumor_samples)
-        cluster_group_counts[cid] = {'Normal': normal_count, 'Tumor': tumor_count}
-        cluster_totals[cid] = normal_count + tumor_count
+        counts = {}
+        total = 0
+        for group in unique_groups:
+            count = sum(cluster_sample_counts.get(cid, {}).get(sample, 0) for sample in samples_by_group[group])
+            counts[group] = count
+            total += count
+        cluster_group_counts[cid] = counts
+        cluster_totals[cid] = total
 
     max_total = max(cluster_totals.values()) if cluster_totals.values() else 1
 
     # Draw horizontal stacked bars for each cluster
+    # Stack order: control groups first (teal), then treatment groups (orange)
+    control_groups = [g for g in unique_groups if group_colors.get(g) == '#22d3ee']
+    treatment_groups = [g for g in unique_groups if group_colors.get(g) == '#fb923c']
+    ordered_groups = control_groups + treatment_groups
+
     for cid in cluster_ids:
         if cid not in cluster_y_start:
             continue
@@ -2369,8 +2462,7 @@ def draw_cluster_bar_plot(d, matrix_data, cluster_ids, cluster_y_start, cluster_
         bar_height = min(y_end - y_start - 2, 8)  # Bar height, max 8px
 
         current_x = x_start
-        # Stack order: Normal first (blue), then Tumor (red)
-        for group in ['Normal', 'Tumor']:
+        for group in ordered_groups:
             count = cluster_group_counts.get(cid, {}).get(group, 0)
             if count > 0:
                 bar_width = (count / max_total) * bar_max_width
@@ -2643,8 +2735,9 @@ def draw_enrichment_bubbles(d, cluster_y_start, cluster_y_end, x_center, cluster
         else:
             neg_log_q = 10  # Very significant
         neg_log_q = min(10, max(0, neg_log_q))
-        # Map to alpha: 0.3 (q=1) to 1.0 (q<=1e-10)
-        alpha = 0.3 + 0.7 * (neg_log_q / 10)
+        # Map to alpha: 0.5 (q=1, NS) to 1.0 (q<=1e-10)
+        # Using 0.5 minimum so NS clusters still show their color direction
+        alpha = 0.5 + 0.5 * (neg_log_q / 10)
 
         # Draw the bubble
         d.append(draw.Circle(
@@ -2783,8 +2876,8 @@ def draw_bubble_legend(d, x_start, y_start, cluster_stats, text_color='white', m
     ))
     alpha_y += 16
 
-    # Draw example bubbles for alpha
-    for i, (alpha, label) in enumerate([(0.3, "1"), (0.65, "0.01"), (1.0, "<1e-10")]):
+    # Draw example bubbles for alpha (0.5 to 1.0 range)
+    for i, (alpha, label) in enumerate([(0.5, "NS"), (0.75, "0.01"), (1.0, "<1e-10")]):
         cx = alpha_x + i * 40
         d.append(draw.Circle(cx + 5, alpha_y + 5, 5,
                              fill='white', fill_opacity=alpha, stroke='gray', stroke_width=0.5))
@@ -4514,6 +4607,12 @@ def main():
             draw_cluster_bar_plot(d, matrix_data, cluster_ids, cluster_y_start, cluster_y_end,
                                  cluster_enrichments, row_bar_x_start, row_bar_width - 10,
                                  text_color, background_color)
+
+            # Draw sample group legend above the row bar plots
+            sample_group_colors = matrix_data.get('sample_group_colors', {})
+            if sample_group_colors:
+                row_legend_y = min(cluster_y_start.values()) - 60  # Above the bar plot axis
+                draw_sample_group_legend(d, sample_group_colors, row_bar_x_start, row_legend_y, text_color)
 
         # Draw enrichment bubbles (to the RIGHT of dendrogram tips, before feature bars)
         # Dendrogram tips are at 50 + dendrogram_width (consistent with draw_cluster_dendrogram_vertical)

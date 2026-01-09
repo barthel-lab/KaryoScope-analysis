@@ -284,10 +284,14 @@ def main():
             row['odds_ratio'] = round(odds, 2) if odds is not None else None
 
             # Calculate log2_fc from odds_ratio
+            # Cap at +/-10 for Excel compatibility (avoids Inf values)
             if odds is not None and odds > 0:
-                row['log2_fc'] = round(math.log2(odds), 2)
+                log2_fc = math.log2(odds)
+                row['log2_fc'] = round(max(-10, min(10, log2_fc)), 2)
             elif odds == 0:
-                row['log2_fc'] = float('-inf')
+                row['log2_fc'] = -10  # Cap at -10 instead of -Inf
+            elif odds is not None and math.isinf(odds):
+                row['log2_fc'] = 10  # Cap at +10 instead of +Inf
             else:
                 row['log2_fc'] = None
 
