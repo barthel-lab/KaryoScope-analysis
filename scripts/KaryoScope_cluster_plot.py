@@ -3792,32 +3792,47 @@ def compute_density_line(features, bin_size, read_length, max_density=50):
 # Structural Analysis Plotting (Additive)
 # =============================================================================
 
-def draw_mini_dendrogram(d, linkage_matrix, x_base, y_base, width, height, row_y_centers, color="white", threshold=None, show_threshold=False):
-    """Draw a small dendrogram to the left of feature bars."""
+def draw_mini_dendrogram(d, linkage_matrix, x_base, y_base, width, height, row_y_centers, color="white", threshold=None, show_threshold=False, leaf_order=None):
+    """Draw a small dendrogram to the left of feature bars.
+
+    Args:
+        leaf_order: The order in which leaves are displayed (from sch.leaves_list).
+                   leaf_order[display_pos] = original_leaf_idx
+                   We need the inverse: original_leaf_idx -> display_pos
+    """
     n_leaves = len(row_y_centers)
     if n_leaves < 2:
         return
-        
+
     max_dist = linkage_matrix[-1, 2] if len(linkage_matrix) > 0 else 1.0
     if max_dist == 0: max_dist = 1.0
-    
+
+    # Create inverse mapping: original_leaf_idx -> display_position
+    # leaf_order[display_pos] = original_idx, so we invert it
+    if leaf_order is not None:
+        leaf_to_display = {original_idx: display_pos for display_pos, original_idx in enumerate(leaf_order)}
+    else:
+        leaf_to_display = {i: i for i in range(n_leaves)}
+
     node_x = {}
     node_y = {}
-    
-    for i in range(n_leaves):
-        node_x[i] = x_base + width
-        node_y[i] = row_y_centers[i]
-        
+
+    # Map leaf nodes to their DISPLAY y-positions
+    for original_idx in range(n_leaves):
+        display_pos = leaf_to_display[original_idx]
+        node_x[original_idx] = x_base + width
+        node_y[original_idx] = row_y_centers[display_pos]
+
     for i, (idx1, idx2, dist, count) in enumerate(linkage_matrix):
         idx1, idx2 = int(idx1), int(idx2)
         node_idx = n_leaves + i
         y1, y2 = node_y[idx1], node_y[idx2]
         x_merge = x_base + width - (dist / max_dist) * width
-        
+
         d.append(draw.Line(node_x[idx1], y1, x_merge, y1, stroke=color, stroke_width=2.5))
         d.append(draw.Line(node_x[idx2], y2, x_merge, y2, stroke=color, stroke_width=2.5))
         d.append(draw.Line(x_merge, y1, x_merge, y2, stroke=color, stroke_width=2.5))
-        
+
         node_x[node_idx] = x_merge
         node_y[node_idx] = (y1 + y2) / 2
 
@@ -3990,6 +4005,7 @@ def plot_structural_mode(args, matrix_data):
         
         # Local clustering
         local_Z = None
+        leaf_order = None
         if getattr(args, 'show_dendrogram', False) and len(selected_reads) > 1:
             unique_f = sorted(list(set(f['feature'] for r in read_bed_data for fs in read_bed_data[r] for f in read_bed_data[r][fs])))
             f_map = {f: chr(j+200) for j, f in enumerate(unique_f)}
@@ -4022,41 +4038,53 @@ def plot_structural_mode(args, matrix_data):
             leaf_order = sch.leaves_list(local_Z)
             selected_reads = [selected_reads[idx] for idx in leaf_order]
 
-        max_len = 0
+        # Find the actual data range (min_start to max_stop) to use space efficiently
+        min_start = float('inf')
+        max_stop = 0
         for r_obj in selected_reads:
             r = r_obj['read']
             if r in read_bed_data:
                 for fs in read_bed_data[r]:
-                    for feat in read_bed_data[r][fs]: max_len = max(max_len, feat['stop'])
-        if max_len == 0: max_len = 10000 
-        
+                    for feat in read_bed_data[r][fs]:
+                        min_start = min(min_start, feat['start'])
+                        max_stop = max(max_stop, feat['stop'])
+        if max_stop == 0: max_stop = 10000
+        if min_start == float('inf'): min_start = 0
+        data_range = max_stop - min_start
+        if data_range == 0: data_range = 10000
+
         show_d = getattr(args, 'show_dendrogram', False)
-        dendro_w = 250 if show_d else 20
-        label_w = 400 # Slightly wider for detailed labels
-        bars_x_start = margin_x + (dendro_w if show_d else 0) + label_w + 20
-        ratio = (panel_width - (dendro_w if show_d else 0) - label_w - 60) / max_len
+        dendro_w = 150 if show_d else 10  # Compact dendrogram
+        label_w = 200  # Compact labels - enough for ~28 chars
+        label_to_bars_gap = 2  # Minimal gap
+        right_margin = 15  # Minimal right margin
+        bars_x_start = margin_x + (dendro_w if show_d else 0) + label_w + label_to_bars_gap
+        # Use data_range instead of max_len for better space utilization
+        ratio = (panel_width - (dendro_w if show_d else 0) - label_w - label_to_bars_gap - right_margin) / data_range
         
         row_y_centers = []
         for j in range(len(selected_reads)):
             row_y_centers.append(110 + j * (len(featuresets)*fs_height + row_spacing) + (len(featuresets)*fs_height)/2)
 
         if show_d and local_Z is not None:
-            draw_mini_dendrogram(d, local_Z, margin_x + 10, 110, dendro_w - 20, 0, row_y_centers, 
-                                 color=text_color, threshold=getattr(args, 'structural_threshold', 0.25), 
-                                 show_threshold=getattr(args, 'show_threshold', False))
+            draw_mini_dendrogram(d, local_Z, margin_x + 10, 110, dendro_w - 20, 0, row_y_centers,
+                                 color=text_color, threshold=getattr(args, 'structural_threshold', 0.25),
+                                 show_threshold=getattr(args, 'show_threshold', False),
+                                 leaf_order=leaf_order)
             
         for j, r_obj in enumerate(selected_reads):
             read, ry = r_obj['read'], row_y_centers[j] - (len(featuresets)*fs_height)/2
             l_color = "#888888" if r_obj['type'] == "Major" else "#FF4444"
             
-            # Clean read name label
-            display_name = read if len(read) <= 45 else read[:20] + "..." + read[-20:]
-            d.append(draw.Text(display_name, 12, margin_x + (dendro_w if show_d else 10), ry + (len(featuresets)*fs_height)/2 + 4, fill=l_color, font_family='monospace'))
+            # Clean read name label - truncate to fit compact label area
+            display_name = read if len(read) <= 28 else read[:12] + "..." + read[-12:]
+            d.append(draw.Text(display_name, 10, margin_x + (dendro_w if show_d else 10), ry + (len(featuresets)*fs_height)/2 + 3, fill=l_color, font_family='monospace'))
             if read in read_bed_data:
                 for fs_idx, fs in enumerate(featuresets):
                     for feat in read_bed_data[read].get(fs, []):
                         w = max((feat['stop'] - feat['start']) * ratio, 2.5)
-                        x = bars_x_start + (feat['start'] * ratio)
+                        # Offset by min_start so bars start at bars_x_start
+                        x = bars_x_start + ((feat['start'] - min_start) * ratio)
                         color, op = featureset_colors[fs].get(feat['feature'], ("#ffffff", 1.0))
                         d.append(draw.Rectangle(x, ry + (fs_idx * fs_height), w, fs_height, fill=color, fill_opacity=op))
 
@@ -4096,7 +4124,9 @@ def plot_structural_mode(args, matrix_data):
                 if idx < len(chrom_drawings):
                     d_obj, d_h, d_w = chrom_drawings[idx]
                     g = draw.Group(transform=f"translate({current_x},{current_y})")
-                    for elem in d_obj.elements:
+                    # Convert to list first to avoid issues with iteration during modification
+                    elements_copy = list(d_obj.elements)
+                    for elem in elements_copy:
                         g.append(elem)
                     all_d.append(g)
                     current_x += d_w + padding
