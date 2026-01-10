@@ -106,8 +106,11 @@ def parse_args():
 
     # Display options
     parser.add_argument("--background", dest="background_color", default="black",
-                        choices=["white", "black"],
-                        help="Background color for the SVG (default: black)")
+                        choices=["white", "black", "both"],
+                        help="Background color for the SVG:\n"
+                             "  white: white background\n"
+                             "  black: dark background (default)\n"
+                             "  both: generate both versions (dark files have _dark suffix)")
     parser.add_argument("--bar-width", dest="bar_width", type=int, default=8,
                         help="Width of each feature bar in pixels (default: 8)")
     parser.add_argument("--bar-spacing", dest="bar_spacing", type=int, default=0,
@@ -4278,6 +4281,32 @@ def main():
         database = args.database
 
     # --- Setup ---
+    # Handle "both" background mode by re-executing script for each background
+    if args.background_color == "both":
+        import subprocess
+
+        # Get original output path
+        output_base = args.output[:-4] if args.output.endswith('.svg') else args.output
+
+        # Build base command (excluding --background and --output)
+        base_args = [arg for i, arg in enumerate(sys.argv[1:])
+                     if not (arg.startswith('--background') or arg.startswith('--output') or
+                            (i > 0 and sys.argv[i] in ['--background', '--output']))]
+
+        # Run for white background (no suffix)
+        print("=== Generating white background version ===")
+        white_cmd = [sys.executable, sys.argv[0]] + base_args + [
+            '--background', 'white', '--output', output_base + '.svg']
+        subprocess.run(white_cmd, check=True)
+
+        # Run for black background (_dark suffix)
+        print("\n=== Generating dark background version ===")
+        dark_cmd = [sys.executable, sys.argv[0]] + base_args + [
+            '--background', 'black', '--output', output_base + '_dark.svg']
+        subprocess.run(dark_cmd, check=True)
+
+        sys.exit(0)
+
     background_color = args.background_color
     text_color = "#000000" if background_color == "white" else "#FFFFFF"
     featuresets = [f.strip() for f in args.featuresets.split(",")]
