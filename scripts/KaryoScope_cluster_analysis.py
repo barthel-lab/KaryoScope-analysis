@@ -83,6 +83,8 @@ parser.add_argument("--min-read-length", dest="min_read_length", type=int, defau
                     help="Minimum read length in bp to include (default: 10000)")
 parser.add_argument("--max-read-length", dest="max_read_length", type=int, default=None,
                     help="Maximum read length in bp to include (default: no limit)")
+parser.add_argument("--read-list", dest="read_list", default=None,
+                    help="File with read names to include (one per line). Filters BED to only these reads.")
 parser.add_argument("--exclude-features", dest="exclude_features", default="novel,unknown,canonical_telomere*",
                     help="Comma-separated list of features to exclude, supports wildcards (* and ?) (default: 'novel,unknown,canonical_telomere*')")
 parser.add_argument("--linkage-method", dest="linkage_method", default="ward",
@@ -141,9 +143,12 @@ parser.add_argument("--reduce-dims", dest="reduce_dims", type=int, default=500,
                     help="Reduce matrix to N dimensions using truncated SVD before clustering.\n"
                          "Recommended for merged BED files which can create very high-dimensional matrices.\n"
                          "Set to 0 to disable reduction (default: 500)")
-parser.add_argument("--dark-mode", dest="dark_mode",
-                    action=argparse.BooleanOptionalAction, default=False,
-                    help="Output diagnostic plots with dark background (default: False)")
+parser.add_argument("--background", dest="background", default="white",
+                    choices=["white", "black", "both"],
+                    help="Background color for diagnostic plots:\n"
+                         "  white: white background (default)\n"
+                         "  black: dark background\n"
+                         "  both: generate both versions (dark files have _dark suffix)")
 parser.add_argument("--log-file", dest="log_file",
                     action=argparse.BooleanOptionalAction, default=True,
                     help="Save console output to {output_prefix}.log (default: True)")
@@ -390,16 +395,54 @@ def run_structure_mode(in_data, args):
     print(f"\nSaved structural assignments: {assignments_file}")
     sys.exit(0)
 
-# --- Set up plot style ---
-if args.dark_mode:
-    plt.style.use('dark_background')
-    PLOT_BG_COLOR = '#1a1a1a'
-    PLOT_TEXT_COLOR = 'white'
-    PLOT_GRID_COLOR = '#404040'
-else:
-    PLOT_BG_COLOR = 'white'
-    PLOT_TEXT_COLOR = 'black'
-    PLOT_GRID_COLOR = '#cccccc'
+# --- Plot style management ---
+def get_plot_style(bg_mode):
+    """Return style configuration for given background mode."""
+    if bg_mode == 'black':
+        return {
+            'bg_color': '#1a1a1a',
+            'text_color': 'white',
+            'grid_color': '#404040',
+            'annotation_bg': '#333333',
+            'annotation_edge': 'white',
+            'edge_color': 'white',
+            'style': 'dark_background'
+        }
+    else:  # white
+        return {
+            'bg_color': 'white',
+            'text_color': 'black',
+            'grid_color': '#cccccc',
+            'annotation_bg': 'white',
+            'annotation_edge': 'gray',
+            'edge_color': 'black',
+            'style': 'default'
+        }
+
+def apply_plot_style(bg_mode):
+    """Apply matplotlib style for given background mode."""
+    style = get_plot_style(bg_mode)
+    if bg_mode == 'black':
+        plt.style.use('dark_background')
+    else:
+        plt.style.use('default')
+    return style
+
+def get_backgrounds_to_generate():
+    """Return list of (bg_mode, suffix) tuples based on --background argument."""
+    if args.background == 'both':
+        return [('white', ''), ('black', '_dark')]
+    elif args.background == 'black':
+        return [('black', '')]
+    else:
+        return [('white', '')]
+
+# Initialize with first background mode (for any early plots)
+_bg_modes = get_backgrounds_to_generate()
+_current_style = apply_plot_style(_bg_modes[0][0])
+PLOT_BG_COLOR = _current_style['bg_color']
+PLOT_TEXT_COLOR = _current_style['text_color']
+PLOT_GRID_COLOR = _current_style['grid_color']
 
 # --- Helper functions ---
 def load_bed_file(filepath, sample_label=None):
@@ -953,6 +996,21 @@ read_to_sample = in_data.groupby('read')['sample'].first().to_dict()
 
 print(f"\nTotal records: {len(in_data):,}")
 print(f"Unique reads: {in_data['read'].nunique():,}")
+
+# --- Filter by read list (if provided) ---
+if args.read_list:
+    print(f"\n--- Filtering by read list ---")
+    print(f"  Read list file: {args.read_list}")
+    with open(args.read_list) as f:
+        include_reads = set(line.strip() for line in f if line.strip())
+    print(f"  Reads in list: {len(include_reads):,}")
+    reads_before = in_data['read'].nunique()
+    in_data = in_data[in_data['read'].isin(include_reads)]
+    read_to_sample = {r: s for r, s in read_to_sample.items() if r in include_reads}
+    reads_after = in_data['read'].nunique()
+    print(f"  Reads before filter: {reads_before:,}")
+    print(f"  Reads after filter: {reads_after:,}")
+    print(f"  Reads from list found in BED: {reads_after:,}")
 
 # Calculate feature lengths
 in_data['length'] = in_data['end'] - in_data['start']
@@ -1576,101 +1634,103 @@ if args.n_clusters is None:
     print(f"  Saved k analysis to: {stats_file}")
 
     # Generate k-selection diagnostic plot (2x4 grid)
-    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
-    fig.patch.set_facecolor(PLOT_BG_COLOR)
-    for ax in axes.flat:
-        ax.set_facecolor(PLOT_BG_COLOR)
+    for bg_mode, suffix in get_backgrounds_to_generate():
+        style = apply_plot_style(bg_mode)
+        fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+        fig.patch.set_facecolor(style['bg_color'])
+        for ax in axes.flat:
+            ax.set_facecolor(style['bg_color'])
 
-    # 1. Silhouette score (higher is better)
-    ax1 = axes[0, 0]
-    ax1.plot(stats_df['k'], stats_df['silhouette'], 'b-o', markersize=3)
-    ax1.set_xlabel('Number of clusters (k)')
-    ax1.set_ylabel('Silhouette Score')
-    ax1.set_title('Silhouette Score (higher = better)')
-    best_silhouette_k = int(stats_df.loc[stats_df['silhouette'].idxmax(), 'k'])
-    ax1.axvline(x=best_silhouette_k, color='g', linestyle='--', alpha=0.5, label=f'Best k={best_silhouette_k}')
-    ax1.legend()
+        # 1. Silhouette score (higher is better)
+        ax1 = axes[0, 0]
+        ax1.plot(stats_df['k'], stats_df['silhouette'], 'b-o', markersize=3)
+        ax1.set_xlabel('Number of clusters (k)')
+        ax1.set_ylabel('Silhouette Score')
+        ax1.set_title('Silhouette Score (higher = better)')
+        best_silhouette_k = int(stats_df.loc[stats_df['silhouette'].idxmax(), 'k'])
+        ax1.axvline(x=best_silhouette_k, color='g', linestyle='--', alpha=0.5, label=f'Best k={best_silhouette_k}')
+        ax1.legend()
 
-    # 2. Calinski-Harabasz index (higher is better)
-    ax2 = axes[0, 1]
-    ax2.plot(stats_df['k'], stats_df['calinski_harabasz'], 'b-o', markersize=3)
-    ax2.set_xlabel('Number of clusters (k)')
-    ax2.set_ylabel('Calinski-Harabasz Index')
-    ax2.set_title('Calinski-Harabasz (higher = better)')
-    best_ch_k = int(stats_df.loc[stats_df['calinski_harabasz'].idxmax(), 'k'])
-    ax2.axvline(x=best_ch_k, color='g', linestyle='--', alpha=0.5, label=f'Best k={best_ch_k}')
-    ax2.legend()
+        # 2. Calinski-Harabasz index (higher is better)
+        ax2 = axes[0, 1]
+        ax2.plot(stats_df['k'], stats_df['calinski_harabasz'], 'b-o', markersize=3)
+        ax2.set_xlabel('Number of clusters (k)')
+        ax2.set_ylabel('Calinski-Harabasz Index')
+        ax2.set_title('Calinski-Harabasz (higher = better)')
+        best_ch_k = int(stats_df.loc[stats_df['calinski_harabasz'].idxmax(), 'k'])
+        ax2.axvline(x=best_ch_k, color='g', linestyle='--', alpha=0.5, label=f'Best k={best_ch_k}')
+        ax2.legend()
 
-    # 3. Enrichment ratios
-    ax3 = axes[0, 2]
-    ax3.plot(stats_df['k'], stats_df['enriched_ratio'], '-o', markersize=3, label='Any enriched', color='blue')
-    ax3.plot(stats_df['k'], stats_df['strong_ratio'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
-    ax3.plot(stats_df['k'], stats_df['perfect_ratio'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='red')
-    ax3.set_xlabel('Number of clusters (k)')
-    ax3.set_ylabel('Ratio (enriched / valid clusters)')
-    ax3.set_title('Enrichment Ratios')
-    ax3.set_ylim(0, 1)
-    ax3.legend()
+        # 3. Enrichment ratios
+        ax3 = axes[0, 2]
+        ax3.plot(stats_df['k'], stats_df['enriched_ratio'], '-o', markersize=3, label='Any enriched', color='blue')
+        ax3.plot(stats_df['k'], stats_df['strong_ratio'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
+        ax3.plot(stats_df['k'], stats_df['perfect_ratio'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='red')
+        ax3.set_xlabel('Number of clusters (k)')
+        ax3.set_ylabel('Ratio (enriched / valid clusters)')
+        ax3.set_title('Enrichment Ratios')
+        ax3.set_ylim(0, 1)
+        ax3.legend()
 
-    # 4. Enrichment counts (absolute)
-    ax4 = axes[0, 3]
-    ax4.plot(stats_df['k'], stats_df['any_enriched'], '-o', markersize=3, label='Any enriched', color='blue')
-    ax4.plot(stats_df['k'], stats_df['strong_enriched'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
-    ax4.plot(stats_df['k'], stats_df['perfect_enriched'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='red')
-    ax4.set_xlabel('Number of clusters (k)')
-    ax4.set_ylabel('Number of clusters')
-    ax4.set_title('Enrichment Counts (absolute)')
-    ax4.legend()
+        # 4. Enrichment counts (absolute)
+        ax4 = axes[0, 3]
+        ax4.plot(stats_df['k'], stats_df['any_enriched'], '-o', markersize=3, label='Any enriched', color='blue')
+        ax4.plot(stats_df['k'], stats_df['strong_enriched'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
+        ax4.plot(stats_df['k'], stats_df['perfect_enriched'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='red')
+        ax4.set_xlabel('Number of clusters (k)')
+        ax4.set_ylabel('Number of clusters')
+        ax4.set_title('Enrichment Counts (absolute)')
+        ax4.legend()
 
-    # 5. Enrichment by group
-    ax5 = axes[1, 0]
-    for g in all_groups:
-        col = f'{g}_enriched'
-        if col in stats_df.columns:
-            ax5.plot(stats_df['k'], stats_df[col], '-o', markersize=3, label=f'{g}-enriched', color=group_colors.get(g, None))
-    ax5.plot(stats_df['k'], stats_df['mixed'], '-o', markersize=3, label='Mixed', color='gray')
-    ax5.set_xlabel('Number of clusters (k)')
-    ax5.set_ylabel('Number of clusters')
-    ax5.set_title('Enrichment by Group')
-    ax5.legend()
+        # 5. Enrichment by group
+        ax5 = axes[1, 0]
+        for g in all_groups:
+            col = f'{g}_enriched'
+            if col in stats_df.columns:
+                ax5.plot(stats_df['k'], stats_df[col], '-o', markersize=3, label=f'{g}-enriched', color=group_colors.get(g, None))
+        ax5.plot(stats_df['k'], stats_df['mixed'], '-o', markersize=3, label='Mixed', color='gray')
+        ax5.set_xlabel('Number of clusters (k)')
+        ax5.set_ylabel('Number of clusters')
+        ax5.set_title('Enrichment by Group')
+        ax5.legend()
 
-    # 6. Reads in enriched clusters (absolute counts)
-    ax6 = axes[1, 1]
-    ax6.plot(stats_df['k'], stats_df['any_enriched_reads'], '-o', markersize=3, label='Any enriched', color='blue')
-    ax6.plot(stats_df['k'], stats_df['strong_reads'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
-    ax6.plot(stats_df['k'], stats_df['perfect_reads'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='red')
-    ax6.set_xlabel('Number of clusters (k)')
-    ax6.set_ylabel('Number of reads')
-    ax6.set_title('Reads in Enriched Clusters (count)')
-    ax6.legend()
+        # 6. Reads in enriched clusters (absolute counts)
+        ax6 = axes[1, 1]
+        ax6.plot(stats_df['k'], stats_df['any_enriched_reads'], '-o', markersize=3, label='Any enriched', color='blue')
+        ax6.plot(stats_df['k'], stats_df['strong_reads'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
+        ax6.plot(stats_df['k'], stats_df['perfect_reads'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='red')
+        ax6.set_xlabel('Number of clusters (k)')
+        ax6.set_ylabel('Number of reads')
+        ax6.set_title('Reads in Enriched Clusters (count)')
+        ax6.legend()
 
-    # 7. Reads in enriched clusters (percentages)
-    ax7 = axes[1, 2]
-    ax7.plot(stats_df['k'], stats_df['any_enriched_reads_pct'], '-o', markersize=3, label='Any enriched', color='blue')
-    ax7.plot(stats_df['k'], stats_df['strong_reads_pct'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
-    ax7.plot(stats_df['k'], stats_df['perfect_reads_pct'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='red')
-    ax7.set_xlabel('Number of clusters (k)')
-    ax7.set_ylabel('Percent of reads')
-    ax7.set_title('Reads in Enriched Clusters (%)')
-    ax7.set_ylim(0, 100)
-    ax7.legend()
+        # 7. Reads in enriched clusters (percentages)
+        ax7 = axes[1, 2]
+        ax7.plot(stats_df['k'], stats_df['any_enriched_reads_pct'], '-o', markersize=3, label='Any enriched', color='blue')
+        ax7.plot(stats_df['k'], stats_df['strong_reads_pct'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
+        ax7.plot(stats_df['k'], stats_df['perfect_reads_pct'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='red')
+        ax7.set_xlabel('Number of clusters (k)')
+        ax7.set_ylabel('Percent of reads')
+        ax7.set_title('Reads in Enriched Clusters (%)')
+        ax7.set_ylim(0, 100)
+        ax7.legend()
 
-    # 8. Composite score (our recommended metric) - last position
-    ax8 = axes[1, 3]
-    ax8.plot(stats_df['k'], stats_df['composite_score'], 'b-o', markersize=3)
-    ax8.set_xlabel('Number of clusters (k)')
-    ax8.set_ylabel('Composite Score')
-    ax8.set_title('Composite Score (silhouette + enrichment)')
-    best_composite_k = int(stats_df.loc[stats_df['composite_score'].idxmax(), 'k'])
-    ax8.axvline(x=best_composite_k, color='g', linestyle='--', alpha=0.5, label=f'Best k={best_composite_k}')
-    ax8.axhline(y=stats_df['composite_score'].max(), color='r', linestyle='--', alpha=0.3)
-    ax8.legend()
+        # 8. Composite score (our recommended metric) - last position
+        ax8 = axes[1, 3]
+        ax8.plot(stats_df['k'], stats_df['composite_score'], 'b-o', markersize=3)
+        ax8.set_xlabel('Number of clusters (k)')
+        ax8.set_ylabel('Composite Score')
+        ax8.set_title('Composite Score (silhouette + enrichment)')
+        best_composite_k = int(stats_df.loc[stats_df['composite_score'].idxmax(), 'k'])
+        ax8.axvline(x=best_composite_k, color='g', linestyle='--', alpha=0.5, label=f'Best k={best_composite_k}')
+        ax8.axhline(y=stats_df['composite_score'].max(), color='r', linestyle='--', alpha=0.3)
+        ax8.legend()
 
-    plt.tight_layout()
-    k_plot_file = f"{args.output_prefix}.k_selection.pdf"
-    plt.savefig(k_plot_file, dpi=150, bbox_inches='tight', facecolor=PLOT_BG_COLOR)
-    plt.close()
-    print(f"  Saved k-selection plot to: {k_plot_file}")
+        plt.tight_layout()
+        k_plot_file = f"{args.output_prefix}{suffix}.k_selection.pdf"
+        plt.savefig(k_plot_file, dpi=150, bbox_inches='tight', facecolor=style['bg_color'])
+        plt.close()
+        print(f"  Saved k-selection plot to: {k_plot_file}")
 
     # Calculate knee point (diminishing returns)
     # Use FIXED normalization bounds to make knee detection independent of max-k
@@ -1702,66 +1762,68 @@ if args.n_clusters is None:
     best_knee_raw_k = int(k_values[best_knee_raw_idx])
 
     # Generate knee diagnostic plot
-    fig_knee, axes_knee = plt.subplots(2, 2, figsize=(12, 10))
-    fig_knee.patch.set_facecolor(PLOT_BG_COLOR)
-    for ax in axes_knee.flat:
-        ax.set_facecolor(PLOT_BG_COLOR)
+    for bg_mode, suffix in get_backgrounds_to_generate():
+        style = apply_plot_style(bg_mode)
+        fig_knee, axes_knee = plt.subplots(2, 2, figsize=(12, 10))
+        fig_knee.patch.set_facecolor(style['bg_color'])
+        for ax in axes_knee.flat:
+            ax.set_facecolor(style['bg_color'])
 
-    # 1. Raw composite score
-    ax1 = axes_knee[0, 0]
-    ax1.plot(k_values, scores, 'b-', linewidth=1.5)
-    ax1.axvline(x=best_knee_k, color='r', linestyle='--', label=f'Knee k={best_knee_k}')
-    ax1.set_xlabel('Number of clusters (k)')
-    ax1.set_ylabel('Composite Score')
-    ax1.set_title('1. Raw Composite Score')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
+        # 1. Raw composite score
+        ax1 = axes_knee[0, 0]
+        ax1.plot(k_values, scores, 'b-', linewidth=1.5)
+        ax1.axvline(x=best_knee_k, color='r', linestyle='--', label=f'Knee k={best_knee_k}')
+        ax1.set_xlabel('Number of clusters (k)')
+        ax1.set_ylabel('Composite Score')
+        ax1.set_title('1. Raw Composite Score')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
 
-    # 2. Normalized values with diagonal
-    ax2 = axes_knee[0, 1]
-    ax2.plot(k_norm, score_norm, 'b-', linewidth=1.5, label='Normalized curve')
-    ax2.plot([0, 1], [0, 1], 'k--', alpha=0.5, label='Diagonal (no improvement)')
-    knee_k_norm = k_norm[best_knee_idx]
-    knee_score_norm = score_norm[best_knee_idx]
-    ax2.scatter([knee_k_norm], [knee_score_norm], color='r', s=100, zorder=5, label=f'Knee k={best_knee_k}')
-    ax2.plot([knee_k_norm, knee_k_norm], [knee_k_norm, knee_score_norm], 'r-', linewidth=2, alpha=0.7)
-    ax2.set_xlabel(f'Normalized k (range: {int(k_min_obs)}-{int(k_max_obs)})')
-    ax2.set_ylabel('Normalized Score')
-    ax2.set_title('2. Kneedle: Observed Range Normalization')
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    ax2.set_xlim(-0.05, 1.05)
-    ax2.set_ylim(-0.05, 1.05)
+        # 2. Normalized values with diagonal
+        ax2 = axes_knee[0, 1]
+        ax2.plot(k_norm, score_norm, 'b-', linewidth=1.5, label='Normalized curve')
+        ax2.plot([0, 1], [0, 1], 'k--', alpha=0.5, label='Diagonal (no improvement)')
+        knee_k_norm = k_norm[best_knee_idx]
+        knee_score_norm = score_norm[best_knee_idx]
+        ax2.scatter([knee_k_norm], [knee_score_norm], color='r', s=100, zorder=5, label=f'Knee k={best_knee_k}')
+        ax2.plot([knee_k_norm, knee_k_norm], [knee_k_norm, knee_score_norm], 'r-', linewidth=2, alpha=0.7)
+        ax2.set_xlabel(f'Normalized k (range: {int(k_min_obs)}-{int(k_max_obs)})')
+        ax2.set_ylabel('Normalized Score')
+        ax2.set_title('2. Kneedle: Observed Range Normalization')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        ax2.set_xlim(-0.05, 1.05)
+        ax2.set_ylim(-0.05, 1.05)
 
-    # 3. Composite-knee distance (raw and smoothed)
-    ax3 = axes_knee[1, 0]
-    ax3.plot(k_values, knee_distance, 'b-', alpha=0.5, label='Raw distance')
-    ax3.plot(k_values, knee_smooth, 'b-', linewidth=2, label=f'Smoothed (window={window_size})')
-    ax3.axvline(x=best_knee_k, color='r', linestyle='--', label=f'Smoothed k={best_knee_k}')
-    ax3.axvline(x=best_knee_raw_k, color='orange', linestyle=':', linewidth=2, label=f'Raw k={best_knee_raw_k}')
-    ax3.axhline(y=0, color='k', linestyle='-', alpha=0.3)
-    ax3.set_xlabel('Number of clusters (k)')
-    ax3.set_ylabel('Distance from Diagonal')
-    ax3.set_title('3. Composite-Knee Distance')
-    ax3.legend()
-    ax3.grid(True, alpha=0.3)
+        # 3. Composite-knee distance (raw and smoothed)
+        ax3 = axes_knee[1, 0]
+        ax3.plot(k_values, knee_distance, 'b-', alpha=0.5, label='Raw distance')
+        ax3.plot(k_values, knee_smooth, 'b-', linewidth=2, label=f'Smoothed (window={window_size})')
+        ax3.axvline(x=best_knee_k, color='r', linestyle='--', label=f'Smoothed k={best_knee_k}')
+        ax3.axvline(x=best_knee_raw_k, color='orange', linestyle=':', linewidth=2, label=f'Raw k={best_knee_raw_k}')
+        ax3.axhline(y=0, color='k', linestyle='-', alpha=0.3)
+        ax3.set_xlabel('Number of clusters (k)')
+        ax3.set_ylabel('Distance from Diagonal')
+        ax3.set_title('3. Composite-Knee Distance')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
 
-    # 4. Enrichment vs k with composite-knee point
-    ax4 = axes_knee[1, 1]
-    ax4.plot(k_values, stats_df['enriched_ratio'].values * 100, 'g-', label='Any enriched %')
-    ax4.plot(k_values, stats_df['strong_ratio'].values * 100, 'orange', label='Strong (≥80%) %')
-    ax4.axvline(x=best_knee_raw_k, color='orange', linestyle=':', linewidth=2, label=f'Composite-knee k={best_knee_raw_k}')
-    ax4.set_xlabel('Number of clusters (k)')
-    ax4.set_ylabel('Enrichment Ratio (%)')
-    ax4.set_title('4. Enrichment at Composite-Knee')
-    ax4.legend()
-    ax4.grid(True, alpha=0.3)
+        # 4. Enrichment vs k with composite-knee point
+        ax4 = axes_knee[1, 1]
+        ax4.plot(k_values, stats_df['enriched_ratio'].values * 100, 'g-', label='Any enriched %')
+        ax4.plot(k_values, stats_df['strong_ratio'].values * 100, 'orange', label='Strong (≥80%) %')
+        ax4.axvline(x=best_knee_raw_k, color='orange', linestyle=':', linewidth=2, label=f'Composite-knee k={best_knee_raw_k}')
+        ax4.set_xlabel('Number of clusters (k)')
+        ax4.set_ylabel('Enrichment Ratio (%)')
+        ax4.set_title('4. Enrichment at Composite-Knee')
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
 
-    plt.tight_layout()
-    knee_plot_file = f"{args.output_prefix}.composite_knee_diagnostic.pdf"
-    plt.savefig(knee_plot_file, dpi=150, bbox_inches='tight', facecolor=PLOT_BG_COLOR)
-    plt.close()
-    print(f"  Saved composite-knee diagnostic plot to: {knee_plot_file}")
+        plt.tight_layout()
+        knee_plot_file = f"{args.output_prefix}{suffix}.composite_knee_diagnostic.pdf"
+        plt.savefig(knee_plot_file, dpi=150, bbox_inches='tight', facecolor=style['bg_color'])
+        plt.close()
+        print(f"  Saved composite-knee diagnostic plot to: {knee_plot_file}")
 
     # Find best k by each metric
     print(f"\n  Optimal k by metric:")
@@ -2116,14 +2178,6 @@ print(f"  Saved sample metadata to: {metadata_out_file}")
 # --- Generate visualization ---
 print(f"\n--- Generating cluster visualization ---")
 
-# Use 3x2 layout for per-sample mode (to show both sample and group composition)
-if args.comparison_mode == 'per-sample':
-    fig, axes = plt.subplots(3, 2, figsize=(16, 18))
-else:
-    fig, axes = plt.subplots(2, 2, figsize=(16, 14))
-fig.patch.set_facecolor(PLOT_BG_COLOR)
-for ax in axes.flat:
-    ax.set_facecolor(PLOT_BG_COLOR)
 from scipy.cluster.hierarchy import set_link_color_palette
 from matplotlib.patches import Patch
 
@@ -2154,162 +2208,174 @@ set_link_color_palette([matplotlib.colors.rgb2hex(c) for c in colors])
 # Create cluster to enrichment mapping
 cluster_to_enrichment = dict(zip(cluster_df['cluster_id'], cluster_df['enrichment']))
 
-# 1. Linear Dendrogram with cluster coloring
-ax1 = axes[0, 0]
-dend = dendrogram(
-    linkage_matrix,
-    ax=ax1,
-    no_labels=True,
-    color_threshold=linkage_matrix[-(n_clusters-1), 2] if n_clusters > 1 else 0
-)
-ax1.set_title(f"Dendrogram (k={n_clusters} clusters)")
-ax1.set_ylabel("Distance")
-ax1.axhline(y=linkage_matrix[-(n_clusters-1), 2] if n_clusters > 1 else 0,
-            color='red', linestyle='--', alpha=0.5, label='Cut height')
-ax1.legend()
+for bg_mode, suffix in get_backgrounds_to_generate():
+    style = apply_plot_style(bg_mode)
 
-# 2. Cluster size distribution
-ax2 = axes[0, 1]
-cluster_sizes = cluster_df['size'].values
-cluster_ids = cluster_df['cluster_id'].values
-enrichments = cluster_df['enrichment'].values
-
-# Map enrichments to colors - use sample_colors in per-sample mode, group_colors otherwise
-def get_enrichment_color(e):
+    # Use 3x2 layout for per-sample mode (to show both sample and group composition)
     if args.comparison_mode == 'per-sample':
-        # Check sample colors first
-        for s, color in sample_colors.items():
-            if e == f'{s}-enriched':
-                return color
-    # Then check group colors
-    for g, color in group_colors.items():
-        if e == f'{g}-enriched':
-            return color
-    return '#999999'  # Mixed
-
-colors_bar = [get_enrichment_color(e) for e in enrichments]
-bars = ax2.bar(range(len(cluster_sizes)), cluster_sizes, color=colors_bar)
-ax2.set_xlabel("Cluster")
-ax2.set_ylabel("Size (reads)")
-ax2.set_title("Cluster Sizes by Enrichment")
-ax2.set_xticks(range(len(cluster_sizes)))
-ax2.set_xticklabels([f"C{c}" for c in cluster_ids], rotation=45)
-
-# Legend - dynamic based on groups or samples
-if args.comparison_mode == 'per-sample':
-    legend_patches = [Patch(facecolor=c, label=f'{s}-enriched') for s, c in sample_colors.items()]
-else:
-    legend_patches = [Patch(facecolor=c, label=f'{g}-enriched') for g, c in group_colors.items()]
-legend_patches.append(Patch(facecolor='#999999', label='Mixed'))
-ax2.legend(handles=legend_patches, loc='upper right', fontsize=7)
-
-# 3. Group composition per cluster
-ax3 = axes[1, 0]
-x = np.arange(len(cluster_df))
-
-# Use sample labels/colors in per-sample mode, group labels/colors otherwise
-if args.comparison_mode == 'per-sample':
-    comp_items = sample_labels
-    comp_colors = sample_colors
-    comp_title = "Sample Composition per Cluster"
-else:
-    comp_items = all_groups
-    comp_colors = group_colors
-    comp_title = "Group Composition per Cluster"
-
-n_comp = len(comp_items)
-width = 0.8 / n_comp
-
-for i, item in enumerate(comp_items):
-    offset = (i - n_comp / 2 + 0.5) * width
-    pct_col = f'{item}_pct'
-    if pct_col in cluster_df.columns:
-        ax3.bar(x + offset, cluster_df[pct_col], width, label=item, color=comp_colors.get(item, '#999999'))
-
-ax3.set_xlabel("Cluster")
-ax3.set_ylabel("Percentage")
-ax3.set_title(comp_title)
-ax3.set_xticks(x)
-ax3.set_xticklabels([f"C{c}" for c in cluster_df['cluster_id']], rotation=45)
-ax3.legend()
-if n_comp == 2:
-    ax3.axhline(y=50, color='gray', linestyle='--', alpha=0.5)
-
-# 4. Q-value (FDR-corrected) distribution
-ax4 = axes[1, 1]
-qvals = cluster_df['q_value'].values
-colors_qval = [get_enrichment_color(e) for e in cluster_df['enrichment']]
-ax4.bar(range(len(qvals)), -np.log10(qvals + 1e-300), color=colors_qval)
-ax4.axhline(y=-np.log10(0.05), color='red', linestyle='--', alpha=0.7, label='q=0.05')
-ax4.axhline(y=-np.log10(0.10), color='orange', linestyle='--', alpha=0.5, label='q=0.10')
-if args.fdr_threshold not in (0.05, 0.10):
-    ax4.axhline(y=-np.log10(args.fdr_threshold), color='blue', linestyle='--', alpha=0.7, label=f'q={args.fdr_threshold}')
-ax4.set_xlabel("Cluster")
-ax4.set_ylabel("-log10(q-value)")
-ax4.set_title("FDR-Corrected Significance (per-sample)" if args.comparison_mode == 'per-sample' else "FDR-Corrected Significance")
-ax4.set_xticks(range(len(qvals)))
-ax4.set_xticklabels([f"C{c}" for c in cluster_df['cluster_id']], rotation=45)
-ax4.legend()
-
-# 5 & 6. Additional panels for per-sample mode: Group composition and group-level p-values
-if args.comparison_mode == 'per-sample':
-    # 5. Group composition per cluster
-    ax5 = axes[2, 0]
-    x = np.arange(len(cluster_df))
-    n_groups = len(all_groups)
-    width = 0.8 / n_groups
-
-    for i, g in enumerate(all_groups):
-        offset = (i - n_groups / 2 + 0.5) * width
-        pct_col = f'{g}_pct'
-        if pct_col in cluster_df.columns:
-            ax5.bar(x + offset, cluster_df[pct_col], width, label=g, color=group_colors.get(g, '#999999'))
-
-    ax5.set_xlabel("Cluster")
-    ax5.set_ylabel("Percentage")
-    ax5.set_title("Group Composition per Cluster")
-    ax5.set_xticks(x)
-    ax5.set_xticklabels([f"C{c}" for c in cluster_df['cluster_id']], rotation=45)
-    ax5.legend()
-    if n_groups == 2:
-        ax5.axhline(y=50, color='gray', linestyle='--', alpha=0.5)
-
-    # 6. Group-level p-values (if available)
-    ax6 = axes[2, 1]
-    if 'group_p_value' in cluster_df.columns:
-        group_pvals = cluster_df['group_p_value'].values
-        group_enrichments = cluster_df['group_enrichment'].values
-
-        def get_group_enrichment_color(e):
-            for grp, clr in group_colors.items():
-                if e == f'{grp}-enriched':
-                    return clr
-            return '#999999'
-
-        colors_group_pval = [get_group_enrichment_color(e) for e in group_enrichments]
-        ax6.bar(range(len(group_pvals)), -np.log10(group_pvals + 1e-300), color=colors_group_pval)
-        ax6.axhline(y=-np.log10(0.05), color='red', linestyle='--', alpha=0.5, label='p=0.05')
-        ax6.axhline(y=-np.log10(0.01), color='orange', linestyle='--', alpha=0.5, label='p=0.01')
-        ax6.set_xlabel("Cluster")
-        ax6.set_ylabel("-log10(p-value)")
-        ax6.set_title("Enrichment Significance (group-level)")
-        ax6.set_xticks(range(len(group_pvals)))
-        ax6.set_xticklabels([f"C{c}" for c in cluster_df['cluster_id']], rotation=45)
-
-        # Legend for group enrichment
-        group_legend_patches = [Patch(facecolor=c, label=f'{g}-enriched') for g, c in group_colors.items()]
-        group_legend_patches.append(Patch(facecolor='#999999', label='Mixed'))
-        ax6.legend(handles=group_legend_patches, loc='upper right', fontsize=7)
+        fig, axes = plt.subplots(3, 2, figsize=(16, 18))
     else:
-        ax6.text(0.5, 0.5, "Group-level enrichment\nnot available\n(requires 2 groups)",
-                 ha='center', va='center', fontsize=12, transform=ax6.transAxes)
-        ax6.set_axis_off()
+        fig, axes = plt.subplots(2, 2, figsize=(16, 14))
+    fig.patch.set_facecolor(style['bg_color'])
+    for ax in axes.flat:
+        ax.set_facecolor(style['bg_color'])
 
-plt.tight_layout()
-plot_file = f"{args.output_prefix}.cluster_analysis.pdf"
-plt.savefig(plot_file, dpi=150, bbox_inches='tight', facecolor=PLOT_BG_COLOR)
-plt.close()
-print(f"  Saved cluster visualization to: {plot_file}")
+    # 1. Linear Dendrogram with cluster coloring
+    ax1 = axes[0, 0]
+    dend = dendrogram(
+        linkage_matrix,
+        ax=ax1,
+        no_labels=True,
+        color_threshold=linkage_matrix[-(n_clusters-1), 2] if n_clusters > 1 else 0
+    )
+    ax1.set_title(f"Dendrogram (k={n_clusters} clusters)")
+    ax1.set_ylabel("Distance")
+    ax1.axhline(y=linkage_matrix[-(n_clusters-1), 2] if n_clusters > 1 else 0,
+                color='red', linestyle='--', alpha=0.5, label='Cut height')
+    ax1.legend()
+
+    # 2. Cluster size distribution
+    ax2 = axes[0, 1]
+    cluster_sizes = cluster_df['size'].values
+    cluster_ids = cluster_df['cluster_id'].values
+    enrichments = cluster_df['enrichment'].values
+
+    # Map enrichments to colors - use sample_colors in per-sample mode, group_colors otherwise
+    def get_enrichment_color(e):
+        if args.comparison_mode == 'per-sample':
+            # Check sample colors first
+            for s, color in sample_colors.items():
+                if e == f'{s}-enriched':
+                    return color
+        # Then check group colors
+        for g, color in group_colors.items():
+            if e == f'{g}-enriched':
+                return color
+        return '#999999'  # Mixed
+
+    colors_bar = [get_enrichment_color(e) for e in enrichments]
+    bars = ax2.bar(range(len(cluster_sizes)), cluster_sizes, color=colors_bar)
+    ax2.set_xlabel("Cluster")
+    ax2.set_ylabel("Size (reads)")
+    ax2.set_title("Cluster Sizes by Enrichment")
+    ax2.set_xticks(range(len(cluster_sizes)))
+    ax2.set_xticklabels([f"C{c}" for c in cluster_ids], rotation=45)
+
+    # Legend - dynamic based on groups or samples
+    if args.comparison_mode == 'per-sample':
+        legend_patches = [Patch(facecolor=c, label=f'{s}-enriched') for s, c in sample_colors.items()]
+    else:
+        legend_patches = [Patch(facecolor=c, label=f'{g}-enriched') for g, c in group_colors.items()]
+    legend_patches.append(Patch(facecolor='#999999', label='Mixed'))
+    ax2.legend(handles=legend_patches, loc='upper right', fontsize=7)
+
+    # 3. Group composition per cluster
+    ax3 = axes[1, 0]
+    x = np.arange(len(cluster_df))
+
+    # Use sample labels/colors in per-sample mode, group labels/colors otherwise
+    if args.comparison_mode == 'per-sample':
+        comp_items = sample_labels
+        comp_colors = sample_colors
+        comp_title = "Sample Composition per Cluster"
+    else:
+        comp_items = all_groups
+        comp_colors = group_colors
+        comp_title = "Group Composition per Cluster"
+
+    n_comp = len(comp_items)
+    width = 0.8 / n_comp
+
+    for i, item in enumerate(comp_items):
+        offset = (i - n_comp / 2 + 0.5) * width
+        pct_col = f'{item}_pct'
+        if pct_col in cluster_df.columns:
+            ax3.bar(x + offset, cluster_df[pct_col], width, label=item, color=comp_colors.get(item, '#999999'))
+
+    ax3.set_xlabel("Cluster")
+    ax3.set_ylabel("Percentage")
+    ax3.set_title(comp_title)
+    ax3.set_xticks(x)
+    ax3.set_xticklabels([f"C{c}" for c in cluster_df['cluster_id']], rotation=45)
+    ax3.legend()
+    if n_comp == 2:
+        ax3.axhline(y=50, color='gray', linestyle='--', alpha=0.5)
+
+    # 4. Q-value (FDR-corrected) distribution
+    ax4 = axes[1, 1]
+    qvals = cluster_df['q_value'].values
+    colors_qval = [get_enrichment_color(e) for e in cluster_df['enrichment']]
+    ax4.bar(range(len(qvals)), -np.log10(qvals + 1e-300), color=colors_qval)
+    ax4.axhline(y=-np.log10(0.05), color='red', linestyle='--', alpha=0.7, label='q=0.05')
+    ax4.axhline(y=-np.log10(0.10), color='orange', linestyle='--', alpha=0.5, label='q=0.10')
+    if args.fdr_threshold not in (0.05, 0.10):
+        ax4.axhline(y=-np.log10(args.fdr_threshold), color='blue', linestyle='--', alpha=0.7, label=f'q={args.fdr_threshold}')
+    ax4.set_xlabel("Cluster")
+    ax4.set_ylabel("-log10(q-value)")
+    ax4.set_title("FDR-Corrected Significance (per-sample)" if args.comparison_mode == 'per-sample' else "FDR-Corrected Significance")
+    ax4.set_xticks(range(len(qvals)))
+    ax4.set_xticklabels([f"C{c}" for c in cluster_df['cluster_id']], rotation=45)
+    ax4.legend()
+
+    # 5 & 6. Additional panels for per-sample mode: Group composition and group-level p-values
+    if args.comparison_mode == 'per-sample':
+        # 5. Group composition per cluster
+        ax5 = axes[2, 0]
+        x = np.arange(len(cluster_df))
+        n_groups = len(all_groups)
+        width = 0.8 / n_groups
+
+        for i, g in enumerate(all_groups):
+            offset = (i - n_groups / 2 + 0.5) * width
+            pct_col = f'{g}_pct'
+            if pct_col in cluster_df.columns:
+                ax5.bar(x + offset, cluster_df[pct_col], width, label=g, color=group_colors.get(g, '#999999'))
+
+        ax5.set_xlabel("Cluster")
+        ax5.set_ylabel("Percentage")
+        ax5.set_title("Group Composition per Cluster")
+        ax5.set_xticks(x)
+        ax5.set_xticklabels([f"C{c}" for c in cluster_df['cluster_id']], rotation=45)
+        ax5.legend()
+        if n_groups == 2:
+            ax5.axhline(y=50, color='gray', linestyle='--', alpha=0.5)
+
+        # 6. Group-level p-values (if available)
+        ax6 = axes[2, 1]
+        if 'group_p_value' in cluster_df.columns:
+            group_pvals = cluster_df['group_p_value'].values
+            group_enrichments = cluster_df['group_enrichment'].values
+
+            def get_group_enrichment_color(e):
+                for grp, clr in group_colors.items():
+                    if e == f'{grp}-enriched':
+                        return clr
+                return '#999999'
+
+            colors_group_pval = [get_group_enrichment_color(e) for e in group_enrichments]
+            ax6.bar(range(len(group_pvals)), -np.log10(group_pvals + 1e-300), color=colors_group_pval)
+            ax6.axhline(y=-np.log10(0.05), color='red', linestyle='--', alpha=0.5, label='p=0.05')
+            ax6.axhline(y=-np.log10(0.01), color='orange', linestyle='--', alpha=0.5, label='p=0.01')
+            ax6.set_xlabel("Cluster")
+            ax6.set_ylabel("-log10(p-value)")
+            ax6.set_title("Enrichment Significance (group-level)")
+            ax6.set_xticks(range(len(group_pvals)))
+            ax6.set_xticklabels([f"C{c}" for c in cluster_df['cluster_id']], rotation=45)
+
+            # Legend for group enrichment
+            group_legend_patches = [Patch(facecolor=c, label=f'{g}-enriched') for g, c in group_colors.items()]
+            group_legend_patches.append(Patch(facecolor='#999999', label='Mixed'))
+            ax6.legend(handles=group_legend_patches, loc='upper right', fontsize=7)
+        else:
+            ax6.text(0.5, 0.5, "Group-level enrichment\nnot available\n(requires 2 groups)",
+                     ha='center', va='center', fontsize=12, transform=ax6.transAxes)
+            ax6.set_axis_off()
+
+    plt.tight_layout()
+    plot_file = f"{args.output_prefix}{suffix}.cluster_analysis.pdf"
+    plt.savefig(plot_file, dpi=150, bbox_inches='tight', facecolor=style['bg_color'])
+    plt.close()
+    print(f"  Saved cluster visualization to: {plot_file}")
 
 # --- Circular Dendrogram (separate output) ---
 if args.plot_circular_dendrogram:
@@ -2339,101 +2405,105 @@ if args.plot_circular_dendrogram:
         enrichment_colors = {f'{g}-enriched': c for g, c in group_colors.items()}
     enrichment_colors['mixed'] = '#CCCCCC'
 
-    # Create figure with circular dendrogram
-    fig_circ = plt.figure(figsize=(16, 14))
-    fig_circ.patch.set_facecolor(PLOT_BG_COLOR)
-    ax_circ = fig_circ.add_subplot(111, polar=True)
-    ax_circ.set_facecolor(PLOT_BG_COLOR)
+    # Generate circular dendrogram for each background mode
+    for bg_mode, suffix in get_backgrounds_to_generate():
+        style = apply_plot_style(bg_mode)
 
-    # Plot each link in polar coordinates
-    # scipy dendrogram icoord/dcoord are 4-point U-shapes: [x1, x1, x2, x2], [y1, y_merge, y_merge, y2]
-    # In polar coords, we need: radial lines (constant theta) and arcs (constant radius)
-    for xcoord, ycoord, color in zip(dend_colored['icoord'], dend_colored['dcoord'], dend_colored['color_list']):
-        # Convert to polar coordinates
-        theta1 = 2 * np.pi * xcoord[0] / (n_leaves * 10)
-        theta2 = 2 * np.pi * xcoord[3] / (n_leaves * 10)
-        r_leaf1 = max_dist - ycoord[0] + max_dist * 0.1  # bottom of left branch
-        r_leaf2 = max_dist - ycoord[3] + max_dist * 0.1  # bottom of right branch
-        r_merge = max_dist - ycoord[1] + max_dist * 0.1  # merge height (top of U)
+        # Create figure with circular dendrogram
+        fig_circ = plt.figure(figsize=(16, 14))
+        fig_circ.patch.set_facecolor(style['bg_color'])
+        ax_circ = fig_circ.add_subplot(111, polar=True)
+        ax_circ.set_facecolor(style['bg_color'])
 
-        # Draw left vertical (radial) line
-        ax_circ.plot([theta1, theta1], [r_leaf1, r_merge], color=color, linewidth=0.5)
+        # Plot each link in polar coordinates
+        # scipy dendrogram icoord/dcoord are 4-point U-shapes: [x1, x1, x2, x2], [y1, y_merge, y_merge, y2]
+        # In polar coords, we need: radial lines (constant theta) and arcs (constant radius)
+        for xcoord, ycoord, color in zip(dend_colored['icoord'], dend_colored['dcoord'], dend_colored['color_list']):
+            # Convert to polar coordinates
+            theta1 = 2 * np.pi * xcoord[0] / (n_leaves * 10)
+            theta2 = 2 * np.pi * xcoord[3] / (n_leaves * 10)
+            r_leaf1 = max_dist - ycoord[0] + max_dist * 0.1  # bottom of left branch
+            r_leaf2 = max_dist - ycoord[3] + max_dist * 0.1  # bottom of right branch
+            r_merge = max_dist - ycoord[1] + max_dist * 0.1  # merge height (top of U)
 
-        # Draw right vertical (radial) line
-        ax_circ.plot([theta2, theta2], [r_leaf2, r_merge], color=color, linewidth=0.5)
+            # Draw left vertical (radial) line
+            ax_circ.plot([theta1, theta1], [r_leaf1, r_merge], color=color, linewidth=0.5)
 
-        # Draw horizontal arc at merge height
-        # Need to interpolate between theta1 and theta2 at constant radius
-        n_arc_points = max(10, int(abs(theta2 - theta1) * 20))  # more points for larger arcs
-        theta_arc = np.linspace(theta1, theta2, n_arc_points)
-        r_arc = np.full(n_arc_points, r_merge)
-        ax_circ.plot(theta_arc, r_arc, color=color, linewidth=0.5)
+            # Draw right vertical (radial) line
+            ax_circ.plot([theta2, theta2], [r_leaf2, r_merge], color=color, linewidth=0.5)
 
-    # Calculate theta positions for leaves - must match dendrogram icoord positions
-    # scipy dendrogram places leaves at x = 5, 15, 25, ... (i.e., 10*i + 5 for leaf i)
-    # We convert these to angles the same way as the dendrogram branches
-    theta_leaves = np.array([2 * np.pi * (10 * i + 5) / (n_leaves * 10) for i in range(n_leaves)])
+            # Draw horizontal arc at merge height
+            # Need to interpolate between theta1 and theta2 at constant radius
+            n_arc_points = max(10, int(abs(theta2 - theta1) * 20))  # more points for larger arcs
+            theta_arc = np.linspace(theta1, theta2, n_arc_points)
+            r_arc = np.full(n_arc_points, r_merge)
+            ax_circ.plot(theta_arc, r_arc, color=color, linewidth=0.5)
 
-    # Ring 1 (innermost): Sample of origin
-    ring1_bottom = max_dist * 1.12
-    ring1_height = max_dist * 0.06
-    for theta, sample in zip(theta_leaves, leaf_samples):
-        ax_circ.bar(theta, ring1_height, width=2 * np.pi / n_leaves, bottom=ring1_bottom,
-                    color=sample_colors.get(sample, '#999999'), alpha=0.9, edgecolor='none')
+        # Calculate theta positions for leaves - must match dendrogram icoord positions
+        # scipy dendrogram places leaves at x = 5, 15, 25, ... (i.e., 10*i + 5 for leaf i)
+        # We convert these to angles the same way as the dendrogram branches
+        theta_leaves = np.array([2 * np.pi * (10 * i + 5) / (n_leaves * 10) for i in range(n_leaves)])
 
-    # Ring 2 (middle): Cluster number - with hatching for many clusters
-    ring2_bottom = max_dist * 1.20
-    ring2_height = max_dist * 0.06
-    for theta, cluster in zip(theta_leaves, leaf_clusters):
-        color = cluster_color_map.get(cluster, '#999999')
-        hatch = cluster_hatch_map.get(cluster, '')
-        ax_circ.bar(theta, ring2_height, width=2 * np.pi / n_leaves, bottom=ring2_bottom,
-                    color=color, hatch=hatch, alpha=0.9, edgecolor='white', linewidth=0.1)
+        # Ring 1 (innermost): Sample of origin
+        ring1_bottom = max_dist * 1.12
+        ring1_height = max_dist * 0.06
+        for theta, sample in zip(theta_leaves, leaf_samples):
+            ax_circ.bar(theta, ring1_height, width=2 * np.pi / n_leaves, bottom=ring1_bottom,
+                        color=sample_colors.get(sample, '#999999'), alpha=0.9, edgecolor='none')
 
-    # Ring 3 (outermost): Cluster enrichment
-    ring3_bottom = max_dist * 1.28
-    ring3_height = max_dist * 0.06
-    for theta, enrich in zip(theta_leaves, leaf_enrichments):
-        ax_circ.bar(theta, ring3_height, width=2 * np.pi / n_leaves, bottom=ring3_bottom,
-                    color=enrichment_colors.get(enrich, '#CCCCCC'), alpha=0.9, edgecolor='none')
+        # Ring 2 (middle): Cluster number - with hatching for many clusters
+        ring2_bottom = max_dist * 1.20
+        ring2_height = max_dist * 0.06
+        for theta, cluster in zip(theta_leaves, leaf_clusters):
+            color = cluster_color_map.get(cluster, '#999999')
+            hatch = cluster_hatch_map.get(cluster, '')
+            ax_circ.bar(theta, ring2_height, width=2 * np.pi / n_leaves, bottom=ring2_bottom,
+                        color=color, hatch=hatch, alpha=0.9, edgecolor='white', linewidth=0.1)
 
-    ax_circ.set_title(f"Circular Dendrogram (k={n_clusters} clusters)\nRings: Sample | Cluster | Enrichment", pad=30, fontsize=12)
-    ax_circ.set_yticklabels([])
-    ax_circ.set_xticklabels([])
-    ax_circ.grid(False)
+        # Ring 3 (outermost): Cluster enrichment
+        ring3_bottom = max_dist * 1.28
+        ring3_height = max_dist * 0.06
+        for theta, enrich in zip(theta_leaves, leaf_enrichments):
+            ax_circ.bar(theta, ring3_height, width=2 * np.pi / n_leaves, bottom=ring3_bottom,
+                        color=enrichment_colors.get(enrich, '#CCCCCC'), alpha=0.9, edgecolor='none')
 
-    # Add legends using figure legends (more reliable for multiple legends)
-    # Sample legend (inner ring) - top right
-    sample_patches = [Patch(facecolor=sample_colors[s], label=s) for s in sorted(sample_colors.keys())]
-    leg1 = fig_circ.legend(handles=sample_patches, loc='upper left', bbox_to_anchor=(0.85, 0.95),
-                           title='Sample (inner)', framealpha=0.9)
+        ax_circ.set_title(f"Circular Dendrogram (k={n_clusters} clusters)\nRings: Sample | Cluster | Enrichment", pad=30, fontsize=12)
+        ax_circ.set_yticklabels([])
+        ax_circ.set_xticklabels([])
+        ax_circ.grid(False)
 
-    # Enrichment legend (outer ring) - below sample legend
-    enrich_patches = [Patch(facecolor=enrichment_colors[e], label=e) for e in sorted(enrichment_colors.keys())]
-    n_samples = len(sample_patches)
-    enrich_y = 0.95 - (n_samples + 2) * 0.035
-    leg3 = fig_circ.legend(handles=enrich_patches, loc='upper left', bbox_to_anchor=(0.85, enrich_y),
-                           title='Enrichment (outer)', framealpha=0.9)
+        # Add legends using figure legends (more reliable for multiple legends)
+        # Sample legend (inner ring) - top right
+        sample_patches = [Patch(facecolor=sample_colors[s], label=s) for s in sorted(sample_colors.keys())]
+        leg1 = fig_circ.legend(handles=sample_patches, loc='upper left', bbox_to_anchor=(0.85, 0.95),
+                               title='Sample (inner)', framealpha=0.9)
 
-    # Cluster legend (middle ring) - use hatches for uniqueness
-    # Use more columns to reduce rows, larger patches to show hatches clearly
-    n_enrichments = len(enrich_patches)
-    cluster_y = enrich_y - (n_enrichments + 2) * 0.035
+        # Enrichment legend (outer ring) - below sample legend
+        enrich_patches = [Patch(facecolor=enrichment_colors[e], label=e) for e in sorted(enrichment_colors.keys())]
+        n_samples = len(sample_patches)
+        enrich_y = 0.95 - (n_samples + 2) * 0.035
+        leg3 = fig_circ.legend(handles=enrich_patches, loc='upper left', bbox_to_anchor=(0.85, enrich_y),
+                               title='Enrichment (outer)', framealpha=0.9)
 
-    cluster_patches = [Patch(facecolor=cluster_color_map[c], hatch=cluster_hatch_map[c],
-                             edgecolor='gray', label=f'C{c}')
-                       for c in sorted(cluster_color_map.keys())]
-    # Target ~4-5 rows max, so cols = ceil(n_clusters / 5)
-    n_cols = max(6, (len(cluster_patches) + 4) // 5)
-    leg2 = fig_circ.legend(handles=cluster_patches, loc='upper left', bbox_to_anchor=(0.85, cluster_y),
-                           title='Cluster (middle)', ncol=n_cols, fontsize=7,
-                           handlelength=2.5, handleheight=1.8, columnspacing=0.5,
-                           labelspacing=0.8, framealpha=0.9)
+        # Cluster legend (middle ring) - use hatches for uniqueness
+        # Use more columns to reduce rows, larger patches to show hatches clearly
+        n_enrichments = len(enrich_patches)
+        cluster_y = enrich_y - (n_enrichments + 2) * 0.035
 
-    circ_dend_file = f"{args.output_prefix}.circular_dendrogram.pdf"
-    plt.savefig(circ_dend_file, dpi=150, bbox_inches='tight', facecolor=PLOT_BG_COLOR)
-    plt.close()
-    print(f"  Saved circular dendrogram to: {circ_dend_file}")
+        cluster_patches = [Patch(facecolor=cluster_color_map[c], hatch=cluster_hatch_map[c],
+                                 edgecolor='gray', label=f'C{c}')
+                           for c in sorted(cluster_color_map.keys())]
+        # Target ~4-5 rows max, so cols = ceil(n_clusters / 5)
+        n_cols = max(6, (len(cluster_patches) + 4) // 5)
+        leg2 = fig_circ.legend(handles=cluster_patches, loc='upper left', bbox_to_anchor=(0.85, cluster_y),
+                               title='Cluster (middle)', ncol=n_cols, fontsize=7,
+                               handlelength=2.5, handleheight=1.8, columnspacing=0.5,
+                               labelspacing=0.8, framealpha=0.9)
+
+        circ_dend_file = f"{args.output_prefix}{suffix}.circular_dendrogram.pdf"
+        plt.savefig(circ_dend_file, dpi=150, bbox_inches='tight', facecolor=style['bg_color'])
+        plt.close()
+        print(f"  Saved circular dendrogram to: {circ_dend_file}")
 
 # --- UMAP Visualization ---
 if args.plot_umap and len(read_names) > 10:
@@ -2472,85 +2542,87 @@ if args.plot_umap and len(read_names) > 10:
         cluster_cmap = plt.cm.tab20(np.linspace(0, 1, max(20, n_unique_clusters)))
         cluster_color_map = {c: matplotlib.colors.rgb2hex(cluster_cmap[i % 20]) for i, c in enumerate(sorted(set(cluster_list)))}
 
-        # Create 2x2 UMAP plot (group, enrichment, cluster numbers, cluster colors)
-        fig, axes = plt.subplots(2, 2, figsize=(16, 14))
-        fig.patch.set_facecolor(PLOT_BG_COLOR)
-        for ax in axes.flat:
-            ax.set_facecolor(PLOT_BG_COLOR)
+        # Generate UMAP plot for each background mode
+        for bg_mode, suffix in get_backgrounds_to_generate():
+            style = apply_plot_style(bg_mode)
 
-        # 1. Top-left: Colored by group (from metadata)
-        point_colors_group = [group_colors.get(g, '#999999') for g in group_list]
-        axes[0, 0].scatter(embedding[:, 0], embedding[:, 1], c=point_colors_group, s=15, alpha=0.6)
-        axes[0, 0].set_title("UMAP - Colored by Group")
-        axes[0, 0].set_xlabel("UMAP 1")
-        axes[0, 0].set_ylabel("UMAP 2")
-        group_patches = [Patch(facecolor=group_colors[g], label=g) for g in sorted(group_colors.keys())]
-        axes[0, 0].legend(handles=group_patches, loc='upper right')
+            # Create 2x2 UMAP plot (group, enrichment, cluster numbers, cluster colors)
+            fig, axes = plt.subplots(2, 2, figsize=(16, 14))
+            fig.patch.set_facecolor(style['bg_color'])
+            for ax in axes.flat:
+                ax.set_facecolor(style['bg_color'])
 
-        # 2. Top-right: Colored by enrichment
-        point_colors_enrich = []
-        for r in read_names:
-            cluster = read_to_cluster[r]
-            enrich = cluster_to_enrichment.get(cluster, 'mixed')
-            point_colors_enrich.append(enrichment_colors.get(enrich, '#CCCCCC'))
-        axes[0, 1].scatter(embedding[:, 0], embedding[:, 1], c=point_colors_enrich, s=15, alpha=0.6)
-        axes[0, 1].set_title("UMAP - Colored by Cluster Enrichment")
-        axes[0, 1].set_xlabel("UMAP 1")
-        axes[0, 1].set_ylabel("UMAP 2")
-        enrich_patches = [Patch(facecolor=c, label=e) for e, c in enrichment_colors.items()]
-        axes[0, 1].legend(handles=enrich_patches, loc='upper right')
+            # 1. Top-left: Colored by group (from metadata)
+            point_colors_group = [group_colors.get(g, '#999999') for g in group_list]
+            axes[0, 0].scatter(embedding[:, 0], embedding[:, 1], c=point_colors_group, s=15, alpha=0.6)
+            axes[0, 0].set_title("UMAP - Colored by Group")
+            axes[0, 0].set_xlabel("UMAP 1")
+            axes[0, 0].set_ylabel("UMAP 2")
+            group_patches = [Patch(facecolor=group_colors[g], label=g) for g in sorted(group_colors.keys())]
+            axes[0, 0].legend(handles=group_patches, loc='upper right')
 
-        # 3. Bottom-left: Colored by sample with cluster number labels
-        point_colors_sample = [sample_colors.get(s, '#999999') for s in sample_list]
-        axes[1, 0].scatter(embedding[:, 0], embedding[:, 1], c=point_colors_sample, s=15, alpha=0.6)
-        axes[1, 0].set_title("UMAP - Colored by Sample")
-        axes[1, 0].set_xlabel("UMAP 1")
-        axes[1, 0].set_ylabel("UMAP 2")
+            # 2. Top-right: Colored by enrichment
+            point_colors_enrich = []
+            for r in read_names:
+                cluster = read_to_cluster[r]
+                enrich = cluster_to_enrichment.get(cluster, 'mixed')
+                point_colors_enrich.append(enrichment_colors.get(enrich, '#CCCCCC'))
+            axes[0, 1].scatter(embedding[:, 0], embedding[:, 1], c=point_colors_enrich, s=15, alpha=0.6)
+            axes[0, 1].set_title("UMAP - Colored by Cluster Enrichment")
+            axes[0, 1].set_xlabel("UMAP 1")
+            axes[0, 1].set_ylabel("UMAP 2")
+            enrich_patches = [Patch(facecolor=c, label=e) for e, c in enrichment_colors.items()]
+            axes[0, 1].legend(handles=enrich_patches, loc='upper right')
 
-        # Add cluster number labels at cluster centroids
-        annotation_bg = '#333333' if args.dark_mode else 'white'
-        annotation_edge = 'white' if args.dark_mode else 'gray'
-        for cluster_id in sorted(set(cluster_list)):
-            mask = [c == cluster_id for c in cluster_list]
-            cluster_points = embedding[mask]
-            centroid_x = np.mean(cluster_points[:, 0])
-            centroid_y = np.mean(cluster_points[:, 1])
-            axes[1, 0].annotate(str(cluster_id), (centroid_x, centroid_y),
-                               fontsize=8, fontweight='bold', ha='center', va='center',
-                               bbox=dict(boxstyle='round,pad=0.2', facecolor=annotation_bg, alpha=0.7, edgecolor=annotation_edge))
+            # 3. Bottom-left: Colored by sample with cluster number labels
+            point_colors_sample = [sample_colors.get(s, '#999999') for s in sample_list]
+            axes[1, 0].scatter(embedding[:, 0], embedding[:, 1], c=point_colors_sample, s=15, alpha=0.6)
+            axes[1, 0].set_title("UMAP - Colored by Sample")
+            axes[1, 0].set_xlabel("UMAP 1")
+            axes[1, 0].set_ylabel("UMAP 2")
 
-        # Add sample legend to bottom-left panel
-        sample_patches = [Patch(facecolor=sample_colors[s], label=s) for s in sorted(sample_colors.keys())]
-        axes[1, 0].legend(handles=sample_patches, loc='upper right', fontsize=7)
+            # Add cluster number labels at cluster centroids
+            for cluster_id in sorted(set(cluster_list)):
+                mask = [c == cluster_id for c in cluster_list]
+                cluster_points = embedding[mask]
+                centroid_x = np.mean(cluster_points[:, 0])
+                centroid_y = np.mean(cluster_points[:, 1])
+                axes[1, 0].annotate(str(cluster_id), (centroid_x, centroid_y),
+                                   fontsize=8, fontweight='bold', ha='center', va='center',
+                                   bbox=dict(boxstyle='round,pad=0.2', facecolor=style['annotation_bg'], alpha=0.7, edgecolor=style['annotation_edge']))
 
-        # 4. Bottom-right: Colored by enrichment with cluster labels
-        axes[1, 1].scatter(embedding[:, 0], embedding[:, 1], c=point_colors_enrich, s=10, alpha=0.3)
-        axes[1, 1].set_title("UMAP - Cluster Labels")
-        axes[1, 1].set_xlabel("UMAP 1")
-        axes[1, 1].set_ylabel("UMAP 2")
+            # Add sample legend to bottom-left panel
+            sample_patches = [Patch(facecolor=sample_colors[s], label=s) for s in sorted(sample_colors.keys())]
+            axes[1, 0].legend(handles=sample_patches, loc='upper right', fontsize=7)
 
-        # Add cluster labels with enrichment info
-        for cluster_id in sorted(set(cluster_list)):
-            mask = [c == cluster_id for c in cluster_list]
-            cluster_points = embedding[mask]
-            centroid_x = np.mean(cluster_points[:, 0])
-            centroid_y = np.mean(cluster_points[:, 1])
-            enrich = cluster_to_enrichment.get(cluster_id, 'mixed')
-            enrich_short = enrich.replace('-enriched', '').replace('mixed', 'M')[:4]
-            label = f"C{cluster_id}\n({enrich_short})"
-            axes[1, 1].annotate(label, (centroid_x, centroid_y),
-                               fontsize=7, ha='center', va='center',
-                               bbox=dict(boxstyle='round,pad=0.2', facecolor=enrichment_colors.get(enrich, '#CCCCCC'),
-                                        alpha=0.8, edgecolor=annotation_edge))
+            # 4. Bottom-right: Colored by enrichment with cluster labels
+            axes[1, 1].scatter(embedding[:, 0], embedding[:, 1], c=point_colors_enrich, s=10, alpha=0.3)
+            axes[1, 1].set_title("UMAP - Cluster Labels")
+            axes[1, 1].set_xlabel("UMAP 1")
+            axes[1, 1].set_ylabel("UMAP 2")
 
-        # Add enrichment legend to bottom-right panel
-        axes[1, 1].legend(handles=enrich_patches, loc='upper right')
+            # Add cluster labels with enrichment info
+            for cluster_id in sorted(set(cluster_list)):
+                mask = [c == cluster_id for c in cluster_list]
+                cluster_points = embedding[mask]
+                centroid_x = np.mean(cluster_points[:, 0])
+                centroid_y = np.mean(cluster_points[:, 1])
+                enrich = cluster_to_enrichment.get(cluster_id, 'mixed')
+                enrich_short = enrich.replace('-enriched', '').replace('mixed', 'M')[:4]
+                label = f"C{cluster_id}\n({enrich_short})"
+                axes[1, 1].annotate(label, (centroid_x, centroid_y),
+                                   fontsize=7, ha='center', va='center',
+                                   bbox=dict(boxstyle='round,pad=0.2', facecolor=enrichment_colors.get(enrich, '#CCCCCC'),
+                                            alpha=0.8, edgecolor=style['annotation_edge']))
 
-        plt.tight_layout()
-        umap_file = f"{args.output_prefix}.umap.pdf"
-        plt.savefig(umap_file, dpi=150, bbox_inches='tight', facecolor=PLOT_BG_COLOR)
-        plt.close()
-        print(f"  Saved UMAP plot: {umap_file}")
+            # Add enrichment legend to bottom-right panel
+            axes[1, 1].legend(handles=enrich_patches, loc='upper right')
+
+            plt.tight_layout()
+            umap_file = f"{args.output_prefix}{suffix}.umap.pdf"
+            plt.savefig(umap_file, dpi=150, bbox_inches='tight', facecolor=style['bg_color'])
+            plt.close()
+            print(f"  Saved UMAP plot: {umap_file}")
 
         # Save UMAP coordinates
         umap_coords = pd.DataFrame({
@@ -2762,106 +2834,110 @@ with np.errstate(divide='ignore'):
     neg_log_p = -np.log10(pval_matrix)
 neg_log_p = np.clip(neg_log_p, 0, 10)  # Cap at 10 for display
 
-# === Plot 1: Bubble plot (enrichment significance and direction) ===
-fig1, ax1 = plt.subplots(figsize=(max(14, n_clusters * 0.4 + 4), n_rows * 0.8 + 3))
-fig1.patch.set_facecolor(PLOT_BG_COLOR)
-ax1.set_facecolor(PLOT_BG_COLOR)
+# Generate enrichment plots for each background mode
+for bg_mode, suffix in get_backgrounds_to_generate():
+    style = apply_plot_style(bg_mode)
 
-# Create bubble plot
-for i, label in enumerate(row_labels):
-    for j, cid in enumerate(cluster_ids):
-        size = neg_log_p[i, j] * 50 + 10  # Scale size
-        odds = odds_matrix[i, j]
+    # === Plot 1: Bubble plot (enrichment significance and direction) ===
+    fig1, ax1 = plt.subplots(figsize=(max(14, n_clusters * 0.4 + 4), n_rows * 0.8 + 3))
+    fig1.patch.set_facecolor(style['bg_color'])
+    ax1.set_facecolor(style['bg_color'])
 
-        # Color by odds ratio: red = enriched (>1), blue = depleted (<1)
-        if odds > 1:
-            # Enriched: red scale
-            intensity = min(1.0, np.log2(odds) / 3)  # Log scale, cap at 8x enrichment
-            color = plt.cm.Reds(0.3 + intensity * 0.7)
-        else:
-            # Depleted: blue scale
-            intensity = min(1.0, -np.log2(odds + 0.001) / 3)
-            color = plt.cm.Blues(0.3 + intensity * 0.7)
+    # Create bubble plot
+    for i, label in enumerate(row_labels):
+        for j, cid in enumerate(cluster_ids):
+            size = neg_log_p[i, j] * 50 + 10  # Scale size
+            odds = odds_matrix[i, j]
 
-        # Add significance indicator
-        if pval_matrix[i, j] < 0.05:
-            edgecolor = 'white' if args.dark_mode else 'black'
-            linewidth = 1.5
-        else:
-            edgecolor = 'gray'
-            linewidth = 0.5
+            # Color by odds ratio: red = enriched (>1), blue = depleted (<1)
+            if odds > 1:
+                # Enriched: red scale
+                intensity = min(1.0, np.log2(odds) / 3)  # Log scale, cap at 8x enrichment
+                color = plt.cm.Reds(0.3 + intensity * 0.7)
+            else:
+                # Depleted: blue scale
+                intensity = min(1.0, -np.log2(odds + 0.001) / 3)
+                color = plt.cm.Blues(0.3 + intensity * 0.7)
 
-        ax1.scatter(j, i, s=size, c=[color], edgecolors=edgecolor, linewidths=linewidth)
+            # Add significance indicator
+            if pval_matrix[i, j] < 0.05:
+                edgecolor = style['edge_color']
+                linewidth = 1.5
+            else:
+                edgecolor = 'gray'
+                linewidth = 0.5
 
-ax1.set_xticks(range(n_clusters))
-ax1.set_xticklabels([str(cid) for cid in cluster_ids], rotation=90, fontsize=9)
-ax1.set_yticks(range(n_rows))
-ax1.set_yticklabels(row_labels, fontsize=11)
-ax1.set_xlabel('Cluster ID', fontsize=12)
-y_label = 'Sample' if args.comparison_mode == 'per-sample' else 'Group'
-ax1.set_ylabel(y_label, fontsize=12)
-ax1.set_title('Enrichment Bubble Plot\n(size: -log10(p-value), color: red=enriched, blue=depleted)', fontsize=13)
-ax1.set_xlim(-0.5, n_clusters - 0.5)
-ax1.set_ylim(-0.5, n_rows - 0.5)
-ax1.grid(True, alpha=0.3, color=PLOT_GRID_COLOR)
+            ax1.scatter(j, i, s=size, c=[color], edgecolors=edgecolor, linewidths=linewidth)
 
-# Add legend for size
-size_legend_vals = [1.3, 2, 3]  # -log10(p) values = p of 0.05, 0.01, 0.001
-for val in size_legend_vals:
-    ax1.scatter([], [], s=val * 50 + 10, c='gray', alpha=0.7,
-                label=f'p = {10**(-val):.3g}')
-ax1.legend(loc='upper left', bbox_to_anchor=(1.01, 1), title='P-value', fontsize=9)
+    ax1.set_xticks(range(n_clusters))
+    ax1.set_xticklabels([str(cid) for cid in cluster_ids], rotation=90, fontsize=9)
+    ax1.set_yticks(range(n_rows))
+    ax1.set_yticklabels(row_labels, fontsize=11)
+    ax1.set_xlabel('Cluster ID', fontsize=12)
+    y_label = 'Sample' if args.comparison_mode == 'per-sample' else 'Group'
+    ax1.set_ylabel(y_label, fontsize=12)
+    ax1.set_title('Enrichment Bubble Plot\n(size: -log10(p-value), color: red=enriched, blue=depleted)', fontsize=13)
+    ax1.set_xlim(-0.5, n_clusters - 0.5)
+    ax1.set_ylim(-0.5, n_rows - 0.5)
+    ax1.grid(True, alpha=0.3, color=style['grid_color'])
 
-plt.tight_layout()
-bubble_file = f"{args.output_prefix}.enrichment_bubble.pdf"
-plt.savefig(bubble_file, dpi=150, bbox_inches='tight', facecolor=PLOT_BG_COLOR)
-plt.close()
-print(f"  Saved bubble plot: {bubble_file}")
+    # Add legend for size
+    size_legend_vals = [1.3, 2, 3]  # -log10(p) values = p of 0.05, 0.01, 0.001
+    for val in size_legend_vals:
+        ax1.scatter([], [], s=val * 50 + 10, c='gray', alpha=0.7,
+                    label=f'p = {10**(-val):.3g}')
+    ax1.legend(loc='upper left', bbox_to_anchor=(1.01, 1), title='P-value', fontsize=9)
 
-# === Plot 2: Heatmap of sample/group percentage per cluster ===
-fig2, ax2 = plt.subplots(figsize=(max(14, n_clusters * 0.4 + 4), n_rows * 0.8 + 3))
-fig2.patch.set_facecolor(PLOT_BG_COLOR)
-ax2.set_facecolor(PLOT_BG_COLOR)
+    plt.tight_layout()
+    bubble_file = f"{args.output_prefix}{suffix}.enrichment_bubble.pdf"
+    plt.savefig(bubble_file, dpi=150, bbox_inches='tight', facecolor=style['bg_color'])
+    plt.close()
+    print(f"  Saved bubble plot: {bubble_file}")
 
-im = ax2.imshow(pct_matrix, aspect='auto', cmap='YlOrRd', vmin=0, vmax=100)
+    # === Plot 2: Heatmap of sample/group percentage per cluster ===
+    fig2, ax2 = plt.subplots(figsize=(max(14, n_clusters * 0.4 + 4), n_rows * 0.8 + 3))
+    fig2.patch.set_facecolor(style['bg_color'])
+    ax2.set_facecolor(style['bg_color'])
 
-# Add text annotations
-for i in range(n_rows):
-    for j in range(n_clusters):
-        pct = pct_matrix[i, j]
-        pval = pval_matrix[i, j]
-        text_color = 'white' if pct > 50 else 'black'
+    im = ax2.imshow(pct_matrix, aspect='auto', cmap='YlOrRd', vmin=0, vmax=100)
 
-        # Add asterisks for significance
-        sig = ''
-        if pval < 0.001:
-            sig = '***'
-        elif pval < 0.01:
-            sig = '**'
-        elif pval < 0.05:
-            sig = '*'
+    # Add text annotations
+    for i in range(n_rows):
+        for j in range(n_clusters):
+            pct = pct_matrix[i, j]
+            pval = pval_matrix[i, j]
+            text_color = 'white' if pct > 50 else 'black'
 
-        ax2.text(j, i, f'{pct:.0f}{sig}', ha='center', va='center',
-                 fontsize=8, color=text_color, fontweight='bold' if sig else 'normal')
+            # Add asterisks for significance
+            sig = ''
+            if pval < 0.001:
+                sig = '***'
+            elif pval < 0.01:
+                sig = '**'
+            elif pval < 0.05:
+                sig = '*'
 
-ax2.set_xticks(range(n_clusters))
-ax2.set_xticklabels([str(cid) for cid in cluster_ids], rotation=90, fontsize=9)
-ax2.set_yticks(range(n_rows))
-ax2.set_yticklabels(row_labels, fontsize=11)
-ax2.set_xlabel('Cluster ID', fontsize=12)
-ax2.set_ylabel(y_label, fontsize=12)
-pct_title = 'Sample' if args.comparison_mode == 'per-sample' else 'Group'
-ax2.set_title(f'{pct_title} Percentage per Cluster\n(% of cluster reads from each {pct_title.lower()}; * p<0.05, ** p<0.01, *** p<0.001)', fontsize=13)
+            ax2.text(j, i, f'{pct:.0f}{sig}', ha='center', va='center',
+                     fontsize=8, color=text_color, fontweight='bold' if sig else 'normal')
 
-# Add colorbar
-cbar = plt.colorbar(im, ax=ax2, shrink=0.8)
-cbar.set_label('Percentage (%)', fontsize=11)
+    ax2.set_xticks(range(n_clusters))
+    ax2.set_xticklabels([str(cid) for cid in cluster_ids], rotation=90, fontsize=9)
+    ax2.set_yticks(range(n_rows))
+    ax2.set_yticklabels(row_labels, fontsize=11)
+    ax2.set_xlabel('Cluster ID', fontsize=12)
+    ax2.set_ylabel(y_label, fontsize=12)
+    pct_title = 'Sample' if args.comparison_mode == 'per-sample' else 'Group'
+    ax2.set_title(f'{pct_title} Percentage per Cluster\n(% of cluster reads from each {pct_title.lower()}; * p<0.05, ** p<0.01, *** p<0.001)', fontsize=13)
 
-plt.tight_layout()
-pct_file = f"{args.output_prefix}.{pct_title.lower()}_percentage.pdf"
-plt.savefig(pct_file, dpi=150, bbox_inches='tight', facecolor=PLOT_BG_COLOR)
-plt.close()
-print(f"  Saved percentage heatmap: {pct_file}")
+    # Add colorbar
+    cbar = plt.colorbar(im, ax=ax2, shrink=0.8)
+    cbar.set_label('Percentage (%)', fontsize=11)
+
+    plt.tight_layout()
+    pct_file = f"{args.output_prefix}{suffix}.{pct_title.lower()}_percentage.pdf"
+    plt.savefig(pct_file, dpi=150, bbox_inches='tight', facecolor=style['bg_color'])
+    plt.close()
+    print(f"  Saved percentage heatmap: {pct_file}")
 
 # --- Summary ---
 print(f"\n" + "=" * 60)
@@ -2937,7 +3013,7 @@ print(fmt_param('early-stopping', args.early_stopping))
 print(fmt_param('nested', args.nested))
 print(fmt_param('also-test-samples', args.also_test_samples))
 print(fmt_param('stratified', args.stratified))
-print(fmt_param('dark-mode', args.dark_mode))
+print(fmt_param('background', args.background))
 print(fmt_param('log-file', args.log_file))
 
 # Print command used
