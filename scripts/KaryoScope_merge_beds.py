@@ -41,6 +41,10 @@ parser.add_argument("--feature-filter", dest="feature_filters", nargs='*', defau
                          "  KEEP_PATTERNS: Comma-separated prefixes to keep (e.g., 'p_arm,q_arm')\n"
                          "  COLLAPSE_LABEL: Label for collapsed features (e.g., 'satellite')\n"
                          "Example: --feature-filter 3:p_arm,q_arm:satellite")
+parser.add_argument("--telomere-satellite-merge", dest="telomere_satellite_merge", action="store_true",
+                    help="Priority merge mode: keep telomere features (canonical_telomere, noncanonical_telomere,\n"
+                         "TAR1, ITS) from BED1 (subtelomeric), fill gaps with features from BED2 (satellite/region).\n"
+                         "Requires exactly 2 BED files.")
 
 args = parser.parse_args()
 
@@ -106,6 +110,83 @@ def apply_feature_filter(df, keep_patterns, collapse_label):
     new_unique = df['feature'].nunique()
     print(f"    Filter applied: {original_unique} -> {new_unique} unique features")
     return df
+
+
+# Priority features for telomere-satellite merge mode
+TELOMERE_PRIORITY_FEATURES = {'canonical_telomere', 'noncanonical_telomere', 'TAR1', 'ITS'}
+
+
+def telomere_satellite_merge(df_subtelo, df_satellite):
+    """
+    Priority merge: keep telomere features from subtelomeric BED,
+    fill remaining positions with satellite features.
+
+    Args:
+        df_subtelo: DataFrame from subtelomeric BED file
+        df_satellite: DataFrame from region/satellite BED file
+
+    Returns:
+        DataFrame with merged features (single feature per interval)
+    """
+    common_reads = set(df_subtelo['read'].unique()) & set(df_satellite['read'].unique())
+    if not common_reads:
+        print("  Warning: No common reads between BED files")
+        return pd.DataFrame(columns=['read', 'start', 'end', 'feature'])
+
+    print(f"  Common reads: {len(common_reads):,}")
+    print(f"  Priority features: {', '.join(sorted(TELOMERE_PRIORITY_FEATURES))}")
+
+    results = []
+    for read in common_reads:
+        # Get intervals for this read
+        subtelo_intervals = df_subtelo[df_subtelo['read'] == read][['start', 'end', 'feature']].values
+        satellite_intervals = df_satellite[df_satellite['read'] == read][['start', 'end', 'feature']].values
+
+        # Extract priority intervals from subtelomeric
+        priority_intervals = []
+        for start, end, feature in subtelo_intervals:
+            if feature in TELOMERE_PRIORITY_FEATURES:
+                priority_intervals.append((int(start), int(end), feature))
+
+        # Build a coverage map of priority positions
+        priority_coverage = set()
+        for start, end, _ in priority_intervals:
+            for pos in range(start, end):
+                priority_coverage.add(pos)
+
+        # Add priority intervals to results
+        for start, end, feature in priority_intervals:
+            results.append({
+                'read': read,
+                'start': start,
+                'end': end,
+                'feature': feature
+            })
+
+        # Add satellite intervals for non-priority positions
+        for start, end, feature in satellite_intervals:
+            start, end = int(start), int(end)
+            # Find segments not covered by priority
+            seg_start = None
+            for pos in range(start, end + 1):
+                in_priority = pos in priority_coverage
+                if pos == end or in_priority:
+                    # End of non-priority segment
+                    if seg_start is not None:
+                        seg_end = pos
+                        if seg_end > seg_start:
+                            results.append({
+                                'read': read,
+                                'start': seg_start,
+                                'end': seg_end,
+                                'feature': feature
+                            })
+                        seg_start = None
+                elif seg_start is None:
+                    # Start of non-priority segment
+                    seg_start = pos
+
+    return pd.DataFrame(results)
 
 
 def merge_two_beds(df1, df2, sep=":"):
@@ -209,6 +290,42 @@ for ff in args.feature_filters:
 print(f"\nMerging {len(args.bed)} BED files...")
 for i, bed_file in enumerate(args.bed, 1):
     print(f"  BED{i}: {bed_file}")
+
+# Handle telomere-satellite merge mode
+if args.telomere_satellite_merge:
+    if len(args.bed) != 2:
+        print("Error: --telomere-satellite-merge requires exactly 2 BED files", file=sys.stderr)
+        print("  BED1: subtelomeric features", file=sys.stderr)
+        print("  BED2: region/satellite features", file=sys.stderr)
+        sys.exit(1)
+
+    print("\n--- Telomere-Satellite Priority Merge Mode ---")
+    df_subtelo = load_bed_file(args.bed[0])
+    print(f"  Subtelomeric intervals: {len(df_subtelo):,}")
+
+    df_satellite = load_bed_file(args.bed[1])
+    print(f"  Satellite intervals: {len(df_satellite):,}")
+
+    merged_df = telomere_satellite_merge(df_subtelo, df_satellite)
+    print(f"\n  Merged intervals: {len(merged_df):,}")
+
+    if merged_df.empty:
+        print("Error: Merge resulted in no intervals", file=sys.stderr)
+        sys.exit(1)
+
+    # Skip to output (no feature reduction in this mode)
+    merged_df = merged_df.sort_values(['read', 'start'])
+
+    print(f"\nWriting to: {args.output}")
+    open_func = gzip.open if args.output.endswith('.gz') else open
+    mode = 'wt' if args.output.endswith('.gz') else 'w'
+
+    with open_func(args.output, mode) as f:
+        for _, row in merged_df.iterrows():
+            f.write(f"{row['read']}\t{row['start']}\t{row['end']}\t{row['feature']}\n")
+
+    print("Done!")
+    sys.exit(0)
 
 # Load first BED file
 merged_df = load_bed_file(args.bed[0])
