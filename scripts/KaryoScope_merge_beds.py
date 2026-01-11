@@ -33,6 +33,14 @@ parser.add_argument("--separator", "-s", default=":",
 parser.add_argument("--reduce-features", dest="reduce_features", type=int, default=None,
                     help="Reduce to top N most frequent combined features.\n"
                          "Less frequent features are collapsed to 'other'. (default: no reduction)")
+parser.add_argument("--feature-filter", dest="feature_filters", nargs='*', default=[],
+                    metavar="INDEX:KEEP:COLLAPSE",
+                    help="Filter features for specific BED files before merging.\n"
+                         "Format: BED_INDEX:KEEP_PATTERNS:COLLAPSE_LABEL\n"
+                         "  BED_INDEX: 1-based index of BED file in --bed list\n"
+                         "  KEEP_PATTERNS: Comma-separated prefixes to keep (e.g., 'p_arm,q_arm')\n"
+                         "  COLLAPSE_LABEL: Label for collapsed features (e.g., 'satellite')\n"
+                         "Example: --feature-filter 3:p_arm,q_arm:satellite")
 
 args = parser.parse_args()
 
@@ -71,6 +79,32 @@ def load_bed_file(filepath):
     df = pd.DataFrame(records)
     if df.empty:
         print(f"  Warning: No valid records in {filepath}")
+    return df
+
+
+def apply_feature_filter(df, keep_patterns, collapse_label):
+    """
+    Filter features: keep those matching patterns, collapse others.
+
+    Args:
+        df: DataFrame with 'feature' column
+        keep_patterns: List of prefixes to keep (e.g., ['p_arm', 'q_arm'])
+        collapse_label: Label for non-matching features (e.g., 'satellite')
+
+    Returns:
+        DataFrame with filtered features
+    """
+    def filter_feature(feat):
+        for pattern in keep_patterns:
+            if feat.startswith(pattern):
+                return feat
+        return collapse_label
+
+    df = df.copy()
+    original_unique = df['feature'].nunique()
+    df['feature'] = df['feature'].apply(filter_feature)
+    new_unique = df['feature'].nunique()
+    print(f"    Filter applied: {original_unique} -> {new_unique} unique features")
     return df
 
 
@@ -153,13 +187,37 @@ def _merge_pandas(df1, df2, sep):
 
 
 # --- Main processing ---
-print(f"Merging {len(args.bed)} BED files...")
+
+# Parse feature filters
+feature_filter_map = {}
+for ff in args.feature_filters:
+    parts = ff.split(':')
+    if len(parts) != 3:
+        print(f"Error: Invalid feature filter format: {ff}", file=sys.stderr)
+        print("  Expected format: BED_INDEX:KEEP_PATTERNS:COLLAPSE_LABEL", file=sys.stderr)
+        sys.exit(1)
+    try:
+        bed_idx = int(parts[0])
+    except ValueError:
+        print(f"Error: BED_INDEX must be an integer: {parts[0]}", file=sys.stderr)
+        sys.exit(1)
+    keep_patterns = [p.strip() for p in parts[1].split(',')]
+    collapse_label = parts[2]
+    feature_filter_map[bed_idx] = (keep_patterns, collapse_label)
+    print(f"Feature filter for BED{bed_idx}: keep [{', '.join(keep_patterns)}], collapse to '{collapse_label}'")
+
+print(f"\nMerging {len(args.bed)} BED files...")
 for i, bed_file in enumerate(args.bed, 1):
     print(f"  BED{i}: {bed_file}")
 
 # Load first BED file
 merged_df = load_bed_file(args.bed[0])
 print(f"\n  BED1 intervals: {len(merged_df):,}")
+
+# Apply feature filter if specified for BED1
+if 1 in feature_filter_map:
+    keep, collapse = feature_filter_map[1]
+    merged_df = apply_feature_filter(merged_df, keep, collapse)
 
 if merged_df.empty:
     print("Error: First BED file has no valid records", file=sys.stderr)
@@ -169,6 +227,11 @@ if merged_df.empty:
 for i, bed_file in enumerate(args.bed[1:], 2):
     df_next = load_bed_file(bed_file)
     print(f"  BED{i} intervals: {len(df_next):,}")
+
+    # Apply feature filter if specified for this BED
+    if i in feature_filter_map:
+        keep, collapse = feature_filter_map[i]
+        df_next = apply_feature_filter(df_next, keep, collapse)
 
     if df_next.empty:
         print(f"  Warning: BED{i} has no valid records, skipping")
