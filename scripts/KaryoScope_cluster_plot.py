@@ -177,6 +177,9 @@ def parse_args():
                         help="Show enrichment as a grid of bubbles (one per sample) instead of single bubble. "
                              "Bubble size = sample %%, opacity = -log10(p-value), color = sample color. "
                              "Requires per-sample comparison mode in cluster analysis.")
+    parser.add_argument("--orient-telomere-top", dest="orient_telomere_top", action="store_true",
+                        help="Reorient reads so telomere features (canonical_telomere, noncanonical_telomere) "
+                             "are always at the top of the read visualization.")
 
     return parser.parse_args()
 
@@ -329,6 +332,83 @@ def load_cluster_analysis(cluster_analysis_file):
             print(f"  Warning: Could not load cluster analysis: {e}")
 
     return cluster_enrichments, cluster_order, cluster_stats, cluster_df
+
+
+# =============================================================================
+# Helper Functions: Read Orientation
+# =============================================================================
+
+# Telomere features used for orientation detection
+TELOMERE_FEATURES = {'canonical_telomere', 'noncanonical_telomere'}
+
+
+def orient_reads_telomere_top(read_data, read_to_sample):
+    """Reorient reads so telomere features are at the top (position 0).
+
+    For each read, checks if telomere features are closer to start or end.
+    If closer to end, flips the read coordinates.
+
+    Args:
+        read_data: Dict of read_id -> {featureset: [{'start': int, 'stop': int, 'feature': str}, ...]}
+        read_to_sample: Dict of read_id -> sample_name
+
+    Returns:
+        Dict with reoriented read data
+    """
+    oriented_data = {}
+    flipped_count = 0
+    total_with_telomere = 0
+
+    for read_id, featureset_data in read_data.items():
+        # Get read length from max end position across all featuresets
+        read_length = 0
+        for featureset, features in featureset_data.items():
+            for feat in features:
+                read_length = max(read_length, feat['stop'])
+
+        if read_length == 0:
+            oriented_data[read_id] = featureset_data
+            continue
+
+        # Find telomere positions across all featuresets
+        telomere_positions = []
+        for featureset, features in featureset_data.items():
+            for feat in features:
+                if feat['feature'] in TELOMERE_FEATURES:
+                    telomere_positions.extend([feat['start'], feat['stop']])
+
+        if telomere_positions:
+            total_with_telomere += 1
+            # Calculate average telomere position
+            avg_telomere_pos = sum(telomere_positions) / len(telomere_positions)
+            midpoint = read_length / 2
+
+            # If telomere is in second half, flip the read
+            if avg_telomere_pos > midpoint:
+                flipped_data = {}
+                for featureset, features in featureset_data.items():
+                    # Flip coordinates: new_start = length - old_end, new_end = length - old_start
+                    flipped_features = [
+                        {
+                            'start': read_length - feat['stop'],
+                            'stop': read_length - feat['start'],
+                            'feature': feat['feature']
+                        }
+                        for feat in features
+                    ]
+                    # Sort by start position
+                    flipped_features.sort(key=lambda x: x['start'])
+                    flipped_data[featureset] = flipped_features
+                oriented_data[read_id] = flipped_data
+                flipped_count += 1
+            else:
+                oriented_data[read_id] = featureset_data
+        else:
+            # No telomere features, keep as-is
+            oriented_data[read_id] = featureset_data
+
+    print(f"  Reoriented {flipped_count} of {total_with_telomere} reads with telomere features (telomere now at top)")
+    return oriented_data
 
 
 # =============================================================================
@@ -4734,6 +4814,11 @@ def main():
 
     # Load custom BED files
     read_data = load_custom_bed_files(custom_bed_files, all_reads_needed, read_data)
+
+    # Orient reads so telomere features are at top (if requested)
+    if args.orient_telomere_top:
+        print("\nOrienting reads (telomere at top)...")
+        read_data = orient_reads_telomere_top(read_data, read_to_sample)
 
     # --- Generate colors ---
     # Get all unique samples
