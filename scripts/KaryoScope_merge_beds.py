@@ -116,10 +116,53 @@ def apply_feature_filter(df, keep_patterns, collapse_label):
 TELOMERE_PRIORITY_FEATURES = {'canonical_telomere', 'noncanonical_telomere', 'TAR1', 'ITS'}
 
 
+def subtract_intervals(interval, blockers):
+    """
+    Subtract blocker intervals from a single interval.
+    Returns list of non-blocked sub-intervals.
+
+    Args:
+        interval: (start, end) tuple
+        blockers: list of (start, end) tuples, sorted by start
+
+    Returns:
+        list of (start, end) tuples representing uncovered portions
+    """
+    result = []
+    current_start, current_end = interval
+
+    for block_start, block_end in blockers:
+        if block_end <= current_start:
+            # Blocker is entirely before current segment
+            continue
+        if block_start >= current_end:
+            # Blocker is entirely after current segment
+            break
+
+        # There's overlap
+        if block_start > current_start:
+            # Gap before blocker
+            result.append((current_start, block_start))
+
+        # Move current_start past blocker
+        current_start = max(current_start, block_end)
+
+        if current_start >= current_end:
+            break
+
+    # Add remaining segment if any
+    if current_start < current_end:
+        result.append((current_start, current_end))
+
+    return result
+
+
 def telomere_satellite_merge(df_subtelo, df_satellite):
     """
     Priority merge: keep telomere features from subtelomeric BED,
     fill remaining positions with satellite features.
+
+    Uses pyranges for fast interval subtraction when available.
 
     Args:
         df_subtelo: DataFrame from subtelomeric BED file
@@ -128,6 +171,17 @@ def telomere_satellite_merge(df_subtelo, df_satellite):
     Returns:
         DataFrame with merged features (single feature per interval)
     """
+    try:
+        import pyranges as pr
+        return _telomere_satellite_merge_pyranges(df_subtelo, df_satellite)
+    except ImportError:
+        return _telomere_satellite_merge_pandas(df_subtelo, df_satellite)
+
+
+def _telomere_satellite_merge_pyranges(df_subtelo, df_satellite):
+    """Fast telomere-satellite merge using pyranges subtract."""
+    import pyranges as pr
+
     common_reads = set(df_subtelo['read'].unique()) & set(df_satellite['read'].unique())
     if not common_reads:
         print("  Warning: No common reads between BED files")
@@ -136,57 +190,94 @@ def telomere_satellite_merge(df_subtelo, df_satellite):
     print(f"  Common reads: {len(common_reads):,}")
     print(f"  Priority features: {', '.join(sorted(TELOMERE_PRIORITY_FEATURES))}")
 
+    # Filter to common reads
+    df_subtelo_f = df_subtelo[df_subtelo['read'].isin(common_reads)].copy()
+    df_satellite_f = df_satellite[df_satellite['read'].isin(common_reads)].copy()
+
+    # Extract priority intervals
+    priority_mask = df_subtelo_f['feature'].isin(TELOMERE_PRIORITY_FEATURES)
+    df_priority = df_subtelo_f[priority_mask][['read', 'start', 'end', 'feature']].copy()
+    df_priority['start'] = df_priority['start'].astype(int)
+    df_priority['end'] = df_priority['end'].astype(int)
+
+    print(f"  Priority intervals: {len(df_priority):,}")
+
+    # Prepare satellite intervals
+    df_satellite_f = df_satellite_f[['read', 'start', 'end', 'feature']].copy()
+    df_satellite_f['start'] = df_satellite_f['start'].astype(int)
+    df_satellite_f['end'] = df_satellite_f['end'].astype(int)
+
+    # Convert to pyranges format (Chromosome = read)
+    pr_priority = pr.PyRanges(df_priority.rename(columns={'read': 'Chromosome', 'start': 'Start', 'end': 'End', 'feature': 'Feature'}))
+    pr_satellite = pr.PyRanges(df_satellite_f.rename(columns={'read': 'Chromosome', 'start': 'Start', 'end': 'End', 'feature': 'Feature'}))
+
+    # Subtract priority regions from satellite
+    pr_subtracted = pr_satellite.subtract(pr_priority)
+
+    # Convert results back to DataFrame
+    if len(pr_subtracted) > 0:
+        df_subtracted = pr_subtracted.df.rename(columns={'Chromosome': 'read', 'Start': 'start', 'End': 'end', 'Feature': 'feature'})
+        df_subtracted = df_subtracted[['read', 'start', 'end', 'feature']]
+    else:
+        df_subtracted = pd.DataFrame(columns=['read', 'start', 'end', 'feature'])
+
+    # Combine priority intervals with subtracted satellite intervals
+    df_priority_out = df_priority[['read', 'start', 'end', 'feature']]
+    result = pd.concat([df_priority_out, df_subtracted], ignore_index=True)
+
+    return result
+
+
+def _telomere_satellite_merge_pandas(df_subtelo, df_satellite):
+    """Fallback telomere-satellite merge using pandas (slower)."""
+    common_reads = set(df_subtelo['read'].unique()) & set(df_satellite['read'].unique())
+    if not common_reads:
+        print("  Warning: No common reads between BED files")
+        return pd.DataFrame(columns=['read', 'start', 'end', 'feature'])
+
+    print(f"  Common reads: {len(common_reads):,}")
+    print(f"  Priority features: {', '.join(sorted(TELOMERE_PRIORITY_FEATURES))}")
+    print("  Note: Install pyranges for faster processing")
+
+    # Filter to common reads and convert to int once
+    df_subtelo_f = df_subtelo[df_subtelo['read'].isin(common_reads)].copy()
+    df_satellite_f = df_satellite[df_satellite['read'].isin(common_reads)].copy()
+    df_subtelo_f['start'] = df_subtelo_f['start'].astype(int)
+    df_subtelo_f['end'] = df_subtelo_f['end'].astype(int)
+    df_satellite_f['start'] = df_satellite_f['start'].astype(int)
+    df_satellite_f['end'] = df_satellite_f['end'].astype(int)
+
+    # Group by read for efficient iteration
+    subtelo_grouped = {read: grp[['start', 'end', 'feature']].values
+                       for read, grp in df_subtelo_f.groupby('read')}
+    satellite_grouped = {read: grp[['start', 'end', 'feature']].values
+                         for read, grp in df_satellite_f.groupby('read')}
+
     results = []
     for read in common_reads:
-        # Get intervals for this read
-        subtelo_intervals = df_subtelo[df_subtelo['read'] == read][['start', 'end', 'feature']].values
-        satellite_intervals = df_satellite[df_satellite['read'] == read][['start', 'end', 'feature']].values
+        subtelo_intervals = subtelo_grouped.get(read, [])
+        satellite_intervals = satellite_grouped.get(read, [])
 
         # Extract priority intervals from subtelomeric
-        priority_intervals = []
-        for start, end, feature in subtelo_intervals:
-            if feature in TELOMERE_PRIORITY_FEATURES:
-                priority_intervals.append((int(start), int(end), feature))
+        priority_intervals = [(s, e, f) for s, e, f in subtelo_intervals
+                              if f in TELOMERE_PRIORITY_FEATURES]
 
-        # Build a coverage map of priority positions
-        priority_coverage = set()
-        for start, end, _ in priority_intervals:
-            for pos in range(start, end):
-                priority_coverage.add(pos)
+        # Sort priority intervals by start position for efficient subtraction
+        priority_coords = sorted([(s, e) for s, e, _ in priority_intervals])
 
         # Add priority intervals to results
         for start, end, feature in priority_intervals:
-            results.append({
-                'read': read,
-                'start': start,
-                'end': end,
-                'feature': feature
-            })
+            results.append((read, start, end, feature))
 
-        # Add satellite intervals for non-priority positions
+        # Add satellite intervals for non-priority positions using interval subtraction
         for start, end, feature in satellite_intervals:
-            start, end = int(start), int(end)
-            # Find segments not covered by priority
-            seg_start = None
-            for pos in range(start, end + 1):
-                in_priority = pos in priority_coverage
-                if pos == end or in_priority:
-                    # End of non-priority segment
-                    if seg_start is not None:
-                        seg_end = pos
-                        if seg_end > seg_start:
-                            results.append({
-                                'read': read,
-                                'start': seg_start,
-                                'end': seg_end,
-                                'feature': feature
-                            })
-                        seg_start = None
-                elif seg_start is None:
-                    # Start of non-priority segment
-                    seg_start = pos
+            # Subtract priority intervals from this satellite interval
+            uncovered = subtract_intervals((start, end), priority_coords)
+            for seg_start, seg_end in uncovered:
+                if seg_end > seg_start:
+                    results.append((read, seg_start, seg_end, feature))
 
-    return pd.DataFrame(results)
+    return pd.DataFrame(results, columns=['read', 'start', 'end', 'feature'])
 
 
 def merge_two_beds(df1, df2, sep=":"):
@@ -317,12 +408,10 @@ if args.telomere_satellite_merge:
     merged_df = merged_df.sort_values(['read', 'start'])
 
     print(f"\nWriting to: {args.output}")
-    open_func = gzip.open if args.output.endswith('.gz') else open
-    mode = 'wt' if args.output.endswith('.gz') else 'w'
-
-    with open_func(args.output, mode) as f:
-        for _, row in merged_df.iterrows():
-            f.write(f"{row['read']}\t{row['start']}\t{row['end']}\t{row['feature']}\n")
+    if args.output.endswith('.gz'):
+        merged_df.to_csv(args.output, sep='\t', index=False, header=False, compression='gzip')
+    else:
+        merged_df.to_csv(args.output, sep='\t', index=False, header=False)
 
     print("Done!")
     sys.exit(0)
