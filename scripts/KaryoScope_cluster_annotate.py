@@ -179,6 +179,7 @@ def main():
     # Load cluster analysis
     cluster_info = {}
     group_names = []
+    per_sample_mode = False
     if os.path.exists(cluster_analysis_file):
         print(f"\nLoading cluster analysis: {cluster_analysis_file}")
         ca = pd.read_csv(cluster_analysis_file, sep='\t')
@@ -188,6 +189,12 @@ def main():
         group_names = [c.replace('_count', '') for c in count_cols]
         if group_names:
             print(f"  Detected groups: {group_names}")
+
+        # Detect per-sample mode by checking for sample-specific pval columns
+        sample_pval_cols = [c for c in ca.columns if c.endswith('_pval')]
+        per_sample_mode = len(sample_pval_cols) > 0
+        if per_sample_mode:
+            print(f"  Detected per-sample comparison mode")
 
         for _, row in ca.iterrows():
             info = {
@@ -200,6 +207,10 @@ def main():
             for grp in group_names:
                 info[f'{grp}_count'] = row.get(f'{grp}_count', None)
                 info[f'{grp}_pct'] = row.get(f'{grp}_pct', None)
+                # Add per-sample p-values and odds ratios if available
+                if per_sample_mode:
+                    info[f'{grp}_pval'] = row.get(f'{grp}_pval', None)
+                    info[f'{grp}_odds'] = row.get(f'{grp}_odds', None)
 
             cluster_info[row['cluster_id']] = info
     else:
@@ -269,7 +280,8 @@ def main():
         # Add info from cluster analysis
         if cluster_id in cluster_info:
             info = cluster_info[cluster_id]
-            row['enrichment'] = info.get('enrichment', 'unknown')
+            enrichment = info.get('enrichment', 'unknown')
+            row['enrichment'] = enrichment
 
             # Add group-specific counts and percentages dynamically
             for grp in group_names:
@@ -278,22 +290,49 @@ def main():
                 row[f'{grp}_count'] = count_val
                 row[f'{grp}_pct'] = round(pct_val, 1) if pct_val is not None else None
 
-            q = info.get('q_value')
-            row['q_value'] = f"{q:.4e}" if q is not None else None
-            odds = info.get('odds_ratio')
-            row['odds_ratio'] = round(odds, 2) if odds is not None else None
+            # Handle per-sample mode: extract enriched sample's stats
+            if per_sample_mode and enrichment and enrichment not in ('mixed', 'unknown'):
+                # Extract sample name from enrichment (e.g., "BJ-enriched" -> "BJ")
+                enriched_sample = enrichment.replace('-enriched', '')
 
-            # Calculate log2_fc from odds_ratio
-            # Cap at +/-10 for Excel compatibility (avoids Inf values)
-            if odds is not None and odds > 0:
-                log2_fc = math.log2(odds)
-                row['log2_fc'] = round(max(-10, min(10, log2_fc)), 2)
-            elif odds == 0:
-                row['log2_fc'] = -10  # Cap at -10 instead of -Inf
-            elif odds is not None and math.isinf(odds):
-                row['log2_fc'] = 10  # Cap at +10 instead of +Inf
+                # Get the enriched sample's p-value and odds ratio
+                sample_pval = info.get(f'{enriched_sample}_pval')
+                sample_odds = info.get(f'{enriched_sample}_odds')
+
+                # Use sample-specific values
+                row['enriched_sample'] = enriched_sample
+                row['enriched_pval'] = f"{sample_pval:.4e}" if sample_pval is not None else None
+
+                # Calculate log2_fc from sample-specific odds ratio
+                if sample_odds is not None and sample_odds > 0:
+                    log2_fc = math.log2(sample_odds)
+                    row['log2_fc'] = round(max(-10, min(10, log2_fc)), 2)
+                elif sample_odds == 0:
+                    row['log2_fc'] = -10
+                elif sample_odds is not None and math.isinf(sample_odds):
+                    row['log2_fc'] = 10
+                else:
+                    row['log2_fc'] = None
+
+                row['odds_ratio'] = round(sample_odds, 2) if sample_odds is not None else None
             else:
-                row['log2_fc'] = None
+                # Fallback to global q_value and odds_ratio (for group comparison mode)
+                q = info.get('q_value')
+                row['q_value'] = f"{q:.4e}" if q is not None else None
+                odds = info.get('odds_ratio')
+                row['odds_ratio'] = round(odds, 2) if odds is not None else None
+
+                # Calculate log2_fc from odds_ratio
+                # Cap at +/-10 for Excel compatibility (avoids Inf values)
+                if odds is not None and odds > 0:
+                    log2_fc = math.log2(odds)
+                    row['log2_fc'] = round(max(-10, min(10, log2_fc)), 2)
+                elif odds == 0:
+                    row['log2_fc'] = -10  # Cap at -10 instead of -Inf
+                elif odds is not None and math.isinf(odds):
+                    row['log2_fc'] = 10  # Cap at +10 instead of +Inf
+                else:
+                    row['log2_fc'] = None
 
         # Annotate each featureset
         for fs in featuresets:
@@ -305,8 +344,15 @@ def main():
     # Create output DataFrame
     result_df = pd.DataFrame(results)
 
-    # Sort by log2_fc (descending) if available, otherwise by first group percentage
-    if 'log2_fc' in result_df.columns:
+    # Sort by enrichment group, then by log2_fc (descending) within each group
+    if 'enrichment' in result_df.columns and 'log2_fc' in result_df.columns:
+        # Sort by enrichment first (alphabetically), then by log2_fc descending
+        result_df = result_df.sort_values(
+            ['enrichment', 'log2_fc'],
+            ascending=[True, False],
+            na_position='last'
+        )
+    elif 'log2_fc' in result_df.columns:
         # Sort so most enriched in first group are at top (highest log2_fc)
         result_df = result_df.sort_values('log2_fc', ascending=False, na_position='last')
     elif group_names:
@@ -337,6 +383,24 @@ def main():
             n_100pct = (result_df[pct_col] == 100).sum()
             if n_100pct > 0:
                 print(f"\n100% {grp} clusters: {n_100pct}")
+
+    # Show fold change statistics for per-sample mode
+    if per_sample_mode and 'log2_fc' in result_df.columns:
+        print("\nFold change statistics (log2):")
+        fc_data = result_df[result_df['log2_fc'].notna()]['log2_fc']
+        if len(fc_data) > 0:
+            print(f"  Mean: {fc_data.mean():.2f}")
+            print(f"  Median: {fc_data.median():.2f}")
+            print(f"  Range: [{fc_data.min():.2f}, {fc_data.max():.2f}]")
+
+        # Show per-enrichment group stats
+        print("\nBy enrichment group:")
+        for enrich in sorted(result_df['enrichment'].unique()):
+            subset = result_df[result_df['enrichment'] == enrich]
+            if 'log2_fc' in subset.columns:
+                fc_vals = subset['log2_fc'].dropna()
+                if len(fc_vals) > 0:
+                    print(f"  {enrich}: n={len(subset)}, median log2FC={fc_vals.median():.2f}")
 
 
 
