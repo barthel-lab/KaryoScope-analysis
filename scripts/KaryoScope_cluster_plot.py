@@ -173,6 +173,10 @@ def parse_args():
                         help="Show clade ID in structural plot labels (e.g., [C20])")
     parser.add_argument("--show-clade-count", action="store_true",
                         help="Show count of reads in each clade (e.g., [n=15])")
+    parser.add_argument("--enrichment-grid", dest="enrichment_grid", action="store_true",
+                        help="Show enrichment as a grid of bubbles (one per sample) instead of single bubble. "
+                             "Bubble size = sample %%, opacity = -log10(p-value), color = sample color. "
+                             "Requires per-sample comparison mode in cluster analysis.")
 
     return parser.parse_args()
 
@@ -254,7 +258,11 @@ def load_cluster_analysis(cluster_analysis_file):
                 Tier 0: 100% enriched (perfect)
                 Tier 1: 80%+ enriched (strong)
                 Tier 2: all others
-            - cluster_stats: cluster_id -> {'odds_ratio': float, 'size': int, 'q_value': float}
+            - cluster_stats: cluster_id -> {
+                'odds_ratio': float, 'size': int, 'q_value': float,
+                'samples': list of sample names (for per-sample mode),
+                'per_sample': {sample: {'pct': float, 'pval': float, 'odds': float}}
+              }
             - cluster_df: DataFrame with full cluster analysis (for feature info)
     """
     cluster_enrichments = {}
@@ -269,6 +277,14 @@ def load_cluster_analysis(cluster_analysis_file):
 
             # Find percentage columns (they end with _pct)
             pct_cols = [c for c in df.columns if c.endswith('_pct')]
+
+            # Detect per-sample mode by checking for sample-specific pval columns
+            pval_cols = [c for c in df.columns if c.endswith('_pval')]
+            per_sample_mode = len(pval_cols) > 0
+            sample_names = [c.replace('_pval', '') for c in pval_cols] if per_sample_mode else []
+
+            if per_sample_mode:
+                print(f"  Detected per-sample comparison mode: {sample_names}")
 
             # Determine enrichment tier for each cluster
             def get_enrichment_tier(row):
@@ -292,11 +308,22 @@ def load_cluster_analysis(cluster_analysis_file):
                 cluster_enrichments[cluster_id] = row['enrichment']
                 cluster_order.append(cluster_id)
                 # Store stats for bubble plots
-                cluster_stats[cluster_id] = {
+                stats = {
                     'odds_ratio': row.get('odds_ratio', 1.0),
                     'size': row.get('size', 0),
-                    'q_value': row.get('q_value', 1.0)
+                    'q_value': row.get('q_value', 1.0),
+                    'samples': sample_names,
+                    'per_sample': {}
                 }
+                # Add per-sample stats if available
+                for sample in sample_names:
+                    stats['per_sample'][sample] = {
+                        'pct': row.get(f'{sample}_pct', 0),
+                        'pval': row.get(f'{sample}_pval', 1.0),
+                        'odds': row.get(f'{sample}_odds', 1.0),
+                        'count': row.get(f'{sample}_count', 0)
+                    }
+                cluster_stats[cluster_id] = stats
             print(f"  Loaded cluster analysis: {len(df)} clusters")
         except Exception as e:
             print(f"  Warning: Could not load cluster analysis: {e}")
@@ -2754,6 +2781,235 @@ def draw_enrichment_bubbles(d, cluster_y_start, cluster_y_end, x_center, cluster
         ))
 
 
+def draw_enrichment_grid(d, cluster_y_start, cluster_y_end, x_start, cluster_stats,
+                         sample_colors, bubble_radius=6, bubble_spacing=2):
+    """Draw a grid of enrichment bubbles showing per-sample statistics.
+
+    Args:
+        d: Drawing object
+        cluster_y_start: Dict of cluster_id -> y start position
+        cluster_y_end: Dict of cluster_id -> y end position
+        x_start: X position where grid starts
+        cluster_stats: Dict of cluster_id -> {'per_sample': {sample: {'pct', 'pval', 'odds'}}, 'samples': [...]}
+        sample_colors: Dict of sample name -> hex color
+        bubble_radius: Radius of each bubble
+        bubble_spacing: Spacing between bubbles
+
+    Returns:
+        tuple: (grid_width, sample_order) - total width of the grid and ordered sample list
+    """
+    import math
+
+    if not cluster_stats:
+        return 0, []
+
+    # Get sample names from first cluster that has per_sample data
+    sample_order = []
+    for stats in cluster_stats.values():
+        if stats.get('samples'):
+            sample_order = stats['samples']
+            break
+
+    if not sample_order:
+        return 0, []
+
+    num_samples = len(sample_order)
+    grid_width = num_samples * (bubble_radius * 2 + bubble_spacing) - bubble_spacing
+
+    # Max log2(OR) for color intensity scaling
+    max_log2_or = 4.0
+
+    for cluster_id in cluster_y_start:
+        if cluster_id not in cluster_stats:
+            continue
+
+        stats = cluster_stats[cluster_id]
+        per_sample = stats.get('per_sample', {})
+
+        if not per_sample:
+            continue
+
+        # Y position (center of cluster)
+        y_start_pos = cluster_y_start[cluster_id]
+        y_end_pos = cluster_y_end[cluster_id]
+        y_center = (y_start_pos + y_end_pos) / 2
+
+        # Draw a bubble for each sample
+        for i, sample in enumerate(sample_order):
+            sample_stats = per_sample.get(sample, {})
+            pct = sample_stats.get('pct', 0)
+            pval = sample_stats.get('pval', 1.0)
+            odds = sample_stats.get('odds', 1.0)
+
+            # X position for this sample's bubble
+            x_center = x_start + bubble_radius + i * (bubble_radius * 2 + bubble_spacing)
+
+            # Get base color from sample_colors
+            base_color = sample_colors.get(sample, '#888888')
+
+            # Size based on percentage (0-100% -> min to max radius)
+            # Use percentage to scale the bubble size
+            size_scale = min(1.0, pct / 100.0) if pct > 0 else 0.1
+            radius = bubble_radius * max(0.3, size_scale)  # Minimum 30% of max radius
+
+            # Calculate log2(odds ratio) for color intensity
+            if odds > 0 and odds != 1.0:
+                log2_or = math.log2(odds)
+                log2_or_clamped = max(-max_log2_or, min(max_log2_or, log2_or))
+                # Only show intensity if enriched (odds > 1)
+                if log2_or > 0:
+                    intensity = log2_or_clamped / max_log2_or
+                else:
+                    intensity = 0
+            else:
+                intensity = 0
+
+            # Alpha based on significance
+            if pval > 0 and pval < 1:
+                neg_log_p = -math.log10(pval)
+                neg_log_p = min(10, max(0, neg_log_p))
+                # Map to alpha: 0.3 (NS) to 1.0 (highly significant)
+                alpha = 0.3 + 0.7 * (neg_log_p / 10)
+            else:
+                alpha = 0.3 if pval >= 1 else 1.0
+
+            # For samples with low percentage, use gray
+            if pct < 5:
+                color = '#444444'
+                alpha = 0.3
+            else:
+                # Use sample color with intensity based on enrichment
+                # Convert hex to RGB, then blend toward white based on inverse intensity
+                try:
+                    r = int(base_color[1:3], 16)
+                    g = int(base_color[3:5], 16)
+                    b = int(base_color[5:7], 16)
+                    # Blend toward white for lower intensity
+                    blend = 1 - intensity * 0.5  # At max intensity, 50% saturation
+                    r = int(r + (255 - r) * blend * 0.3)
+                    g = int(g + (255 - g) * blend * 0.3)
+                    b = int(b + (255 - b) * blend * 0.3)
+                    color = f'rgb({min(255, r)},{min(255, g)},{min(255, b)})'
+                except (ValueError, IndexError):
+                    color = base_color
+
+            # Draw bubble
+            d.append(draw.Circle(
+                x_center, y_center, radius,
+                fill=color, fill_opacity=alpha,
+                stroke='white', stroke_width=0.3
+            ))
+
+    return grid_width, sample_order
+
+
+def draw_enrichment_grid_header(d, x_start, y_pos, sample_order, sample_colors,
+                                  bubble_radius=6, bubble_spacing=2, text_color='white'):
+    """Draw column headers for the enrichment grid.
+
+    Args:
+        d: Drawing object
+        x_start: X position where grid starts
+        y_pos: Y position for headers (above the grid)
+        sample_order: List of sample names in order
+        sample_colors: Dict of sample name -> hex color
+        bubble_radius: Radius of bubbles (for spacing)
+        bubble_spacing: Spacing between bubbles
+        text_color: Color for header text
+    """
+    for i, sample in enumerate(sample_order):
+        x_center = x_start + bubble_radius + i * (bubble_radius * 2 + bubble_spacing)
+        color = sample_colors.get(sample, text_color)
+
+        # Draw rotated sample name
+        d.append(draw.Text(
+            sample,
+            font_size=8, x=x_center, y=y_pos,
+            fill=color, font_family='sans-serif',
+            text_anchor='start',
+            transform=f'rotate(-45, {x_center}, {y_pos})'
+        ))
+
+
+def draw_grid_legend(d, x_start, y_start, sample_order, sample_colors, text_color='white', bubble_radius=6):
+    """Draw a legend explaining the enrichment grid encoding.
+
+    Args:
+        d: Drawing object
+        x_start: X position to start the legend
+        y_start: Y position for legend
+        sample_order: List of sample names
+        sample_colors: Dict of sample name -> color
+        text_color: Color for legend text
+        bubble_radius: Bubble radius for sizing reference
+    """
+    font_size = 9
+    legend_y = y_start
+
+    # Title
+    d.append(draw.Text(
+        "Sample Enrichment Grid",
+        font_size=10, x=x_start, y=legend_y,
+        fill=text_color, font_family='sans-serif', font_weight='bold'
+    ))
+    legend_y += 18
+
+    # Size legend
+    d.append(draw.Text(
+        "Size: % of cluster reads",
+        font_size=font_size, x=x_start, y=legend_y,
+        fill=text_color, font_family='sans-serif'
+    ))
+    legend_y += 14
+
+    # Draw size examples
+    sizes = [(0.3, "< 5%"), (0.6, "~50%"), (1.0, "100%")]
+    for i, (scale, label) in enumerate(sizes):
+        cx = x_start + 10 + i * 45
+        r = bubble_radius * scale
+        d.append(draw.Circle(cx, legend_y + 5, r, fill='#888888', stroke='white', stroke_width=0.3))
+        d.append(draw.Text(label, font_size=7, x=cx + bubble_radius + 5, y=legend_y + 8,
+                          fill=text_color, font_family='sans-serif', text_anchor='start'))
+    legend_y += 25
+
+    # Opacity legend
+    d.append(draw.Text(
+        "Opacity: -log₁₀(p-value)",
+        font_size=font_size, x=x_start, y=legend_y,
+        fill=text_color, font_family='sans-serif'
+    ))
+    legend_y += 14
+
+    alphas = [(0.3, "NS"), (0.65, "p<0.01"), (1.0, "p<1e⁻¹⁰")]
+    for i, (alpha, label) in enumerate(alphas):
+        cx = x_start + 10 + i * 55
+        d.append(draw.Circle(cx, legend_y + 5, bubble_radius * 0.7, fill='#888888',
+                           fill_opacity=alpha, stroke='white', stroke_width=0.3))
+        d.append(draw.Text(label, font_size=7, x=cx + bubble_radius + 5, y=legend_y + 8,
+                          fill=text_color, font_family='sans-serif', text_anchor='start'))
+    legend_y += 25
+
+    # Sample color legend
+    d.append(draw.Text(
+        "Color: sample",
+        font_size=font_size, x=x_start, y=legend_y,
+        fill=text_color, font_family='sans-serif'
+    ))
+    legend_y += 14
+
+    # Show sample colors (up to 6 per row)
+    samples_per_row = 6
+    for i, sample in enumerate(sample_order[:12]):  # Show up to 12 samples
+        row = i // samples_per_row
+        col = i % samples_per_row
+        cx = x_start + 10 + col * 60
+        cy = legend_y + row * 18
+        color = sample_colors.get(sample, '#888888')
+        d.append(draw.Circle(cx, cy + 5, bubble_radius * 0.7, fill=color, stroke='white', stroke_width=0.3))
+        d.append(draw.Text(sample, font_size=7, x=cx + bubble_radius + 5, y=cy + 8,
+                          fill=color, font_family='sans-serif', text_anchor='start'))
+
+
 def draw_bubble_legend(d, x_start, y_start, cluster_stats, text_color='white', max_radius=8, min_radius=2):
     """Draw a legend explaining the enrichment bubble encoding.
 
@@ -4522,7 +4778,31 @@ def main():
         bubble_radius = 8
         dendrogram_to_bubble_gap = 1  # Gap from dendrogram tip to bubble left edge
         bubble_to_bars_gap = 12  # Gap from bubble right edge to feature bars
-        bubble_space = dendrogram_to_bubble_gap + bubble_radius * 2 + bubble_to_bars_gap
+
+        # Check if enrichment grid mode should be used
+        # Get sample names from cluster_stats for grid layout
+        grid_sample_names = []
+        use_enrichment_grid = args.enrichment_grid
+        if use_enrichment_grid:
+            for stats in cluster_stats.values():
+                if stats.get('samples'):
+                    grid_sample_names = stats['samples']
+                    break
+            if not grid_sample_names:
+                print("  Warning: --enrichment-grid requested but no per-sample data available")
+                use_enrichment_grid = False
+
+        # Calculate bubble space based on mode
+        grid_bubble_radius = 6
+        grid_bubble_spacing = 2
+        if use_enrichment_grid and grid_sample_names:
+            num_samples = len(grid_sample_names)
+            grid_width = num_samples * (grid_bubble_radius * 2 + grid_bubble_spacing) - grid_bubble_spacing
+            bubble_space = dendrogram_to_bubble_gap + grid_width + bubble_to_bars_gap + 5
+            print(f"  Enrichment grid mode: {num_samples} samples, grid width = {grid_width}px")
+        else:
+            bubble_space = dendrogram_to_bubble_gap + bubble_radius * 2 + bubble_to_bars_gap
+
         left_margin = 50 + dendrogram_width + bubble_space
         sample_dendro_height = 40 if args.show_matrix else 0  # Space for sample dendrogram
         top_margin = 80 + sample_dendro_height  # More space for rotated sample headers + dendrogram
@@ -4721,27 +5001,54 @@ def main():
                 row_legend_y = min(cluster_y_start.values()) - 60  # Above the bar plot axis
                 draw_sample_group_legend(d, sample_group_colors, row_bar_x_start, row_legend_y, text_color)
 
-        # Draw enrichment bubbles (to the RIGHT of dendrogram tips, before feature bars)
+        # Draw enrichment bubbles/grid (to the RIGHT of dendrogram tips, before feature bars)
         # Dendrogram tips are at 50 + dendrogram_width (consistent with draw_cluster_dendrogram_vertical)
         dendro_tip_x = 50 + dendrogram_width
-        bubble_x = dendro_tip_x + dendrogram_to_bubble_gap + bubble_radius
 
-        # Draw faint gray connecting lines from dendrogram tips to bubble centers (BEFORE bubbles so bubbles overlay)
-        connector_color = '#555555'  # Faint gray, lighter than white tree
-        for cluster_id in cluster_y_start:
-            y_start = cluster_y_start[cluster_id]
-            y_end = cluster_y_end[cluster_id]
-            y_center = (y_start + y_end) / 2
-            # Line from dendrogram tip to bubble center (bubble will be drawn on top)
-            d.append(draw.Line(
-                dendro_tip_x, y_center,
-                bubble_x, y_center,
-                stroke=connector_color, stroke_width=0.5
-            ))
+        if use_enrichment_grid and grid_sample_names:
+            # Grid mode: draw a column of bubbles for each sample
+            grid_x_start = dendro_tip_x + dendrogram_to_bubble_gap
 
-        # Draw bubbles on top of connector lines
-        draw_enrichment_bubbles(d, cluster_y_start, cluster_y_end, bubble_x, cluster_stats,
-                                max_radius=bubble_radius, min_radius=2)
+            # Draw grid header (sample names)
+            header_y = min(cluster_y_start.values()) - 10
+            draw_enrichment_grid_header(d, grid_x_start, header_y, grid_sample_names, sample_colors,
+                                        bubble_radius=grid_bubble_radius, bubble_spacing=grid_bubble_spacing,
+                                        text_color=text_color)
+
+            # Draw faint gray connecting lines from dendrogram tips to grid start
+            connector_color = '#555555'
+            for cluster_id in cluster_y_start:
+                y_start_pos = cluster_y_start[cluster_id]
+                y_end_pos = cluster_y_end[cluster_id]
+                y_center = (y_start_pos + y_end_pos) / 2
+                d.append(draw.Line(
+                    dendro_tip_x, y_center,
+                    grid_x_start, y_center,
+                    stroke=connector_color, stroke_width=0.5
+                ))
+
+            # Draw the enrichment grid
+            draw_enrichment_grid(d, cluster_y_start, cluster_y_end, grid_x_start, cluster_stats,
+                                sample_colors, bubble_radius=grid_bubble_radius, bubble_spacing=grid_bubble_spacing)
+        else:
+            # Single bubble mode (original behavior)
+            bubble_x = dendro_tip_x + dendrogram_to_bubble_gap + bubble_radius
+
+            # Draw faint gray connecting lines from dendrogram tips to bubble centers
+            connector_color = '#555555'
+            for cluster_id in cluster_y_start:
+                y_start_pos = cluster_y_start[cluster_id]
+                y_end_pos = cluster_y_end[cluster_id]
+                y_center = (y_start_pos + y_end_pos) / 2
+                d.append(draw.Line(
+                    dendro_tip_x, y_center,
+                    bubble_x, y_center,
+                    stroke=connector_color, stroke_width=0.5
+                ))
+
+            # Draw bubbles on top of connector lines
+            draw_enrichment_bubbles(d, cluster_y_start, cluster_y_end, bubble_x, cluster_stats,
+                                    max_radius=bubble_radius, min_radius=2)
 
         # Draw cluster labels on right (after feature bars and read indices)
         if not args.hide_brackets:
@@ -4756,13 +5063,16 @@ def main():
                                          enrichment_colors=enrichment_colors,
                                          cluster_enrichments=cluster_enrichments_dict)
 
-        # Draw bubble legend at bottom
+        # Draw bubble/grid legend at bottom
         legend_y = max(cluster_y_end.values()) + bar_plot_height + 30
-        draw_bubble_legend(d, left_margin, legend_y, cluster_stats, text_color,
-                          max_radius=bubble_radius, min_radius=2)
-
-        # Draw enrichment text color legend below bubble legend
-        enrichment_legend_y = legend_y + 75  # Below bubble legend (bubble legend is ~65px tall)
+        if use_enrichment_grid and grid_sample_names:
+            draw_grid_legend(d, left_margin, legend_y, grid_sample_names, sample_colors,
+                            text_color=text_color, bubble_radius=grid_bubble_radius)
+            enrichment_legend_y = legend_y + 120  # Grid legend is taller
+        else:
+            draw_bubble_legend(d, left_margin, legend_y, cluster_stats, text_color,
+                              max_radius=bubble_radius, min_radius=2)
+            enrichment_legend_y = legend_y + 75  # Below bubble legend (bubble legend is ~65px tall)
         draw_enrichment_text_legend(d, left_margin, enrichment_legend_y, enrichment_colors, text_color)
 
         # Draw matrix color legend if matrix is enabled (to the right of enrichment legend)
