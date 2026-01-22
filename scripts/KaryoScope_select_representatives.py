@@ -121,10 +121,12 @@ def check_read_features_cached(read_id, sample, cluster_features, feature_cache)
 
 
 def select_representatives(cluster_data, cluster_features, n_reps, feature_cache,
-                           preferred_min_length=20000, preferred_max_length=30000):
+                           preferred_min_length=20000, preferred_max_length=30000,
+                           length_column='read_span'):
     """Select best representative reads for a cluster.
 
     Priority: reads in preferred length range that have the defining features.
+    For reads outside preferred range, prefer those closest to the range boundaries.
     Uses pre-loaded feature cache for fast lookup.
 
     Args:
@@ -134,17 +136,37 @@ def select_representatives(cluster_data, cluster_features, n_reps, feature_cache
         feature_cache: Pre-loaded feature cache
         preferred_min_length: Minimum preferred read length (default: 20000)
         preferred_max_length: Maximum preferred read length (default: 30000)
+        length_column: Column to use for length filtering (default: 'read_span')
     """
-    # Sort by length descending
-    sorted_data = cluster_data.sort_values('read_length', ascending=False)
+    # Fall back to read_length if read_span not available
+    if length_column not in cluster_data.columns:
+        length_column = 'read_length'
 
-    # Tier by length - preferred range first
-    tiers = [
-        sorted_data[(sorted_data['read_length'] >= preferred_min_length) & (sorted_data['read_length'] <= preferred_max_length)],
-        sorted_data[(sorted_data['read_length'] >= 10000) & (sorted_data['read_length'] < preferred_min_length)],
-        sorted_data[sorted_data['read_length'] > preferred_max_length],
-        sorted_data[sorted_data['read_length'] < 10000],
-    ]
+    preferred_mid = (preferred_min_length + preferred_max_length) / 2
+
+    # For preferred range: sort by closeness to midpoint
+    in_range = cluster_data[(cluster_data[length_column] >= preferred_min_length) &
+                            (cluster_data[length_column] <= preferred_max_length)].copy()
+    in_range['_dist'] = abs(in_range[length_column] - preferred_mid)
+    in_range = in_range.sort_values('_dist')
+
+    # For below range: sort by closeness to min (prefer longer)
+    below_range = cluster_data[(cluster_data[length_column] >= 10000) &
+                               (cluster_data[length_column] < preferred_min_length)].copy()
+    below_range['_dist'] = preferred_min_length - below_range[length_column]
+    below_range = below_range.sort_values('_dist')
+
+    # For above range: sort by closeness to max (prefer shorter)
+    above_range = cluster_data[cluster_data[length_column] > preferred_max_length].copy()
+    above_range['_dist'] = above_range[length_column] - preferred_max_length
+    above_range = above_range.sort_values('_dist')
+
+    # Very short reads last
+    very_short = cluster_data[cluster_data[length_column] < 10000].copy()
+    very_short = very_short.sort_values(length_column, ascending=False)
+
+    # Tier order: preferred range, then closest to range boundaries
+    tiers = [in_range, below_range, above_range, very_short]
 
     selected = []
 
@@ -163,22 +185,26 @@ def select_representatives(cluster_data, cluster_features, n_reps, feature_cache
                 selected.append({
                     'read': row['read'],
                     'sample': row['sample'],
-                    'read_length': row['read_length'],
+                    'read_length': row.get('read_length', row.get(length_column, 0)),
+                    'read_span': row.get('read_span', row.get(length_column, 0)),
                     'centroid_distance': row['centroid_distance'],
                     'has_top_feature': has_top,
                     'n_feature_matches': n_matches
                 })
 
-    # If not enough found, fall back to longest reads
+    # If not enough found, fall back to reads closest to preferred range
     if len(selected) < n_reps:
-        for _, row in sorted_data.head(n_reps * 2).iterrows():
+        # Combine all tiers and try without feature requirement
+        all_reads = pd.concat(tiers, ignore_index=True)
+        for _, row in all_reads.iterrows():
             if len(selected) >= n_reps:
                 break
             if row['read'] not in [s['read'] for s in selected]:
                 selected.append({
                     'read': row['read'],
                     'sample': row['sample'],
-                    'read_length': row['read_length'],
+                    'read_length': row.get('read_length', row.get(length_column, 0)),
+                    'read_span': row.get('read_span', row.get(length_column, 0)),
                     'centroid_distance': row['centroid_distance'],
                     'has_top_feature': False,
                     'n_feature_matches': 0
@@ -192,12 +218,14 @@ def normalize_by_rank(cluster_reps, n_per_cluster):
 
     For each rank position (1, 2, 3...), assign the read whose length best fits
     the median length for that position across all clusters.
+    Uses read_span (full coordinate range) for length comparisons.
     """
     # First, compute target lengths for each rank
     # Use the median length at each rank across all clusters
+    # Prefer read_span (full length) over read_length (filtered)
     all_lengths = []
     for cluster_id, reps in cluster_reps.items():
-        lengths = sorted([r['read_length'] for r in reps], reverse=True)
+        lengths = sorted([r.get('read_span', r.get('read_length', 0)) for r in reps], reverse=True)
         all_lengths.append(lengths)
 
     # Compute median length for each rank position
@@ -222,9 +250,9 @@ def normalize_by_rank(cluster_reps, n_per_cluster):
             if not available:
                 break
             target = target_lengths[rank]
-            # Find read with length closest to target
+            # Find read with length closest to target (using read_span)
             best_idx = min(range(len(available)),
-                          key=lambda i: abs(available[i]['read_length'] - target))
+                          key=lambda i: abs(available[i].get('read_span', available[i].get('read_length', 0)) - target))
             assigned[rank] = available.pop(best_idx)
 
         normalized[cluster_id] = [r for r in assigned if r is not None]
@@ -321,7 +349,8 @@ def main():
                 'rank': rank,
                 'read': rep['read'],
                 'sample': rep['sample'],
-                'read_length': rep['read_length'],
+                'read_length': rep.get('read_length', 0),
+                'read_span': rep.get('read_span', rep.get('read_length', 0)),
                 'centroid_distance': rep['centroid_distance'],
                 'has_top_feature': rep['has_top_feature'],
                 'n_feature_matches': rep['n_feature_matches']
@@ -346,8 +375,9 @@ def main():
     has_features = sum(1 for r in rows if r['has_top_feature'])
     print(f"  Reads with top feature: {has_features} ({has_features/len(rows)*100:.1f}%)")
 
-    lengths = [r['read_length'] for r in rows]
-    print(f"  Read length range: {min(lengths):,} - {max(lengths):,} bp")
+    # Use read_span for length statistics (actual read length)
+    spans = [r['read_span'] for r in rows]
+    print(f"  Read span range: {min(spans):,} - {max(spans):,} bp")
 
 
 if __name__ == '__main__':

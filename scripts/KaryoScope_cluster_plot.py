@@ -5305,11 +5305,13 @@ def main():
                               representatives_file, matrix_x_start, cell_width, cell_height,
                               text_color, background_color)
 
-            # Draw sample dendrogram just above sample labels
-            header_y = min(cluster_y_start.values()) - 5
-            dendro_bottom = header_y - 30  # Above sample name labels with spacing
-            draw_sample_dendrogram(d, matrix_data, matrix_x_start, dendro_bottom, sample_dendro_height,
-                                   line_color=text_color)
+            # Draw sample dendrogram just above sample labels (only if > 2 samples)
+            n_samples = len(matrix_data.get('all_samples', []))
+            if n_samples > 2:
+                header_y = min(cluster_y_start.values()) - 5
+                dendro_bottom = header_y - 30  # Above sample name labels with spacing
+                draw_sample_dendrogram(d, matrix_data, matrix_x_start, dendro_bottom, sample_dendro_height,
+                                       line_color=text_color)
 
             # Draw bar plot below matrix (column sums)
             bar_plot_y = max(cluster_y_end.values()) + cell_height / 2 + 5
@@ -5398,18 +5400,23 @@ def main():
                 enrichment_legend_y = legend_y + 100  # Below bubble legend - increased spacing
             draw_enrichment_text_legend(d, left_margin, enrichment_legend_y, enrichment_colors, text_color)
 
-        # Draw matrix color legend if matrix is enabled (to the right of enrichment legend)
-        if args.show_matrix and matrix_data:
-            matrix_legend_x = left_margin + 400  # Position to the right of enrichment legend
-            draw_matrix_legend(d, matrix_legend_x, enrichment_legend_y, matrix_data['max_count'],
-                              text_color, background_color)
-
         # Draw featureset color legends vertically on the right side
         color_legend_x = image_width - right_legend_width + 10
         color_legend_y_start = top_margin
         draw_color_legends_vertical(d, featuresets, featureset_colors, featureset_color_order,
                                     fs_display_names, color_legend_x, color_legend_y_start, text_color,
                                     displayed_features=displayed_features)
+
+        # Draw matrix color legend if matrix is enabled (between cluster colors and grid legend)
+        if args.show_matrix and matrix_data:
+            # Position matrix legend on right side, between color legends and grid legend
+            # Estimate color legend height (roughly 20px per feature + header)
+            n_features = sum(len(featureset_color_order.get(fs, [])) for fs in featuresets)
+            color_legend_end_y = color_legend_y_start + min(n_features * 12 + 30, 300)
+            # Calculate midpoint between color legend end and grid legend start
+            matrix_legend_y = (color_legend_end_y + legend_y) // 2
+            draw_matrix_legend(d, color_legend_x, matrix_legend_y, matrix_data['max_count'],
+                              text_color, background_color)
 
         # Save vertical plot
         d.save_svg(args.output)
