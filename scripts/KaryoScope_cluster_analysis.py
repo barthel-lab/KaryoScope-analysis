@@ -1015,6 +1015,12 @@ if args.read_list:
 # Calculate feature lengths
 in_data['length'] = in_data['end'] - in_data['start']
 
+# Calculate read span (full coordinate range) BEFORE filtering
+# This is the actual read length including all features
+read_span_dict = in_data.groupby('read').apply(
+    lambda x: x['end'].max() - x['start'].min()
+).to_dict()
+
 # --- Filter excluded features BEFORE read length filtering ---
 # This ensures read length is calculated on remaining annotated sequence
 if args.exclude_features:
@@ -2123,13 +2129,15 @@ for i, read in enumerate(read_names):
     group = sample_to_group.get(sample, sample)
     centroid_dist = read_centroid_distances.get(read, np.nan)
     read_len = read_length_dict.get(read, 0)
+    read_span = read_span_dict.get(read, 0)
     read_records.append({
         'read': read,
         'cluster': cluster,
         'sample': sample,
         'group': group,
         'centroid_distance': centroid_dist,
-        'read_length': read_len
+        'read_length': read_len,
+        'read_span': read_span
     })
 
 # Create DataFrame and sort by cluster, then centroid_distance
@@ -2140,7 +2148,9 @@ assignments = assignments.sort_values(['cluster', 'centroid_distance'], ascendin
 assignments['rank'] = assignments.groupby('cluster').cumcount() + 1
 
 # Reorder columns
-assignments = assignments[['read', 'cluster', 'sample', 'group', 'centroid_distance', 'read_length', 'rank']]
+# read_length = annotated length after excluding features (used for clustering)
+# read_span = full coordinate range (actual read length for visualization)
+assignments = assignments[['read', 'cluster', 'sample', 'group', 'centroid_distance', 'read_length', 'read_span', 'rank']]
 
 assignments_file = f"{args.output_prefix}.read_assignments.tsv"
 assignments.to_csv(assignments_file, sep='\t', index=False)
