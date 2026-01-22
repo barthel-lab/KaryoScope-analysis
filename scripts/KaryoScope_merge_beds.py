@@ -45,6 +45,15 @@ parser.add_argument("--telomere-satellite-merge", dest="telomere_satellite_merge
                     help="Priority merge mode: keep telomere features (canonical_telomere, noncanonical_telomere,\n"
                          "TAR1, ITS) from BED1 (subtelomeric), fill gaps with features from BED2 (satellite/region).\n"
                          "Requires exactly 2 BED files.")
+parser.add_argument("--priority-merge", dest="priority_merge", action="store_true",
+                    help="3-way priority merge mode: subtel > region > repeat.\n"
+                         "Requires exactly 3 BED files in order: subtelomeric, region, repeat.\n"
+                         "Priority subtel features: canonical_telomere, noncanonical_telomere, ITS, TAR1, telomere_like_multigroup1\n"
+                         "Region rules:\n"
+                         "  - ct + nonrepeat -> ct; ct + other -> use repeat\n"
+                         "  - noncentromeric + rRNA -> rRNA; noncentromeric + other -> rDNA\n"
+                         "  - arm/p_arm/q_arm -> use repeat (background)\n"
+                         "  - satellite features (censat, hsat*, etc.) -> keep region")
 
 args = parser.parse_args()
 
@@ -114,6 +123,230 @@ def apply_feature_filter(df, keep_patterns, collapse_label):
 
 # Priority features for telomere-satellite merge mode
 TELOMERE_PRIORITY_FEATURES = {'canonical_telomere', 'noncanonical_telomere', 'TAR1', 'ITS'}
+
+# Priority features for 3-way priority merge mode (includes telomere_like_multigroup1)
+SUBTEL_PRIORITY_FEATURES = {'canonical_telomere', 'noncanonical_telomere', 'TAR1', 'ITS', 'telomere_like_multigroup1'}
+
+# Region features that are considered "background" (can be overwritten by repeat)
+REGION_BACKGROUND_FEATURES = {'p_arm', 'q_arm', 'arm_multigroup1'}
+
+
+def apply_conditional_region_repeat_rules(region_feature, repeat_feature):
+    """
+    Apply conditional rules for region + repeat feature combination.
+
+    Rules:
+    - ct + nonrepeat -> ct
+    - ct + other repeat -> use repeat
+    - noncentromeric + rRNA -> rRNA
+    - noncentromeric + other -> rDNA
+    - arm/p_arm/q_arm -> use repeat (background)
+    - satellite features (censat, hsat*, etc.) -> keep region
+
+    Args:
+        region_feature: Feature from region BED
+        repeat_feature: Feature from repeat BED
+
+    Returns:
+        Final feature label
+    """
+    # Background features: use repeat
+    if region_feature in REGION_BACKGROUND_FEATURES:
+        return repeat_feature
+
+    # CT rules
+    if region_feature == 'ct':
+        if repeat_feature == 'nonrepeat':
+            return 'ct'
+        else:
+            return repeat_feature
+
+    # Noncentromeric rules
+    if region_feature == 'noncentromeric':
+        if repeat_feature == 'rRNA':
+            return 'rRNA'
+        else:
+            return 'rDNA'
+
+    # Satellite features (censat, hsat*, asat, bsat, gsat, etc.): keep region
+    return region_feature
+
+
+def priority_merge_three_way(df_subtel, df_region, df_repeat):
+    """
+    3-way priority merge: subtel > region (with conditional rules) > repeat.
+
+    Args:
+        df_subtel: DataFrame from subtelomeric BED file
+        df_region: DataFrame from region BED file
+        df_repeat: DataFrame from repeat BED file
+
+    Returns:
+        DataFrame with merged features (single feature per interval)
+    """
+    try:
+        import pyranges as pr
+        return _priority_merge_pyranges(df_subtel, df_region, df_repeat)
+    except ImportError:
+        return _priority_merge_pandas(df_subtel, df_region, df_repeat)
+
+
+def _priority_merge_pyranges(df_subtel, df_region, df_repeat):
+    """Fast 3-way priority merge using pyranges."""
+    import pyranges as pr
+
+    # Find common reads across all three
+    common_reads = (set(df_subtel['read'].unique()) &
+                   set(df_region['read'].unique()) &
+                   set(df_repeat['read'].unique()))
+
+    if not common_reads:
+        print("  Warning: No common reads between all three BED files")
+        return pd.DataFrame(columns=['read', 'start', 'end', 'feature'])
+
+    print(f"  Common reads: {len(common_reads):,}")
+    print(f"  Subtel priority features: {', '.join(sorted(SUBTEL_PRIORITY_FEATURES))}")
+
+    # Filter to common reads
+    df_subtel_f = df_subtel[df_subtel['read'].isin(common_reads)].copy()
+    df_region_f = df_region[df_region['read'].isin(common_reads)].copy()
+    df_repeat_f = df_repeat[df_repeat['read'].isin(common_reads)].copy()
+
+    # Ensure integer types
+    for df in [df_subtel_f, df_region_f, df_repeat_f]:
+        df['start'] = df['start'].astype(int)
+        df['end'] = df['end'].astype(int)
+
+    # Step 1: Extract subtel priority intervals
+    priority_mask = df_subtel_f['feature'].isin(SUBTEL_PRIORITY_FEATURES)
+    df_subtel_priority = df_subtel_f[priority_mask][['read', 'start', 'end', 'feature']].copy()
+    print(f"  Subtel priority intervals: {len(df_subtel_priority):,}")
+
+    # Step 2: Join region and repeat to get conditional features
+    # First, convert to pyranges
+    pr_region = pr.PyRanges(df_region_f.rename(columns={
+        'read': 'Chromosome', 'start': 'Start', 'end': 'End', 'feature': 'RegionFeature'
+    }))
+    pr_repeat = pr.PyRanges(df_repeat_f.rename(columns={
+        'read': 'Chromosome', 'start': 'Start', 'end': 'End', 'feature': 'RepeatFeature'
+    }))
+
+    # Join region and repeat
+    pr_region_repeat = pr_region.join(pr_repeat)
+
+    if len(pr_region_repeat) == 0:
+        print("  Warning: No overlap between region and repeat")
+        # Fall back to just subtel priority features
+        return df_subtel_priority.sort_values(['read', 'start'])
+
+    # Convert to DataFrame and compute overlap coordinates
+    df_rr = pr_region_repeat.df.copy()
+    df_rr['overlap_start'] = df_rr[['Start', 'Start_b']].max(axis=1)
+    df_rr['overlap_end'] = df_rr[['End', 'End_b']].min(axis=1)
+    df_rr = df_rr[df_rr['overlap_end'] > df_rr['overlap_start']]
+
+    # Apply conditional rules
+    df_rr['feature'] = df_rr.apply(
+        lambda row: apply_conditional_region_repeat_rules(row['RegionFeature'], row['RepeatFeature']),
+        axis=1
+    )
+
+    # Prepare region+repeat merged DataFrame
+    df_base = pd.DataFrame({
+        'read': df_rr['Chromosome'],
+        'start': df_rr['overlap_start'].astype(int),
+        'end': df_rr['overlap_end'].astype(int),
+        'feature': df_rr['feature']
+    })
+    print(f"  Region+repeat merged intervals: {len(df_base):,}")
+
+    # Step 3: Subtract subtel priority regions from region+repeat base
+    pr_subtel_priority = pr.PyRanges(df_subtel_priority.rename(columns={
+        'read': 'Chromosome', 'start': 'Start', 'end': 'End', 'feature': 'Feature'
+    }))
+    pr_base = pr.PyRanges(df_base.rename(columns={
+        'read': 'Chromosome', 'start': 'Start', 'end': 'End', 'feature': 'Feature'
+    }))
+
+    # Subtract subtel priority from base
+    pr_subtracted = pr_base.subtract(pr_subtel_priority)
+
+    # Convert results back
+    if len(pr_subtracted) > 0:
+        df_subtracted = pr_subtracted.df.rename(columns={
+            'Chromosome': 'read', 'Start': 'start', 'End': 'end', 'Feature': 'feature'
+        })[['read', 'start', 'end', 'feature']]
+    else:
+        df_subtracted = pd.DataFrame(columns=['read', 'start', 'end', 'feature'])
+
+    # Step 4: Combine subtel priority + subtracted base
+    result = pd.concat([df_subtel_priority, df_subtracted], ignore_index=True)
+
+    return result.sort_values(['read', 'start'])
+
+
+def _priority_merge_pandas(df_subtel, df_region, df_repeat):
+    """Fallback 3-way priority merge using pandas (slower)."""
+    common_reads = (set(df_subtel['read'].unique()) &
+                   set(df_region['read'].unique()) &
+                   set(df_repeat['read'].unique()))
+
+    if not common_reads:
+        print("  Warning: No common reads between all three BED files")
+        return pd.DataFrame(columns=['read', 'start', 'end', 'feature'])
+
+    print(f"  Common reads: {len(common_reads):,}")
+    print(f"  Subtel priority features: {', '.join(sorted(SUBTEL_PRIORITY_FEATURES))}")
+    print("  Note: Install pyranges for faster processing")
+
+    # Filter to common reads
+    df_subtel_f = df_subtel[df_subtel['read'].isin(common_reads)].copy()
+    df_region_f = df_region[df_region['read'].isin(common_reads)].copy()
+    df_repeat_f = df_repeat[df_repeat['read'].isin(common_reads)].copy()
+
+    for df in [df_subtel_f, df_region_f, df_repeat_f]:
+        df['start'] = df['start'].astype(int)
+        df['end'] = df['end'].astype(int)
+
+    # Group by read
+    subtel_grouped = {read: grp[['start', 'end', 'feature']].values
+                      for read, grp in df_subtel_f.groupby('read')}
+    region_grouped = {read: grp[['start', 'end', 'feature']].values
+                      for read, grp in df_region_f.groupby('read')}
+    repeat_grouped = {read: grp[['start', 'end', 'feature']].values
+                      for read, grp in df_repeat_f.groupby('read')}
+
+    results = []
+    for read in common_reads:
+        subtel_intervals = subtel_grouped.get(read, [])
+        region_intervals = region_grouped.get(read, [])
+        repeat_intervals = repeat_grouped.get(read, [])
+
+        # Extract subtel priority intervals
+        priority_intervals = [(s, e, f) for s, e, f in subtel_intervals
+                              if f in SUBTEL_PRIORITY_FEATURES]
+        priority_coords = sorted([(s, e) for s, e, _ in priority_intervals])
+
+        # Add subtel priority intervals
+        for start, end, feature in priority_intervals:
+            results.append((read, start, end, feature))
+
+        # Compute region+repeat merged intervals
+        for r_s, r_e, r_f in region_intervals:
+            for rep_s, rep_e, rep_f in repeat_intervals:
+                overlap_start = max(r_s, rep_s)
+                overlap_end = min(r_e, rep_e)
+                if overlap_end > overlap_start:
+                    # Apply conditional rules
+                    merged_feature = apply_conditional_region_repeat_rules(r_f, rep_f)
+
+                    # Subtract subtel priority intervals
+                    uncovered = subtract_intervals((overlap_start, overlap_end), priority_coords)
+                    for seg_start, seg_end in uncovered:
+                        if seg_end > seg_start:
+                            results.append((read, seg_start, seg_end, merged_feature))
+
+    return pd.DataFrame(results, columns=['read', 'start', 'end', 'feature']).sort_values(['read', 'start'])
 
 
 def subtract_intervals(interval, blockers):
@@ -406,6 +639,55 @@ if args.telomere_satellite_merge:
 
     # Skip to output (no feature reduction in this mode)
     merged_df = merged_df.sort_values(['read', 'start'])
+
+    print(f"\nWriting to: {args.output}")
+    if args.output.endswith('.gz'):
+        merged_df.to_csv(args.output, sep='\t', index=False, header=False, compression='gzip')
+    else:
+        merged_df.to_csv(args.output, sep='\t', index=False, header=False)
+
+    print("Done!")
+    sys.exit(0)
+
+# Handle 3-way priority merge mode
+if args.priority_merge:
+    if len(args.bed) != 3:
+        print("Error: --priority-merge requires exactly 3 BED files", file=sys.stderr)
+        print("  BED1: subtelomeric features", file=sys.stderr)
+        print("  BED2: region features", file=sys.stderr)
+        print("  BED3: repeat features", file=sys.stderr)
+        sys.exit(1)
+
+    print("\n--- 3-Way Priority Merge Mode (subtel > region > repeat) ---")
+    print("\nConditional rules:")
+    print("  - ct + nonrepeat -> ct; ct + other -> use repeat")
+    print("  - noncentromeric + rRNA -> rRNA; noncentromeric + other -> rDNA")
+    print("  - arm/p_arm/q_arm -> use repeat (background)")
+    print("  - satellite features (censat, hsat*, etc.) -> keep region")
+
+    df_subtel = load_bed_file(args.bed[0])
+    print(f"\n  Subtelomeric intervals: {len(df_subtel):,}")
+
+    df_region = load_bed_file(args.bed[1])
+    print(f"  Region intervals: {len(df_region):,}")
+
+    df_repeat = load_bed_file(args.bed[2])
+    print(f"  Repeat intervals: {len(df_repeat):,}")
+
+    merged_df = priority_merge_three_way(df_subtel, df_region, df_repeat)
+    print(f"\n  Final merged intervals: {len(merged_df):,}")
+
+    if merged_df.empty:
+        print("Error: Merge resulted in no intervals", file=sys.stderr)
+        sys.exit(1)
+
+    # Count unique features
+    feature_counts = merged_df['feature'].value_counts()
+    print(f"  Unique features: {len(feature_counts):,}")
+    print("\n  Top 10 features:")
+    for feat, count in feature_counts.head(10).items():
+        pct = count / len(merged_df) * 100
+        print(f"    {feat}: {count:,} ({pct:.1f}%)")
 
     print(f"\nWriting to: {args.output}")
     if args.output.endswith('.gz'):
