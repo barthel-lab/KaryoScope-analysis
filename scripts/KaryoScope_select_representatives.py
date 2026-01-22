@@ -38,6 +38,8 @@ def parse_args():
     parser.add_argument("--n-per-cluster", type=int, default=5, help="Number of representatives per cluster")
     parser.add_argument("--feature-min-pct", type=float, default=10.0, help="Minimum feature %% to be characteristic")
     parser.add_argument("--clusters", help="Comma-separated cluster IDs to process (default: all)")
+    parser.add_argument("--preferred-min-length", type=int, default=20000, help="Minimum preferred read length in bp (default: 20000)")
+    parser.add_argument("--preferred-max-length", type=int, default=30000, help="Maximum preferred read length in bp (default: 30000)")
     parser.add_argument("--output", required=True, help="Output TSV file")
     return parser.parse_args()
 
@@ -118,21 +120,30 @@ def check_read_features_cached(read_id, sample, cluster_features, feature_cache)
     return has_top, matches
 
 
-def select_representatives(cluster_data, cluster_features, n_reps, feature_cache):
+def select_representatives(cluster_data, cluster_features, n_reps, feature_cache,
+                           preferred_min_length=20000, preferred_max_length=30000):
     """Select best representative reads for a cluster.
 
-    Priority: longest reads (16-20kb first) that have the defining features.
+    Priority: reads in preferred length range that have the defining features.
     Uses pre-loaded feature cache for fast lookup.
+
+    Args:
+        cluster_data: DataFrame with cluster reads
+        cluster_features: List of (feature, pct, featureset) tuples
+        n_reps: Number of representatives to select
+        feature_cache: Pre-loaded feature cache
+        preferred_min_length: Minimum preferred read length (default: 20000)
+        preferred_max_length: Maximum preferred read length (default: 30000)
     """
     # Sort by length descending
     sorted_data = cluster_data.sort_values('read_length', ascending=False)
 
-    # Tier by length
+    # Tier by length - preferred range first
     tiers = [
-        sorted_data[(sorted_data['read_length'] >= 16000) & (sorted_data['read_length'] <= 20000)],
-        sorted_data[(sorted_data['read_length'] >= 10000) & (sorted_data['read_length'] < 16000)],
-        sorted_data[(sorted_data['read_length'] >= 5000) & (sorted_data['read_length'] < 10000)],
-        sorted_data[sorted_data['read_length'] < 5000],
+        sorted_data[(sorted_data['read_length'] >= preferred_min_length) & (sorted_data['read_length'] <= preferred_max_length)],
+        sorted_data[(sorted_data['read_length'] >= 10000) & (sorted_data['read_length'] < preferred_min_length)],
+        sorted_data[sorted_data['read_length'] > preferred_max_length],
+        sorted_data[sorted_data['read_length'] < 10000],
     ]
 
     selected = []
@@ -283,7 +294,9 @@ def main():
             cluster_features = parse_top_features(cluster_row.iloc[0].to_dict(), args.feature_min_pct)
 
         reps = select_representatives(
-            cluster_data, cluster_features, args.n_per_cluster, feature_cache
+            cluster_data, cluster_features, args.n_per_cluster, feature_cache,
+            preferred_min_length=args.preferred_min_length,
+            preferred_max_length=args.preferred_max_length
         )
 
         cluster_reps[cluster_id] = reps

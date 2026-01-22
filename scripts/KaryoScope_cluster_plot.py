@@ -127,6 +127,10 @@ def parse_args():
                              "Only these reads will be plotted. Use KaryoScope_select_representatives.py "
                              "to pre-select representative reads.")
 
+    # Cluster filtering
+    parser.add_argument("--max-qvalue", dest="max_qvalue", type=float, default=None,
+                        help="Filter to clusters with q_value <= this threshold (e.g., 0.05 for significant only)")
+
     # Mode options
     parser.add_argument("--show-dendrogram", dest="show_dendrogram", action="store_true",
                         help="Show hierarchical clustering dendrogram to the left of feature plots")
@@ -175,6 +179,23 @@ def parse_args():
     parser.add_argument("--log-file", dest="log_file",
                         action=argparse.BooleanOptionalAction, default=True,
                         help="Save console output to {output}.log (default: True)")
+    parser.add_argument("--show-clade-id", action="store_true",
+                        help="Show clade ID in structural plot labels (e.g., [C20])")
+    parser.add_argument("--show-clade-count", action="store_true",
+                        help="Show count of reads in each clade (e.g., [n=15])")
+    parser.add_argument("--enrichment-grid", dest="enrichment_grid", action="store_true",
+                        help="Show enrichment as a grid of bubbles (one per sample) instead of single bubble. "
+                             "Bubble size = sample %%, opacity = -log10(p-value), color = sample color. "
+                             "Requires per-sample comparison mode in cluster analysis.")
+    parser.add_argument("--orient-telomere-top", dest="orient_telomere_top", action="store_true",
+                        help="Reorient reads so telomere features (canonical_telomere, noncanonical_telomere) "
+                             "are always at the top of the read visualization.")
+    parser.add_argument("--hide-read-labels", dest="hide_read_labels", action="store_true",
+                        help="Hide read name labels above each read bar")
+    parser.add_argument("--show-cluster-numbers", dest="show_cluster_numbers", action="store_true",
+                        help="Show cluster numbers below each read instead of featureset names")
+    parser.add_argument("--font-family", dest="font_family", default="sans-serif",
+                        help="Font family for text labels (default: sans-serif)")
 
     return parser.parse_args()
 
@@ -246,8 +267,12 @@ def load_cluster_labels(labels_file, label_column="curated_annotation"):
     return labels
 
 
-def load_cluster_analysis(cluster_analysis_file):
+def load_cluster_analysis(cluster_analysis_file, max_qvalue=None):
     """Load cluster analysis results to get enrichment info and cluster order.
+
+    Args:
+        cluster_analysis_file: Path to cluster_analysis.tsv
+        max_qvalue: If set, filter to clusters with q_value <= this threshold
 
     Returns:
         tuple: (cluster_enrichments dict, cluster_order list, cluster_stats dict, cluster_df DataFrame)
@@ -267,6 +292,13 @@ def load_cluster_analysis(cluster_analysis_file):
     if cluster_analysis_file and os.path.exists(cluster_analysis_file):
         try:
             df = pd.read_csv(cluster_analysis_file, sep='\t')
+
+            # Filter by q_value if threshold specified
+            if max_qvalue is not None and 'q_value' in df.columns:
+                n_before = len(df)
+                df = df[df['q_value'] <= max_qvalue]
+                print(f"  Filtered to {len(df)} significant clusters (q_value <= {max_qvalue}, was {n_before})")
+
             cluster_df = df.copy()  # Keep original for feature info
 
             # Find percentage columns (they end with _pct)
@@ -1713,8 +1745,8 @@ def draw_cluster_dendrogram(d, cluster_dendro_data, cluster_x_start, cluster_x_e
         """Convert distance to Y pixel coordinate (higher distance = higher up)."""
         return dendro_base_y - (dist / max_distance) * (dendrogram_height - 15)
 
-    # Thin white lines
-    line_color = '#FFFFFF'
+    # Line color based on background
+    line_color = '#000000' if background_color == 'white' else '#FFFFFF'
 
     # Build mapping from linkage index to display x-center
     # cluster_order[i] is the cluster_id at display position i
@@ -1931,8 +1963,8 @@ def draw_cluster_dendrogram_vertical(d, cluster_dendro_data, cluster_y_start, cl
         """Convert distance to X pixel coordinate (higher distance = further left)."""
         return dendro_base_x - (dist / max_distance) * (dendrogram_width - 15)
 
-    # Thin white lines
-    line_color = '#FFFFFF'
+    # Line color based on background
+    line_color = '#000000' if background_color == 'white' else '#FFFFFF'
 
     # Track node positions
     node_y_center = {}
@@ -2373,12 +2405,13 @@ def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_me
                 b = int(51 * (1 - intensity))          # 51 -> 0
                 fill_color = f'#{r:02x}{g:02x}{b:02x}'
 
-            # Draw cell with white border
+            # Draw cell with border (color based on background)
+            grid_stroke = '#333333' if background_color == 'white' else '#FFFFFF'
             d.append(draw.Rectangle(
                 x, y,
                 cell_width, cell_height,
                 fill=fill_color,
-                stroke='#FFFFFF',
+                stroke=grid_stroke,
                 stroke_width=0.5
             ))
 
@@ -2911,7 +2944,368 @@ def draw_enrichment_bubbles(d, cluster_y_start, cluster_y_end, x_center, cluster
         ))
 
 
-def draw_bubble_legend(d, x_start, y_start, cluster_stats, text_color='white', max_radius=8, min_radius=2):
+def draw_enrichment_grid(d, cluster_y_start, cluster_y_end, x_start, cluster_stats,
+                         sample_colors, bubble_radius=6, bubble_spacing=2):
+    """Draw a grid of enrichment bubbles showing per-sample statistics.
+
+    Args:
+        d: Drawing object
+        cluster_y_start: Dict of cluster_id -> y start position
+        cluster_y_end: Dict of cluster_id -> y end position
+        x_start: X position where grid starts
+        cluster_stats: Dict of cluster_id -> {'per_sample': {sample: {'pct', 'pval', 'odds'}}, 'samples': [...]}
+        sample_colors: Dict of sample name -> hex color
+        bubble_radius: Radius of each bubble
+        bubble_spacing: Spacing between bubbles
+
+    Returns:
+        tuple: (grid_width, sample_order) - total width of the grid and ordered sample list
+    """
+    import math
+
+    if not cluster_stats:
+        return 0, []
+
+    # Get sample names from first cluster that has per_sample data
+    sample_order = []
+    for stats in cluster_stats.values():
+        if stats.get('samples'):
+            sample_order = stats['samples']
+            break
+
+    if not sample_order:
+        return 0, []
+
+    num_samples = len(sample_order)
+    grid_width = num_samples * (bubble_radius * 2 + bubble_spacing) - bubble_spacing
+
+    # Max log2(OR) for color intensity scaling
+    max_log2_or = 4.0
+
+    for cluster_id in cluster_y_start:
+        if cluster_id not in cluster_stats:
+            continue
+
+        stats = cluster_stats[cluster_id]
+        per_sample = stats.get('per_sample', {})
+
+        if not per_sample:
+            continue
+
+        # Y position (center of cluster)
+        y_start_pos = cluster_y_start[cluster_id]
+        y_end_pos = cluster_y_end[cluster_id]
+        y_center = (y_start_pos + y_end_pos) / 2
+
+        # Draw a bubble for each sample
+        for i, sample in enumerate(sample_order):
+            sample_stats = per_sample.get(sample, {})
+            pct = sample_stats.get('pct', 0)
+            pval = sample_stats.get('pval', 1.0)
+            odds = sample_stats.get('odds', 1.0)
+
+            # X position for this sample's bubble
+            x_center = x_start + bubble_radius + i * (bubble_radius * 2 + bubble_spacing)
+
+            # Get base color from sample_colors
+            base_color = sample_colors.get(sample, '#888888')
+
+            # Size based on percentage (0-100% -> min to max radius)
+            # Use percentage to scale the bubble size
+            size_scale = min(1.0, pct / 100.0) if pct > 0 else 0.1
+            radius = bubble_radius * max(0.3, size_scale)  # Minimum 30% of max radius
+
+            # Calculate log2(odds ratio) for color intensity
+            if odds > 0 and odds != 1.0:
+                log2_or = math.log2(odds)
+                log2_or_clamped = max(-max_log2_or, min(max_log2_or, log2_or))
+                # Only show intensity if enriched (odds > 1)
+                if log2_or > 0:
+                    intensity = log2_or_clamped / max_log2_or
+                else:
+                    intensity = 0
+            else:
+                intensity = 0
+
+            # Alpha based on significance
+            if pval > 0 and pval < 1:
+                neg_log_p = -math.log10(pval)
+                neg_log_p = min(10, max(0, neg_log_p))
+                # Map to alpha: 0.3 (NS) to 1.0 (highly significant)
+                alpha = 0.3 + 0.7 * (neg_log_p / 10)
+            else:
+                alpha = 0.3 if pval >= 1 else 1.0
+
+            # For samples with low percentage, use gray
+            if pct < 5:
+                color = '#444444'
+                alpha = 0.3
+            else:
+                # Use sample color with intensity based on enrichment
+                # Convert hex to RGB, then blend toward white based on inverse intensity
+                try:
+                    r = int(base_color[1:3], 16)
+                    g = int(base_color[3:5], 16)
+                    b = int(base_color[5:7], 16)
+                    # Blend toward white for lower intensity
+                    blend = 1 - intensity * 0.5  # At max intensity, 50% saturation
+                    r = int(r + (255 - r) * blend * 0.3)
+                    g = int(g + (255 - g) * blend * 0.3)
+                    b = int(b + (255 - b) * blend * 0.3)
+                    color = f'rgb({min(255, r)},{min(255, g)},{min(255, b)})'
+                except (ValueError, IndexError):
+                    color = base_color
+
+            # Draw bubble
+            d.append(draw.Circle(
+                x_center, y_center, radius,
+                fill=color, fill_opacity=alpha,
+                stroke='white', stroke_width=0.3
+            ))
+
+    return grid_width, sample_order
+
+
+def draw_enrichment_grid_header(d, x_start, y_pos, sample_order, sample_colors,
+                                  bubble_radius=6, bubble_spacing=2, text_color='white'):
+    """Draw column headers for the enrichment grid.
+
+    Args:
+        d: Drawing object
+        x_start: X position where grid starts
+        y_pos: Y position for headers (above the grid)
+        sample_order: List of sample names in order
+        sample_colors: Dict of sample name -> hex color
+        bubble_radius: Radius of bubbles (for spacing)
+        bubble_spacing: Spacing between bubbles
+        text_color: Color for header text
+    """
+    for i, sample in enumerate(sample_order):
+        x_center = x_start + bubble_radius + i * (bubble_radius * 2 + bubble_spacing)
+        color = sample_colors.get(sample, text_color)
+
+        # Draw rotated sample name
+        d.append(draw.Text(
+            sample,
+            font_size=8, x=x_center, y=y_pos,
+            fill=color, font_family='sans-serif',
+            text_anchor='start',
+            transform=f'rotate(-45, {x_center}, {y_pos})'
+        ))
+
+
+def draw_grid_legend(d, x_start, y_start, sample_order, sample_colors, text_color='white', bubble_radius=6):
+    """Draw a legend explaining the enrichment grid encoding.
+
+    Args:
+        d: Drawing object
+        x_start: X position to start the legend
+        y_start: Y position for legend
+        sample_order: List of sample names
+        sample_colors: Dict of sample name -> color
+        text_color: Color for legend text
+        bubble_radius: Bubble radius for sizing reference
+    """
+    font_size = 9
+    legend_y = y_start
+
+    # Title
+    d.append(draw.Text(
+        "Sample Enrichment Grid",
+        font_size=10, x=x_start, y=legend_y,
+        fill=text_color, font_family='sans-serif', font_weight='bold'
+    ))
+    legend_y += 18
+
+    # Size legend
+    d.append(draw.Text(
+        "Size: % of cluster reads",
+        font_size=font_size, x=x_start, y=legend_y,
+        fill=text_color, font_family='sans-serif'
+    ))
+    legend_y += 14
+
+    # Draw size examples
+    sizes = [(0.3, "< 5%"), (0.6, "~50%"), (1.0, "100%")]
+    for i, (scale, label) in enumerate(sizes):
+        cx = x_start + 10 + i * 45
+        r = bubble_radius * scale
+        d.append(draw.Circle(cx, legend_y + 5, r, fill='#888888', stroke='white', stroke_width=0.3))
+        d.append(draw.Text(label, font_size=7, x=cx + bubble_radius + 5, y=legend_y + 8,
+                          fill=text_color, font_family='sans-serif', text_anchor='start'))
+    legend_y += 25
+
+    # Opacity legend
+    d.append(draw.Text(
+        "Opacity: -log₁₀(p-value)",
+        font_size=font_size, x=x_start, y=legend_y,
+        fill=text_color, font_family='sans-serif'
+    ))
+    legend_y += 14
+
+    alphas = [(0.3, "NS"), (0.65, "p<0.01"), (1.0, "p<1e⁻¹⁰")]
+    for i, (alpha, label) in enumerate(alphas):
+        cx = x_start + 10 + i * 55
+        d.append(draw.Circle(cx, legend_y + 5, bubble_radius * 0.7, fill='#888888',
+                           fill_opacity=alpha, stroke='white', stroke_width=0.3))
+        d.append(draw.Text(label, font_size=7, x=cx + bubble_radius + 5, y=legend_y + 8,
+                          fill=text_color, font_family='sans-serif', text_anchor='start'))
+    legend_y += 25
+
+    # Sample color legend
+    d.append(draw.Text(
+        "Color: sample",
+        font_size=font_size, x=x_start, y=legend_y,
+        fill=text_color, font_family='sans-serif'
+    ))
+    legend_y += 14
+
+    # Show sample colors (up to 6 per row)
+    samples_per_row = 6
+    for i, sample in enumerate(sample_order[:12]):  # Show up to 12 samples
+        row = i // samples_per_row
+        col = i % samples_per_row
+        cx = x_start + 10 + col * 60
+        cy = legend_y + row * 18
+        color = sample_colors.get(sample, '#888888')
+        d.append(draw.Circle(cx, cy + 5, bubble_radius * 0.7, fill=color, stroke='white', stroke_width=0.3))
+        d.append(draw.Text(sample, font_size=7, x=cx + bubble_radius + 5, y=cy + 8,
+                          fill=color, font_family='sans-serif', text_anchor='start'))
+
+
+def draw_enrichment_grid_horizontal(d, cluster_x_start, cluster_x_end, y_start, cluster_stats,
+                                     sample_colors, bubble_radius=6, bubble_spacing=2, text_color='white'):
+    """Draw a grid of enrichment bubbles for horizontal mode (bubbles below dendrogram).
+
+    In horizontal mode:
+    - Clusters are arranged horizontally (left to right)
+    - Each cluster gets a column of bubbles (one per sample)
+    - Samples are stacked vertically (rows)
+    - Sample labels are on the left
+
+    Args:
+        d: Drawing object
+        cluster_x_start: Dict of cluster_id -> x start position
+        cluster_x_end: Dict of cluster_id -> x end position
+        y_start: Y position where grid starts (below dendrogram)
+        cluster_stats: Dict of cluster_id -> {'per_sample': {sample: {'pct', 'pval', 'odds'}}, 'samples': [...]}
+        sample_colors: Dict of sample name -> hex color
+        bubble_radius: Radius of each bubble
+        bubble_spacing: Spacing between bubbles
+        text_color: Color for text labels
+
+    Returns:
+        tuple: (grid_height, sample_order) - total height of the grid and ordered sample list
+    """
+    import math
+
+    if not cluster_stats:
+        return 0, []
+
+    # Get sample names from first cluster that has per_sample data
+    sample_order = []
+    for stats in cluster_stats.values():
+        if stats.get('samples'):
+            sample_order = stats['samples']
+            break
+
+    if not sample_order:
+        return 0, []
+
+    num_samples = len(sample_order)
+    grid_height = num_samples * (bubble_radius * 2 + bubble_spacing) - bubble_spacing
+
+    # Max log2(OR) for color intensity scaling
+    max_log2_or = 4.0
+
+    # Draw sample labels on the left
+    label_x = min(cluster_x_start.values()) - 5 if cluster_x_start else 50
+    for i, sample in enumerate(sample_order):
+        y_center = y_start + bubble_radius + i * (bubble_radius * 2 + bubble_spacing)
+        color = sample_colors.get(sample, text_color)
+        d.append(draw.Text(
+            sample, font_size=8, x=label_x, y=y_center,
+            fill=color, font_family='sans-serif',
+            text_anchor='end', dominant_baseline='middle'
+        ))
+
+    # Draw bubbles for each cluster
+    for cluster_id in cluster_x_start:
+        if cluster_id not in cluster_stats:
+            continue
+
+        stats = cluster_stats[cluster_id]
+        per_sample = stats.get('per_sample', {})
+
+        if not per_sample:
+            continue
+
+        # X position (center of cluster)
+        x_start_pos = cluster_x_start[cluster_id]
+        x_end_pos = cluster_x_end[cluster_id]
+        x_center = (x_start_pos + x_end_pos) / 2
+
+        # Draw a bubble for each sample (vertically stacked)
+        for i, sample in enumerate(sample_order):
+            sample_stats = per_sample.get(sample, {})
+            pct = sample_stats.get('pct', 0)
+            pval = sample_stats.get('pval', 1.0)
+            odds = sample_stats.get('odds', 1.0)
+
+            # Y position for this sample's bubble
+            y_center = y_start + bubble_radius + i * (bubble_radius * 2 + bubble_spacing)
+
+            # Get base color from sample_colors
+            base_color = sample_colors.get(sample, '#888888')
+
+            # Size based on percentage (0-100% -> min to max radius)
+            size_scale = min(1.0, pct / 100.0) if pct > 0 else 0.1
+            radius = bubble_radius * max(0.3, size_scale)
+
+            # Calculate log2(odds ratio) for color intensity
+            if odds > 0 and odds != 1.0:
+                log2_or = math.log2(odds)
+                log2_or_clamped = max(-max_log2_or, min(max_log2_or, log2_or))
+                intensity = log2_or_clamped / max_log2_or if log2_or > 0 else 0
+            else:
+                intensity = 0
+
+            # Alpha based on significance
+            if pval > 0 and pval < 1:
+                neg_log_p = -math.log10(pval)
+                neg_log_p = min(10, max(0, neg_log_p))
+                alpha = 0.3 + 0.7 * (neg_log_p / 10)
+            else:
+                alpha = 0.3 if pval >= 1 else 1.0
+
+            # For samples with low percentage, use gray
+            if pct < 5:
+                color = '#444444'
+                alpha = 0.3
+            else:
+                try:
+                    r = int(base_color[1:3], 16)
+                    g = int(base_color[3:5], 16)
+                    b = int(base_color[5:7], 16)
+                    blend = 1 - intensity * 0.5
+                    r = int(r + (255 - r) * blend * 0.3)
+                    g = int(g + (255 - g) * blend * 0.3)
+                    b = int(b + (255 - b) * blend * 0.3)
+                    color = f'rgb({min(255, r)},{min(255, g)},{min(255, b)})'
+                except (ValueError, IndexError):
+                    color = base_color
+
+            # Draw bubble
+            d.append(draw.Circle(
+                x_center, y_center, radius,
+                fill=color, fill_opacity=alpha,
+                stroke='white', stroke_width=0.3
+            ))
+
+    return grid_height, sample_order
+
+
+>def draw_bubble_legend(d, x_start, y_start, cluster_stats, text_color='white', max_radius=8, min_radius=2):
     """Draw a legend explaining the enrichment bubble encoding.
 
     Args:
@@ -4440,7 +4834,8 @@ def main():
     sample_to_group, sample_colors, group_colors = load_sample_metadata(sample_metadata_file)
 
     # Load cluster analysis to get enrichment info, cluster priority order, stats for bubbles, and full df for features
-    cluster_enrichments, cluster_order, cluster_stats, cluster_analysis_df = load_cluster_analysis(cluster_analysis_file)
+    cluster_enrichments, cluster_order, cluster_stats, cluster_analysis_df = load_cluster_analysis(
+        cluster_analysis_file, max_qvalue=args.max_qvalue)
 
     # Load custom cluster labels if provided
     cluster_labels = load_cluster_labels(args.cluster_labels, args.label_column)
@@ -4741,8 +5136,8 @@ def main():
             draw_cluster_dendrogram_vertical(d, cluster_dendro_data, cluster_y_start, cluster_y_end,
                                              left_margin, dendrogram_width, background_color)
 
-        # Draw scale bar above first featureset column
-        if args.column_tracks:
+        # Draw scale bar above first featureset column (for column_tracks or show_matrix modes)
+        if args.column_tracks or args.show_matrix:
             scale_bar_y = min(cluster_y_start.values()) - 15  # Position above first cluster
             draw_scale_bar(d, left_margin, scale_bar_y, ratio, text_color)
 
@@ -4945,7 +5340,28 @@ def main():
     has_dendrogram = cluster_dendro_data is not None or full_dendro_data is not None
     dendrogram_height = 100 if has_dendrogram else 0
     bracket_height = 0 if args.hide_brackets else 50
-    top_margin = 100 + dendrogram_height + bracket_height
+
+    # Check for enrichment grid in horizontal mode
+    use_enrichment_grid_horiz = args.enrichment_grid
+    grid_sample_names_horiz = []
+    grid_bubble_radius_horiz = 6
+    grid_bubble_spacing_horiz = 2
+    enrichment_grid_height = 0
+
+    if use_enrichment_grid_horiz:
+        for stats in cluster_stats.values():
+            if stats.get('samples'):
+                grid_sample_names_horiz = stats['samples']
+                break
+        if not grid_sample_names_horiz:
+            print("  Warning: --enrichment-grid requested but no per-sample data available")
+            use_enrichment_grid_horiz = False
+        else:
+            num_samples = len(grid_sample_names_horiz)
+            enrichment_grid_height = num_samples * (grid_bubble_radius_horiz * 2 + grid_bubble_spacing_horiz) + 10
+            print(f"  Enrichment grid mode (horizontal): {num_samples} samples, grid height = {enrichment_grid_height}px")
+
+    top_margin = 100 + dendrogram_height + enrichment_grid_height + bracket_height
 
     # Calculate x positions
     read_x_positions = {}
@@ -5215,6 +5631,9 @@ def main():
     d.append(draw.Rectangle(0, 0, image_width, image_height, fill=background_color))
 
     # --- Draw components ---
+    # Calculate dendrogram top margin for grid positioning
+    dendro_top_margin = 100 + dendrogram_height + bracket_height  # Without grid height
+
     # Dendrogram header - either full (all reads) or cluster-level
     if full_dendro_data is not None:
         # Draw full dendrogram showing all individual reads
@@ -5222,7 +5641,17 @@ def main():
                                     top_margin, dendrogram_height, background_color)
     elif cluster_dendro_data is not None:
         draw_cluster_dendrogram(d, cluster_dendro_data, cluster_x_start, cluster_x_end,
-                                top_margin, dendrogram_height, background_color)
+                                dendro_top_margin, dendrogram_height, background_color)
+
+    # Enrichment grid (horizontal mode) - below dendrogram, above brackets
+    if use_enrichment_grid_horiz and grid_sample_names_horiz:
+        # Position grid just below the dendrogram base (dendro_base_y = dendro_top_margin + 20)
+        grid_y_start = dendro_top_margin + 25  # Just below dendrogram leaves
+        draw_enrichment_grid_horizontal(d, cluster_x_start, cluster_x_end, grid_y_start,
+                                        cluster_stats, sample_colors,
+                                        bubble_radius=grid_bubble_radius_horiz,
+                                        bubble_spacing=grid_bubble_spacing_horiz,
+                                        text_color=text_color)
 
     # Cluster brackets - positioned below feature labels per cluster
     # Calculate label height: longest featureset name × font_size (~4.5px per char for font_size=6)
@@ -5245,10 +5674,11 @@ def main():
                       rect_plot_data=rect_plot_data if rect_plot_featuresets else None,
                       background_color=background_color)
 
-    # Read labels
-    draw_read_labels(d, cluster_reads, read_x_positions, group_width, top_margin, text_color)
+    # Read labels (can be hidden with --hide-read-labels)
+    if not args.hide_read_labels:
+        draw_read_labels(d, cluster_reads, read_x_positions, group_width, top_margin, text_color)
 
-    # Featureset labels below each read's bars
+    # Labels below each read's bars
     for read, (min_y, max_y, x_start, total_width) in read_heights.items():
         if read not in read_x_positions:
             continue
@@ -5256,17 +5686,29 @@ def main():
         base_x = read_x_positions[read]
         label_base_y = max_y + 5  # Just below this read's bars
 
-        for fs_idx, fs in enumerate(featuresets):
-            x_offset = fs_idx * (args.bar_width + args.bar_spacing)
-            display_name = fs_display_names.get(fs, fs)
-            label_x = base_x + x_offset + args.bar_width / 2
-
+        if args.show_cluster_numbers:
+            # Show cluster number instead of featureset names
+            cluster_id = read_to_original_cluster.get(read, "?")
+            # Center the cluster number under the read
+            label_x = base_x + (group_width / 2)
             d.append(draw.Text(
-                display_name, font_size=6, x=label_x, y=label_base_y,
-                fill=text_color, font_family='sans-serif',
-                text_anchor='start', dominant_baseline='middle',
-                transform=f"rotate(90 {label_x} {label_base_y})"
+                str(cluster_id), font_size=8, x=label_x, y=label_base_y + 5,
+                fill=text_color, font_family=args.font_family,
+                text_anchor='middle', dominant_baseline='hanging'
             ))
+        else:
+            # Original: featureset labels
+            for fs_idx, fs in enumerate(featuresets):
+                x_offset = fs_idx * (args.bar_width + args.bar_spacing)
+                display_name = fs_display_names.get(fs, fs)
+                label_x = base_x + x_offset + args.bar_width / 2
+
+                d.append(draw.Text(
+                    display_name, font_size=6, x=label_x, y=label_base_y,
+                    fill=text_color, font_family=args.font_family,
+                    text_anchor='start', dominant_baseline='middle',
+                    transform=f"rotate(90 {label_x} {label_base_y})"
+                ))
 
     # --- Draw legends ---
     legend_y = 20
