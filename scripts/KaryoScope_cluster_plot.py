@@ -304,6 +304,14 @@ def load_cluster_analysis(cluster_analysis_file, max_qvalue=None):
             # Find percentage columns (they end with _pct)
             pct_cols = [c for c in df.columns if c.endswith('_pct')]
 
+            # Detect per-sample mode by checking for sample-specific pval columns
+            pval_cols = [c for c in df.columns if c.endswith('_pval')]
+            per_sample_mode = len(pval_cols) > 0
+            sample_names = [c.replace('_pval', '') for c in pval_cols] if per_sample_mode else []
+
+            if per_sample_mode:
+                print(f"  Detected per-sample comparison mode: {sample_names}")
+
             # Determine enrichment tier for each cluster
             def get_enrichment_tier(row):
                 if not pct_cols:
@@ -326,11 +334,22 @@ def load_cluster_analysis(cluster_analysis_file, max_qvalue=None):
                 cluster_enrichments[cluster_id] = row['enrichment']
                 cluster_order.append(cluster_id)
                 # Store stats for bubble plots
-                cluster_stats[cluster_id] = {
+                stats = {
                     'odds_ratio': row.get('odds_ratio', 1.0),
                     'size': row.get('size', 0),
-                    'q_value': row.get('q_value', 1.0)
+                    'q_value': row.get('q_value', 1.0),
+                    'samples': sample_names,
+                    'per_sample': {}
                 }
+                # Add per-sample stats if available
+                for sample in sample_names:
+                    stats['per_sample'][sample] = {
+                        'pct': row.get(f'{sample}_pct', 0),
+                        'pval': row.get(f'{sample}_pval', 1.0),
+                        'odds': row.get(f'{sample}_odds', 1.0),
+                        'count': row.get(f'{sample}_count', 0)
+                    }
+                cluster_stats[cluster_id] = stats
             print(f"  Loaded cluster analysis: {len(df)} clusters")
         except Exception as e:
             print(f"  Warning: Could not load cluster analysis: {e}")
@@ -2300,48 +2319,76 @@ def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_me
     # group_name -> (Z, original_samples, ordered_samples)
     group_linkages = {}
 
-    # Cluster samples within each group
-    clustered_samples = []
-    for group_name in ['Normal', 'Control']:  # Normal/Control first
-        if group_name in group_to_samples:
-            group_samples = group_to_samples.pop(group_name)
-            original_samples = group_samples.copy()  # Keep original order for linkage indices
-            if len(group_samples) > 2:
-                # Build count matrix: samples × clusters
+    # Check if all groups are singletons (each sample is its own group)
+    # In this case, cluster all samples together
+    all_singleton_groups = all(len(samples) == 1 for samples in group_to_samples.values())
+
+    if all_singleton_groups and len(all_samples) > 1:
+        # Cluster all samples together as one group
+        original_samples = all_samples.copy()
+        count_matrix = np.array([
+            [cluster_sample_counts[cid].get(s, 0) for cid in cluster_ids]
+            for s in all_samples
+        ], dtype=float)
+        if count_matrix.sum() > 0:
+            # Use proportion-based clustering (normalize by sample total)
+            # This compares relative distributions across clusters, not absolute counts
+            row_sums = count_matrix.sum(axis=1, keepdims=True)
+            row_sums[row_sums == 0] = 1  # Avoid division by zero
+            prop_matrix = count_matrix / row_sums
+            Z = linkage(prop_matrix, method='ward')
+            order = leaves_list(Z)
+            ordered_samples = [all_samples[i] for i in order]
+            group_linkages['All'] = (Z, original_samples, ordered_samples)
+            all_samples = ordered_samples
+        clustered_samples = all_samples
+    else:
+        # Cluster samples within each group
+        clustered_samples = []
+        for group_name in ['Normal', 'Control']:  # Normal/Control first
+            if group_name in group_to_samples:
+                group_samples = group_to_samples.pop(group_name)
+                original_samples = group_samples.copy()  # Keep original order for linkage indices
+                if len(group_samples) > 1:
+                    # Build count matrix: samples × clusters
+                    count_matrix = np.array([
+                        [cluster_sample_counts[cid].get(s, 0) for cid in cluster_ids]
+                        for s in group_samples
+                    ], dtype=float)
+                    # Cluster using proportion-based normalization
+                    if count_matrix.sum() > 0:  # Only cluster if there's data
+                        row_sums = count_matrix.sum(axis=1, keepdims=True)
+                        row_sums[row_sums == 0] = 1
+                        prop_matrix = count_matrix / row_sums
+                        Z = linkage(prop_matrix, method='ward')
+                        order = leaves_list(Z)
+                        ordered_samples = [group_samples[i] for i in order]
+                        group_linkages[group_name] = (Z, original_samples, ordered_samples)
+                        group_samples = ordered_samples
+                clustered_samples.extend(group_samples)
+
+        # Add remaining groups (Tumor, etc.) - also clustered
+        for group_name in sorted(group_to_samples.keys()):
+            group_samples = group_to_samples[group_name]
+            original_samples = group_samples.copy()
+            if len(group_samples) > 1:
                 count_matrix = np.array([
                     [cluster_sample_counts[cid].get(s, 0) for cid in cluster_ids]
                     for s in group_samples
-                ])
-                # Cluster using log-transformed counts (but display absolute)
-                if count_matrix.sum() > 0:  # Only cluster if there's data
-                    log_matrix = np.log1p(count_matrix)  # log(1 + count)
-                    Z = linkage(log_matrix, method='ward')
+                ], dtype=float)
+                # Cluster using proportion-based normalization
+                if count_matrix.sum() > 0:
+                    row_sums = count_matrix.sum(axis=1, keepdims=True)
+                    row_sums[row_sums == 0] = 1
+                    prop_matrix = count_matrix / row_sums
+                    Z = linkage(prop_matrix, method='ward')
                     order = leaves_list(Z)
                     ordered_samples = [group_samples[i] for i in order]
                     group_linkages[group_name] = (Z, original_samples, ordered_samples)
                     group_samples = ordered_samples
             clustered_samples.extend(group_samples)
 
-    # Add remaining groups (Tumor, etc.) - also clustered
-    for group_name in sorted(group_to_samples.keys()):
-        group_samples = group_to_samples[group_name]
-        original_samples = group_samples.copy()
-        if len(group_samples) > 2:
-            count_matrix = np.array([
-                [cluster_sample_counts[cid].get(s, 0) for cid in cluster_ids]
-                for s in group_samples
-            ])
-            # Cluster using log-transformed counts (but display absolute)
-            if count_matrix.sum() > 0:
-                log_matrix = np.log1p(count_matrix)  # log(1 + count)
-                Z = linkage(log_matrix, method='ward')
-                order = leaves_list(Z)
-                ordered_samples = [group_samples[i] for i in order]
-                group_linkages[group_name] = (Z, original_samples, ordered_samples)
-                group_samples = ordered_samples
-        clustered_samples.extend(group_samples)
-
-    all_samples = clustered_samples
+        all_samples = clustered_samples
 
     # Recalculate x positions with gaps between groups
     sample_x_positions = {}
@@ -2395,15 +2442,23 @@ def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_me
                 intensity = 1.0
 
             if count == 0:
-                # Zero counts: dark background
-                fill_color = '#1a1a1a' if background_color == 'black' else '#f0f0f0'
+                # Zero counts: match background-appropriate neutral
+                fill_color = '#1a1a1a' if background_color == 'black' else '#f5f5f5'
             else:
-                # Sequential 2-color: dark gray -> yellow
-                # Interpolate from #333333 (dark) to #ffff00 (yellow)
-                r = int(51 + intensity * (255 - 51))  # 51 -> 255
-                g = int(51 + intensity * (255 - 51))  # 51 -> 255
-                b = int(51 * (1 - intensity))          # 51 -> 0
-                fill_color = f'#{r:02x}{g:02x}{b:02x}'
+                if background_color == 'white':
+                    # White background: light -> dark blue (easier to read)
+                    # Interpolate from #e0e7ff (very light blue) to #1e40af (dark blue)
+                    r = int(224 - intensity * (224 - 30))   # 224 -> 30
+                    g = int(231 - intensity * (231 - 64))   # 231 -> 64
+                    b = int(255 - intensity * (255 - 175))  # 255 -> 175
+                    fill_color = f'#{r:02x}{g:02x}{b:02x}'
+                else:
+                    # Black background: dark gray -> yellow (current, works well)
+                    # Interpolate from #333333 (dark) to #ffff00 (yellow)
+                    r = int(51 + intensity * (255 - 51))  # 51 -> 255
+                    g = int(51 + intensity * (255 - 51))  # 51 -> 255
+                    b = int(51 * (1 - intensity))          # 51 -> 0
+                    fill_color = f'#{r:02x}{g:02x}{b:02x}'
 
             # Draw cell with border (color based on background)
             grid_stroke = '#333333' if background_color == 'white' else '#FFFFFF'
@@ -2417,8 +2472,13 @@ def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_me
 
             # Draw count text - always show the number
             if count > 0:
-                # Text color contrasts with cell - white for dark cells, black for bright
-                count_text_color = '#000000' if intensity > 0.4 else '#ffffff'
+                # Text color contrasts with cell based on background color scheme
+                if background_color == 'white':
+                    # Blue scale: high intensity = dark blue -> white text
+                    count_text_color = '#ffffff' if intensity > 0.4 else '#000000'
+                else:
+                    # Yellow scale: high intensity = bright yellow -> black text
+                    count_text_color = '#000000' if intensity > 0.4 else '#ffffff'
                 font_size = 5 if cell_width >= 10 else 4
                 d.append(draw.Text(
                     str(count), font_size=font_size, x=x + cell_width / 2, y=y + cell_height / 2 + 2,
@@ -2476,10 +2536,17 @@ def draw_matrix_legend(d, x_start, y_start, max_count, text_color='white', backg
     step_width = legend_width / n_steps
     for i in range(n_steps):
         intensity = i / (n_steps - 1)
-        # Same color calculation as matrix cells
-        r = int(51 + intensity * (255 - 51))
-        g = int(51 + intensity * (255 - 51))
-        b = int(51 * (1 - intensity))
+        # Same color calculation as matrix cells - depends on background
+        if background_color == 'white':
+            # White background: light -> dark blue
+            r = int(224 - intensity * (224 - 30))
+            g = int(231 - intensity * (231 - 64))
+            b = int(255 - intensity * (255 - 175))
+        else:
+            # Black background: dark gray -> yellow
+            r = int(51 + intensity * (255 - 51))
+            g = int(51 + intensity * (255 - 51))
+            b = int(51 * (1 - intensity))
         fill_color = f'#{r:02x}{g:02x}{b:02x}'
 
         d.append(draw.Rectangle(
@@ -2518,7 +2585,8 @@ def draw_matrix_legend(d, x_start, y_start, max_count, text_color='white', backg
 
 
 def draw_sample_bar_plot(d, matrix_data, cluster_ids, cluster_enrichments, x_start, y_start,
-                          cell_width, bar_height, text_color, background_color='black'):
+                          cell_width, bar_height, text_color, background_color='black',
+                          sample_colors=None):
     """Draw stacked vertical bar plot showing reads per sample by enrichment type.
 
     Args:
@@ -2532,20 +2600,36 @@ def draw_sample_bar_plot(d, matrix_data, cluster_ids, cluster_enrichments, x_sta
         bar_height: Maximum height of bars
         text_color: Color for text labels
         background_color: Background color ('black' or 'white')
+        sample_colors: Dict of sample -> color (optional, for sample-enriched categories)
     """
     sample_x_positions = matrix_data['sample_x_positions']
     cluster_sample_counts = matrix_data['cluster_sample_counts']
     all_samples = matrix_data['all_samples']
 
+    # Dynamically determine enrichment categories from data
+    all_enrichments = set()
+    for cid in cluster_ids:
+        enrichment = cluster_enrichments.get(cid, 'mixed')
+        all_enrichments.add(enrichment)
+
     # Colors for enrichment types
     enrichment_colors = {
         'Normal-enriched': '#3b82f6',  # Blue
         'Tumor-enriched': '#ef4444',   # Red
-        'mixed': '#9ca3af'             # Gray
+        'mixed': '#9ca3af',            # Gray
+        'unknown': '#6b7280'           # Dark gray
     }
+    # Add sample-specific colors using provided sample_colors or defaults
+    default_colors = ['#40D392', '#60A5FA', '#F07167', '#FBBF24', '#C4A9E8', '#10B981', '#3B82F6', '#E41A1C']
+    for i, sample in enumerate(all_samples):
+        enrichment_key = f'{sample}-enriched'
+        if sample_colors and sample in sample_colors:
+            enrichment_colors[enrichment_key] = sample_colors[sample]
+        elif enrichment_key not in enrichment_colors:
+            enrichment_colors[enrichment_key] = default_colors[i % len(default_colors)]
 
     # Compute reads per sample by enrichment type
-    sample_enrichment_counts = {sample: {'Normal-enriched': 0, 'Tumor-enriched': 0, 'mixed': 0}
+    sample_enrichment_counts = {sample: {e: 0 for e in all_enrichments}
                                  for sample in all_samples}
     sample_totals = {sample: 0 for sample in all_samples}
 
@@ -2562,14 +2646,17 @@ def draw_sample_bar_plot(d, matrix_data, cluster_ids, cluster_enrichments, x_sta
     # Use thinner bars (max 8px) to match row barplot thickness
     thin_bar_width = min(cell_width - 2, 8)
 
+    # Sort enrichment categories for consistent stacking
+    sorted_enrichments = sorted(all_enrichments)
+
     for sample in all_samples:
         # Center the thin bar within the cell
         x = x_start + sample_x_positions[sample] + (cell_width - thin_bar_width) / 2
         current_y = y_start
 
-        # Stack order: Normal-enriched, mixed, Tumor-enriched (bottom to top visually = top to bottom in y)
-        for enrichment in ['Normal-enriched', 'mixed', 'Tumor-enriched']:
-            count = sample_enrichment_counts[sample][enrichment]
+        # Stack in sorted order
+        for enrichment in sorted_enrichments:
+            count = sample_enrichment_counts[sample].get(enrichment, 0)
             if count > 0:
                 bar_len = (count / max_total) * bar_height
                 color = enrichment_colors.get(enrichment, '#888888')
@@ -2608,8 +2695,9 @@ def draw_sample_bar_plot(d, matrix_data, cluster_ids, cluster_enrichments, x_sta
 
 
 def draw_cluster_bar_plot(d, matrix_data, cluster_ids, cluster_y_start, cluster_y_end,
-                          cluster_enrichments, x_start, bar_max_width, text_color, background_color='black'):
-    """Draw horizontal stacked bar plot showing tumor vs normal reads per cluster (row sums).
+                          cluster_enrichments, x_start, bar_max_width, text_color, background_color='black',
+                          sample_colors=None):
+    """Draw horizontal stacked bar plot showing reads per sample per cluster (row sums).
 
     Args:
         d: Drawing object
@@ -2622,29 +2710,24 @@ def draw_cluster_bar_plot(d, matrix_data, cluster_ids, cluster_y_start, cluster_
         bar_max_width: Maximum width of bars
         text_color: Color for text labels
         background_color: Background color ('black' or 'white')
+        sample_colors: Dict of sample -> color (optional)
     """
     cluster_sample_counts = matrix_data['cluster_sample_counts']
     all_samples = matrix_data['all_samples']
-    sample_groups = matrix_data.get('sample_groups', {})
 
-    # Colors for sample groups
-    group_colors = {
-        'Normal': '#3b82f6',  # Blue
-        'Tumor': '#ef4444',   # Red
-    }
+    # Use provided sample_colors or generate defaults
+    if sample_colors is None:
+        sample_colors = {}
+    default_colors = ['#40D392', '#60A5FA', '#F07167', '#FBBF24', '#C4A9E8', '#10B981', '#3B82F6', '#E41A1C']
+    for i, sample in enumerate(all_samples):
+        if sample not in sample_colors:
+            sample_colors[sample] = default_colors[i % len(default_colors)]
 
-    # Separate samples by group
-    normal_samples = [s for s in all_samples if sample_groups.get(s) == 'Normal']
-    tumor_samples = [s for s in all_samples if sample_groups.get(s) == 'Tumor']
-
-    # Compute reads per cluster by group
-    cluster_group_counts = {}
+    # Compute reads per cluster by sample
     cluster_totals = {}
     for cid in cluster_ids:
-        normal_count = sum(cluster_sample_counts.get(cid, {}).get(sample, 0) for sample in normal_samples)
-        tumor_count = sum(cluster_sample_counts.get(cid, {}).get(sample, 0) for sample in tumor_samples)
-        cluster_group_counts[cid] = {'Normal': normal_count, 'Tumor': tumor_count}
-        cluster_totals[cid] = normal_count + tumor_count
+        total = sum(cluster_sample_counts.get(cid, {}).get(sample, 0) for sample in all_samples)
+        cluster_totals[cid] = total
 
     max_total = max(cluster_totals.values()) if cluster_totals.values() else 1
 
@@ -2659,12 +2742,12 @@ def draw_cluster_bar_plot(d, matrix_data, cluster_ids, cluster_y_start, cluster_
         bar_height = min(y_end - y_start - 2, 8)  # Bar height, max 8px
 
         current_x = x_start
-        # Stack order: Normal first (blue), then Tumor (red)
-        for group in ['Normal', 'Tumor']:
-            count = cluster_group_counts.get(cid, {}).get(group, 0)
+        # Stack each sample with its own color
+        for sample in all_samples:
+            count = cluster_sample_counts.get(cid, {}).get(sample, 0)
             if count > 0:
                 bar_width = (count / max_total) * bar_max_width
-                color = group_colors.get(group, '#888888')
+                color = sample_colors.get(sample, '#888888')
 
                 d.append(draw.Rectangle(
                     current_x, y_center - bar_height / 2,
@@ -3305,7 +3388,7 @@ def draw_enrichment_grid_horizontal(d, cluster_x_start, cluster_x_end, y_start, 
     return grid_height, sample_order
 
 
->def draw_bubble_legend(d, x_start, y_start, cluster_stats, text_color='white', max_radius=8, min_radius=2):
+def draw_bubble_legend(d, x_start, y_start, cluster_stats, text_color='white', max_radius=8, min_radius=2):
     """Draw a legend explaining the enrichment bubble encoding.
 
     Args:
@@ -4943,7 +5026,31 @@ def main():
         bubble_radius = 8
         dendrogram_to_bubble_gap = 1  # Gap from dendrogram tip to bubble left edge
         bubble_to_bars_gap = 12  # Gap from bubble right edge to feature bars
-        bubble_space = dendrogram_to_bubble_gap + bubble_radius * 2 + bubble_to_bars_gap
+
+        # Check if enrichment grid mode should be used
+        # Get sample names from cluster_stats for grid layout
+        grid_sample_names = []
+        use_enrichment_grid = args.enrichment_grid
+        if use_enrichment_grid:
+            for stats in cluster_stats.values():
+                if stats.get('samples'):
+                    grid_sample_names = stats['samples']
+                    break
+            if not grid_sample_names:
+                print("  Warning: --enrichment-grid requested but no per-sample data available")
+                use_enrichment_grid = False
+
+        # Calculate bubble space based on mode
+        grid_bubble_radius = 6
+        grid_bubble_spacing = 2
+        if use_enrichment_grid and grid_sample_names:
+            num_samples = len(grid_sample_names)
+            grid_width = num_samples * (grid_bubble_radius * 2 + grid_bubble_spacing) - grid_bubble_spacing
+            bubble_space = dendrogram_to_bubble_gap + grid_width + bubble_to_bars_gap + 5
+            print(f"  Enrichment grid mode: {num_samples} samples, grid width = {grid_width}px")
+        else:
+            bubble_space = dendrogram_to_bubble_gap + bubble_radius * 2 + bubble_to_bars_gap
+
         left_margin = 50 + dendrogram_width + bubble_space
         sample_dendro_height = 40 if args.show_matrix else 0  # Space for sample dendrogram
         top_margin = 80 + sample_dendro_height  # More space for rotated sample headers + dendrogram
@@ -5201,42 +5308,70 @@ def main():
             # Draw sample dendrogram just above sample labels
             header_y = min(cluster_y_start.values()) - 5
             dendro_bottom = header_y - 30  # Above sample name labels with spacing
-            draw_sample_dendrogram(d, matrix_data, matrix_x_start, dendro_bottom, sample_dendro_height)
+            draw_sample_dendrogram(d, matrix_data, matrix_x_start, dendro_bottom, sample_dendro_height,
+                                   line_color=text_color)
 
             # Draw bar plot below matrix (column sums)
             bar_plot_y = max(cluster_y_end.values()) + cell_height / 2 + 5
             draw_sample_bar_plot(d, matrix_data, cluster_ids, cluster_enrichments, matrix_x_start, bar_plot_y,
-                                cell_width, 40, text_color, background_color)
+                                cell_width, 40, text_color, background_color, sample_colors=sample_colors)
 
             # Draw row bar plot to right of matrix (row sums)
             row_bar_x_start = matrix_x_start + matrix_width + 5
             draw_cluster_bar_plot(d, matrix_data, cluster_ids, cluster_y_start, cluster_y_end,
                                  cluster_enrichments, row_bar_x_start, row_bar_width - 10,
-                                 text_color, background_color)
+                                 text_color, background_color, sample_colors=sample_colors)
 
-        # Draw enrichment bubbles (to the RIGHT of dendrogram tips, before feature bars)
+        # Draw enrichment bubbles/grid (to the RIGHT of dendrogram tips, before feature bars)
         # Dendrogram tips are at 50 + dendrogram_width (consistent with draw_cluster_dendrogram_vertical)
         dendro_tip_x = 50 + dendrogram_width
-        bubble_x = dendro_tip_x + dendrogram_to_bubble_gap + bubble_radius
 
         # Skip enrichment bubbles and cluster labels when using full dendrogram (individual read view)
         if full_dendro_data is None:
-            # Draw faint gray connecting lines from dendrogram tips to bubble centers (BEFORE bubbles so bubbles overlay)
-            connector_color = '#555555'  # Faint gray, lighter than white tree
-            for cluster_id in cluster_y_start:
-                y_start = cluster_y_start[cluster_id]
-                y_end = cluster_y_end[cluster_id]
-                y_center = (y_start + y_end) / 2
-                # Line from dendrogram tip to bubble center (bubble will be drawn on top)
-                d.append(draw.Line(
-                    dendro_tip_x, y_center,
-                    bubble_x, y_center,
-                    stroke=connector_color, stroke_width=0.5
-                ))
+            if use_enrichment_grid and grid_sample_names:
+                # Grid mode: draw a column of bubbles for each sample
+                grid_x_start = dendro_tip_x + dendrogram_to_bubble_gap
 
-            # Draw bubbles on top of connector lines
-            draw_enrichment_bubbles(d, cluster_y_start, cluster_y_end, bubble_x, cluster_stats,
-                                    max_radius=bubble_radius, min_radius=2)
+                # Draw grid header (sample names)
+                header_y = min(cluster_y_start.values()) - 10
+                draw_enrichment_grid_header(d, grid_x_start, header_y, grid_sample_names, sample_colors,
+                                            bubble_radius=grid_bubble_radius, bubble_spacing=grid_bubble_spacing,
+                                            text_color=text_color)
+
+                # Draw faint gray connecting lines from dendrogram tips to grid start
+                connector_color = '#555555'
+                for cluster_id in cluster_y_start:
+                    y_start_pos = cluster_y_start[cluster_id]
+                    y_end_pos = cluster_y_end[cluster_id]
+                    y_center = (y_start_pos + y_end_pos) / 2
+                    d.append(draw.Line(
+                        dendro_tip_x, y_center,
+                        grid_x_start, y_center,
+                        stroke=connector_color, stroke_width=0.5
+                    ))
+
+                # Draw the enrichment grid
+                draw_enrichment_grid(d, cluster_y_start, cluster_y_end, grid_x_start, cluster_stats,
+                                    sample_colors, bubble_radius=grid_bubble_radius, bubble_spacing=grid_bubble_spacing)
+            else:
+                # Single bubble mode (original behavior)
+                bubble_x = dendro_tip_x + dendrogram_to_bubble_gap + bubble_radius
+
+                # Draw faint gray connecting lines from dendrogram tips to bubble centers
+                connector_color = '#555555'
+                for cluster_id in cluster_y_start:
+                    y_start_pos = cluster_y_start[cluster_id]
+                    y_end_pos = cluster_y_end[cluster_id]
+                    y_center = (y_start_pos + y_end_pos) / 2
+                    d.append(draw.Line(
+                        dendro_tip_x, y_center,
+                        bubble_x, y_center,
+                        stroke=connector_color, stroke_width=0.5
+                    ))
+
+                # Draw bubbles on top of connector lines
+                draw_enrichment_bubbles(d, cluster_y_start, cluster_y_end, bubble_x, cluster_stats,
+                                        max_radius=bubble_radius, min_radius=2)
 
             # Draw cluster labels on right (after feature bars and read indices)
             if not args.hide_brackets:
@@ -5251,13 +5386,16 @@ def main():
                                              enrichment_colors=enrichment_colors,
                                              cluster_enrichments=cluster_enrichments_dict)
 
-            # Draw bubble legend at bottom
+            # Draw bubble/grid legend at bottom
             legend_y = max(cluster_y_end.values()) + bar_plot_height + 30
-            draw_bubble_legend(d, left_margin, legend_y, cluster_stats, text_color,
-                              max_radius=bubble_radius, min_radius=2)
-
-            # Draw enrichment text color legend below bubble legend
-            enrichment_legend_y = legend_y + 75  # Below bubble legend (bubble legend is ~65px tall)
+            if use_enrichment_grid and grid_sample_names:
+                draw_grid_legend(d, left_margin, legend_y, grid_sample_names, sample_colors,
+                                text_color=text_color, bubble_radius=grid_bubble_radius)
+                enrichment_legend_y = legend_y + 160  # Grid legend is taller - increased spacing
+            else:
+                draw_bubble_legend(d, left_margin, legend_y, cluster_stats, text_color,
+                                  max_radius=bubble_radius, min_radius=2)
+                enrichment_legend_y = legend_y + 100  # Below bubble legend - increased spacing
             draw_enrichment_text_legend(d, left_margin, enrichment_legend_y, enrichment_colors, text_color)
 
         # Draw matrix color legend if matrix is enabled (to the right of enrichment legend)
