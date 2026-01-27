@@ -10,7 +10,7 @@ This repository contains comprehensive documentation for KaryoScope, a graph-bas
 
 The documentation is built using MkDocs Material and hosted on GitHub Pages.
 
-**Live Documentation:** [https://barthellab.github.io/KaryoScope-analysis/](https://barthellab.github.io/KaryoScope-analysis/)
+**Live Documentation:** [https://barthel-lab.github.io/KaryoScope-analysis/](https://barthel-lab.github.io/KaryoScope-analysis/)
 
 ## Contents
 
@@ -51,5 +51,5 @@ If you use KaryoScope in your research, please cite:
 
 ## Contact
 
-Barthel Lab
-Translational Genomics Research Institute (TGen)
+[Barthel Lab](https://www.barthel-lab.com/)
+[Translational Genomics Research Institute (TGen)](https://www.tgen.org/)
