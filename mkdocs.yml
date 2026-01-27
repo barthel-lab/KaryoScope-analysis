@@ -15,6 +15,9 @@ theme:
     - toc.integrate
     - search.suggest
     - search.highlight
+  analytics:
+    provider: google
+    property: G-14J7HE9DSB
 
 nav:
   - Home: index.md
