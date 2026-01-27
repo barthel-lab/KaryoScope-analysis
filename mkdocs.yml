@@ -1,0 +1,39 @@
+site_name: KaryoScope Analysis
+site_description: Documentation for KaryoScope clustering and analysis methods
+site_author: Barthel Lab
+repo_url: https://github.com/barthellab/KaryoScope-analysis
+repo_name: KaryoScope-analysis
+
+theme:
+  name: material
+  palette:
+    primary: blue
+    accent: green
+  features:
+    - navigation.top
+    - navigation.sections
+    - toc.integrate
+    - search.suggest
+    - search.highlight
+
+nav:
+  - Home: index.md
+  - Technical Guide: comprehensive-guide.md
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - codehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - tables
+  - toc:
+      permalink: true
+      toc_depth: 3
