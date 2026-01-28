@@ -178,12 +178,12 @@ def select_representatives(cluster_data, cluster_features, n_reps, feature_cache
                 break
 
             has_top, n_matches = check_read_features_cached(
-                row['read'], row['sample'], cluster_features, feature_cache
+                row['sequence'], row['sample'], cluster_features, feature_cache
             )
 
             if has_top or n_matches > 0:
                 selected.append({
-                    'read': row['read'],
+                    'read': row['sequence'],
                     'sample': row['sample'],
                     'read_length': row.get('read_length', row.get(length_column, 0)),
                     'read_span': row.get('read_span', row.get(length_column, 0)),
@@ -199,9 +199,9 @@ def select_representatives(cluster_data, cluster_features, n_reps, feature_cache
         for _, row in all_reads.iterrows():
             if len(selected) >= n_reps:
                 break
-            if row['read'] not in [s['read'] for s in selected]:
+            if row['sequence'] not in [s['sequence'] for s in selected]:
                 selected.append({
-                    'read': row['read'],
+                    'read': row['sequence'],
                     'sample': row['sample'],
                     'read_length': row.get('read_length', row.get(length_column, 0)),
                     'read_span': row.get('read_span', row.get(length_column, 0)),
@@ -297,7 +297,7 @@ def main():
     # Pre-load all features into memory (fast approach)
     print("\nPre-loading feature data...")
     samples = cluster_reads_df['sample'].unique()
-    read_ids = cluster_reads_df['read'].unique()
+    read_ids = cluster_reads_df['sequence'].unique()
     featuresets = ['region', 'subtelomeric', 'repeat']
 
     feature_cache = load_all_features(
@@ -347,7 +347,7 @@ def main():
             rows.append({
                 'cluster_id': cluster_id,
                 'rank': rank,
-                'read': rep['read'],
+                'read': rep['sequence'],
                 'sample': rep['sample'],
                 'read_length': rep.get('read_length', 0),
                 'read_span': rep.get('read_span', rep.get('read_length', 0)),
@@ -364,7 +364,7 @@ def main():
     reads_file = args.output.replace('.tsv', '.reads.txt')
     with open(reads_file, 'w') as f:
         for row in rows:
-            f.write(row['read'] + '\n')
+            f.write(row['sequence'] + '\n')
     print(f"  Saved read IDs to {reads_file}")
 
     # Summary stats

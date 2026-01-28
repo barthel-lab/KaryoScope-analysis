@@ -540,7 +540,7 @@ def _select_by_centroid(cluster_data, max_reps):
 
         if n_select > 0:
             sample_reads = cluster_data[cluster_data['sample'] == sample].sort_values('rank')
-            selected = list(zip(sample_reads['read'].iloc[:n_select],
+            selected = list(zip(sample_reads['sequence'].iloc[:n_select],
                                sample_reads['sample'].iloc[:n_select]))
             selected_reads.extend(selected)
             remaining_slots -= n_select
@@ -596,7 +596,7 @@ def _select_by_strategy(cluster_data, cluster_features, max_reps, strategy, bed_
             if len(selected) >= max_reps:
                 break
 
-            read_id = row['read']
+            read_id = row['sequence']
             sample = row['sample']
 
             # Check if this read has the cluster's defining features
@@ -630,7 +630,7 @@ def _select_fallback(cluster_data, max_reps):
     candidates = candidates.sort_values('read_length', ascending=False)
     selected = candidates.head(max_reps)
 
-    return list(zip(selected['read'], selected['sample']))
+    return list(zip(selected['sequence'], selected['sample']))
 
 
 def load_curated_representatives(curated_reps_file, cluster_labels_file=None):
@@ -685,10 +685,10 @@ def load_curated_representatives(curated_reps_file, cluster_labels_file=None):
         # Select read with matching rank
         target_row = cluster_df[cluster_df['rank'] == target_rank]
         if len(target_row) > 0:
-            selected_reads.add(target_row.iloc[0]['read'])
+            selected_reads.add(target_row.iloc[0]['sequence'])
         elif len(cluster_df) > 0:
             # Fallback to first available read
-            selected_reads.add(cluster_df.iloc[0]['read'])
+            selected_reads.add(cluster_df.iloc[0]['sequence'])
 
     print(f"  Selected {len(selected_reads)} curated representatives from {curated_reps_file}")
 
@@ -733,7 +733,7 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
             rank_df = pd.read_csv(rank_source, sep='\t')
             if 'read' in rank_df.columns and 'rank' in rank_df.columns:
                 for _, row in rank_df.iterrows():
-                    read_ranks[row['read']] = row['rank']
+                    read_ranks[row['sequence']] = row['rank']
         except Exception:
             pass  # Silently ignore if rank loading fails
 
@@ -741,7 +741,7 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
     if curated_reps_file and os.path.exists(curated_reps_file):
         allowed_reads = load_curated_representatives(curated_reps_file, cluster_labels_file)
         if allowed_reads:
-            reps_df = reps_df[reps_df['read'].isin(allowed_reads)]
+            reps_df = reps_df[reps_df['sequence'].isin(allowed_reads)]
             print(f"  After curated filter: {len(reps_df)} reads")
     # Otherwise filter by reads file if provided
     elif reads_file:
@@ -752,7 +752,7 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
                 with open(reads_file, 'r') as f:
                     allowed_reads = set(line.strip() for line in f if line.strip())
                 if allowed_reads:
-                    reps_df = reps_df[reps_df['read'].isin(allowed_reads)]
+                    reps_df = reps_df[reps_df['sequence'].isin(allowed_reads)]
                     print(f"  After reads filter: {len(reps_df)} reads (from {len(allowed_reads)} in file)")
                 else:
                     print(f"  Warning: reads_file is empty, no filtering applied")
@@ -792,7 +792,7 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
         if max_reps is not None and len(cluster_data) > max_reps:
             selected_reads = _select_by_centroid(cluster_data, max_reps)
         else:
-            selected_reads = list(zip(cluster_data['read'], cluster_data['sample']))
+            selected_reads = list(zip(cluster_data['sequence'], cluster_data['sample']))
 
         # Sort by rank if rank info is available
         if read_ranks:
@@ -4532,7 +4532,7 @@ def plot_structural_mode(args, matrix_data):
             for ps in priority_samples:
                 match = cluster_subset[cluster_subset['sample'] == ps]
                 if not match.empty: return match.iloc[0]
-                match = cluster_subset[cluster_subset['read'].str.startswith(ps)]
+                match = cluster_subset[cluster_subset['sequence'].str.startswith(ps)]
                 if not match.empty: return match.iloc[0]
                 
             if c_type == 'Major':
@@ -4550,7 +4550,7 @@ def plot_structural_mode(args, matrix_data):
             rep = pick_cluster_rep(c_data, c_type)
             
             cluster_reps.append({
-                'read': rep['read'],
+                'read': rep['sequence'],
                 'cluster': cid,
                 'type': c_type,
                 'sample': rep['sample'] if 'sample' in rep else 'unknown',
@@ -4583,7 +4583,7 @@ def plot_structural_mode(args, matrix_data):
         panel_bg = "#111111" if bg_color == "black" else "#F5F5F5"
         d.append(draw.Rectangle(margin_x - 5, 75, panel_width + 10, canvas_height - 180, fill=panel_bg, rx=10, ry=10))
 
-        reads_needed = set(r['read'] for r in selected_reads)
+        reads_needed = set(r['sequence'] for r in selected_reads)
         read_bed_data = load_bed_data(sample_bed_paths, database, featuresets, args.smoothness, reads_needed)
         
         # Local clustering
@@ -4593,7 +4593,7 @@ def plot_structural_mode(args, matrix_data):
             f_map = {f: chr(j+200) for j, f in enumerate(unique_f)}
             encoded = []
             for r_obj in selected_reads:
-                r = r_obj['read']
+                r = r_obj['sequence']
                 if r in read_bed_data:
                     fs0 = featuresets[0]
                     feats = sorted(read_bed_data[r].get(fs0, []), key=lambda x: x['start'])
@@ -4622,7 +4622,7 @@ def plot_structural_mode(args, matrix_data):
 
         max_len = 0
         for r_obj in selected_reads:
-            r = r_obj['read']
+            r = r_obj['sequence']
             if r in read_bed_data:
                 for fs in read_bed_data[r]:
                     for feat in read_bed_data[r][fs]: max_len = max(max_len, feat['stop'])
@@ -4644,7 +4644,7 @@ def plot_structural_mode(args, matrix_data):
                                  show_threshold=getattr(args, 'show_threshold', False))
             
         for j, r_obj in enumerate(selected_reads):
-            read, ry = r_obj['read'], row_y_centers[j] - (len(featuresets)*fs_height)/2
+            read, ry = r_obj['sequence'], row_y_centers[j] - (len(featuresets)*fs_height)/2
             l_color = "#888888" if r_obj['type'] == "Major" else "#FF4444"
             
             # Detailed label
