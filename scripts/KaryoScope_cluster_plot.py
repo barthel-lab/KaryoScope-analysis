@@ -9,7 +9,7 @@ Usage with pre-selected representative reads (recommended):
   # Step 1: Select representative reads using KaryoScope_select_representatives.py
   python KaryoScope_select_representatives.py \
     --cluster-analysis tmp/analysis.cluster_analysis.tsv \
-    --read-assignments tmp/analysis.read_assignments.tsv \
+    --read-assignments tmp/analysis.sequence_assignments.tsv \
     --cluster-labels tmp/analysis.cluster_annotations.xlsx \
     --bed-prefix results \
     --n-per-cluster 5 \
@@ -65,7 +65,7 @@ def parse_args():
 
     # Input/Output
     parser.add_argument("--cluster-analysis-prefix", dest="cluster_prefix", required=True,
-                        help="Prefix from cluster_analysis.py outputs (auto-discovers .read_assignments.tsv, .feature_matrix.npz, etc.)")
+                        help="Prefix from cluster_analysis.py outputs (auto-discovers .sequence_assignments.tsv, .feature_matrix.npz, etc.)")
     parser.add_argument("--output", required=True,
                         help="Output SVG file path")
 
@@ -702,7 +702,7 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
     This function loads the selected reads and groups them by cluster.
 
     Args:
-        reps_file: Path to read_assignments.tsv (all reads with cluster assignments and stats)
+        reps_file: Path to sequence_assignments.tsv (all reads with cluster assignments and stats)
         cluster_enrichments: Dict of cluster_id -> enrichment label from cluster_analysis.tsv
         cluster_order: List of cluster_ids in priority order (for ordering output)
         max_reps: Maximum representatives per cluster (optional fallback if no reads_file)
@@ -2247,7 +2247,7 @@ def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_me
         cluster_y_start: Dict of cluster_id -> y start position
         cluster_y_end: Dict of cluster_id -> y end position
         sample_metadata: DataFrame with 'sample' and 'group' columns
-        read_assignments_file: Path to read_assignments.tsv with all reads
+        read_assignments_file: Path to sequence_assignments.tsv with all reads
         x_start: X position for matrix start
         cell_width: Width of each cell (sample column)
         cell_height: Height of each cell (matches bar_width typically)
@@ -4478,7 +4478,7 @@ def plot_structural_mode(args, matrix_data):
     from scipy.spatial.distance import squareform
     
     # Load assignments
-    reps_file = f"{args.cluster_prefix}.read_assignments.tsv"
+    reps_file = f"{args.cluster_prefix}.sequence_assignments.tsv"
     if not os.path.exists(reps_file):
         print(f"Error: {reps_file} not found.")
         sys.exit(1)
@@ -4730,7 +4730,7 @@ def main():
 
     # --- Auto-discover files from prefix ---
     prefix = args.cluster_prefix
-    representatives_file = f"{prefix}.read_assignments.tsv"
+    representatives_file = f"{prefix}.sequence_assignments.tsv"
     feature_matrix_file = f"{prefix}.feature_matrix.npz"
     sample_metadata_file = f"{prefix}.sample_metadata.tsv"
     cluster_analysis_file = f"{prefix}.cluster_analysis.tsv"

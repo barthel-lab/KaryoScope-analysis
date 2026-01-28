@@ -11,7 +11,7 @@ Outputs a TSV file that can be used with --reads-file in KaryoScope_cluster_plot
 Usage:
   python KaryoScope_select_representatives.py \
     --cluster-analysis tmp/IDH_astro.cluster_analysis.tsv \
-    --read-assignments tmp/IDH_astro.read_assignments.tsv \
+    --read-assignments tmp/IDH_astro.sequence_assignments.tsv \
     --cluster-labels tmp/IDH_astro.cluster_annotations-curated.xlsx \
     --bed-prefix results \
     --n-per-cluster 5 \
@@ -30,7 +30,7 @@ import pandas as pd
 def parse_args():
     parser = argparse.ArgumentParser(description="Select representative reads for cluster visualization")
     parser.add_argument("--cluster-analysis", required=True, help="Path to cluster_analysis.tsv")
-    parser.add_argument("--read-assignments", required=True, help="Path to read_assignments.tsv")
+    parser.add_argument("--read-assignments", required=True, help="Path to sequence_assignments.tsv")
     parser.add_argument("--cluster-labels", required=True, help="Path to cluster labels file with _top columns (TSV or Excel)")
     parser.add_argument("--bed-prefix", required=True, help="Base directory for BED files")
     parser.add_argument("--database", default="KS_human_CHM13", help="Database name")

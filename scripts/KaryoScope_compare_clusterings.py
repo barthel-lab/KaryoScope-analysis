@@ -7,8 +7,8 @@ to assess concordance and identify complementary signals.
 
 Usage:
   python KaryoScope_compare_clusterings.py \
-    --clustering1 analysis1.read_assignments.tsv \
-    --clustering2 analysis2.read_assignments.tsv \
+    --clustering1 analysis1.sequence_assignments.tsv \
+    --clustering2 analysis2.sequence_assignments.tsv \
     --label1 "region" \
     --label2 "repeat" \
     --output-prefix comparison
@@ -37,7 +37,7 @@ def load_clustering(assignments_file, analysis_file=None):
 
     # Try to auto-discover cluster analysis file
     if analysis_file is None:
-        analysis_file = assignments_file.replace('.read_assignments.tsv', '.cluster_analysis.tsv')
+        analysis_file = assignments_file.replace('.sequence_assignments.tsv', '.cluster_analysis.tsv')
 
     enrichment_map = {}
     if os.path.exists(analysis_file):
@@ -275,9 +275,9 @@ def main():
     )
 
     parser.add_argument("--clustering1", required=True,
-                        help="First read_assignments.tsv file")
+                        help="First sequence_assignments.tsv file")
     parser.add_argument("--clustering2", required=True,
-                        help="Second read_assignments.tsv file")
+                        help="Second sequence_assignments.tsv file")
     parser.add_argument("--label1", default="clustering1",
                         help="Label for first clustering (e.g., 'region')")
     parser.add_argument("--label2", default="clustering2",

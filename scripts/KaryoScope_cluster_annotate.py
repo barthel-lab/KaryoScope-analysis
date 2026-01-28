@@ -19,7 +19,7 @@ Usage:
     --output cluster_annotations.tsv
 
 The script automatically finds these files from the prefix:
-  - {prefix}.read_assignments.tsv
+  - {prefix}.sequence_assignments.tsv
   - {prefix}.cluster_analysis.tsv
 """
 
@@ -93,7 +93,7 @@ def matches_any_pattern(feature, patterns):
 
 def summarize_featureset(cluster_reads, bed_df, top_n=3, exclude_patterns=None):
     """Summarize features for a cluster from a single featureset."""
-    cluster_bed = bed_df[bed_df['read'].isin(cluster_reads)]
+    cluster_bed = bed_df[bed_df['sequence'].isin(cluster_reads)]
 
     if len(cluster_bed) == 0:
         return ''
@@ -128,7 +128,7 @@ def main():
     )
 
     parser.add_argument("--prefix", required=True,
-                        help="Analysis prefix (auto-finds {prefix}.read_assignments.tsv, {prefix}.cluster_analysis.tsv)")
+                        help="Analysis prefix (auto-finds {prefix}.sequence_assignments.tsv, {prefix}.cluster_analysis.tsv)")
     parser.add_argument("--bed-dir", dest="bed_dir", required=True,
                         help="Base directory containing sample BED files")
     parser.add_argument("--featuresets", default="region,subtelomeric,chromosome,acrocentric,repeat,gene",
@@ -157,7 +157,7 @@ def main():
     print("=" * 60)
 
     # Derive file paths from prefix
-    read_assignments_file = f"{args.prefix}.read_assignments.tsv"
+    read_assignments_file = f"{args.prefix}.sequence_assignments.tsv"
     cluster_analysis_file = f"{args.prefix}.cluster_analysis.tsv"
 
     print(f"\nPrefix: {args.prefix}")
@@ -266,7 +266,7 @@ def main():
     results = []
 
     for cluster_id in clusters:
-        cluster_reads = set(assignments[assignments['cluster'] == cluster_id]['read'].tolist())
+        cluster_reads = set(assignments[assignments['cluster'] == cluster_id]['sequence'].tolist())
 
         if len(cluster_reads) < args.min_size:
             continue
