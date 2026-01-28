@@ -1,6 +1,6 @@
 # KaryoScope Cluster Analysis
 # Analyzes hierarchical clustering results to identify biologically interesting clusters
-# with read assignments sorted by centroid distance for visualization
+# with sequence assignments sorted by centroid distance for visualization
 #
 # Usage:
 # python KaryoScope_cluster_analysis.py \
@@ -75,12 +75,12 @@ parser.add_argument("--k-selection", dest="k_selection", default="composite-knee
                          "  composite-knee: knee/elbow of composite score curve (default, diminishing returns)")
 parser.add_argument("--min-cluster-size", dest="min_cluster_size", type=int, default=3,
                     help="Minimum cluster size to consider (default: 3)")
-parser.add_argument("--min-read-length", dest="min_read_length", type=int, default=10000,
-                    help="Minimum read length in bp to include (default: 10000)")
-parser.add_argument("--max-read-length", dest="max_read_length", type=int, default=50000,
-                    help="Maximum read length in bp to include (default: 50000)")
-parser.add_argument("--read-list", dest="read_list", default=None,
-                    help="File with read names to include (one per line). Filters BED to only these reads.")
+parser.add_argument("--min-sequence-length", dest="min_sequence_length", type=int, default=10000,
+                    help="Minimum sequence length in bp to include (default: 10000)")
+parser.add_argument("--max-sequence-length", dest="max_sequence_length", type=int, default=50000,
+                    help="Maximum sequence length in bp to include (default: 50000)")
+parser.add_argument("--sequence-list", dest="sequence_list", default=None,
+                    help="File with sequence names to include (one per line). Filters BED to only these sequences.")
 parser.add_argument("--exclude-features", dest="exclude_features", default="novel,unknown,canonical_telomere*",
                     help="Comma-separated list of features to exclude, supports wildcards (* and ?) (default: 'novel,unknown,canonical_telomere*')")
 parser.add_argument("--linkage-method", dest="linkage_method", default="ward",
@@ -148,7 +148,7 @@ parser.add_argument("--fdr-method", dest="fdr_method", default="bh",
 parser.add_argument("--analysis-mode", dest="analysis_mode", default="enrichment",
                     choices=["enrichment", "structure"],
                     help="Analysis mode:\n"
-                         "  enrichment: Cluster all reads and test for group enrichment (original mode)\n"
+                         "  enrichment: Cluster all sequences and test for group enrichment (original mode)\n"
                          "  structure: Cluster per-chromosome to identify structural outliers (default: enrichment)")
 parser.add_argument("--structural-threshold", "--st", dest="structural_threshold", type=float, default=0.25,
                     help="Distance threshold for structural outlier clustering (default: 0.25)")
@@ -223,24 +223,24 @@ def run_structure_mode(in_data, args):
         print(f"\n--- Processing {chrom} ---")
         chrom_data = in_data[in_data['chromosome'] == chrom].copy()
         
-        # Pre-calculate read -> sample map for speed
-        read_sample_map = dict(zip(chrom_data['read'], chrom_data['sample']))
+        # Pre-calculate sequence -> sample map for speed
+        read_sample_map = dict(zip(chrom_data['sequence'], chrom_data['sample']))
 
-        # Create "read strings" for distance calculation
-        read_strings = {}
-        for read, group in chrom_data.groupby('read'):
+        # Create "sequence strings" for distance calculation
+        seq_strings = {}
+        for read, group in chrom_data.groupby('sequence'):
             # Sort by coordinate
             sorted_group = group.sort_values('start')
             # Create feature string
             feat_list = sorted_group['feature'].tolist()
-            read_strings[read] = feat_list
+            seq_strings[read] = feat_list
             
-        read_names = sorted(read_strings.keys())
-        n_reads = len(read_names)
+        seq_names = sorted(seq_strings.keys())
+        n_reads = len(seq_names)
         
         if n_reads < 2:
             print(f"  Skipping {chrom} (only {n_reads} sample)")
-            for r in read_names:
+            for r in seq_names:
                 all_cluster_assignments.append({
                     'read': r, 'chromosome': chrom, 
                     'cluster_id': f"{chrom}_Major", 'cluster_type': 'Major',
@@ -249,20 +249,20 @@ def run_structure_mode(in_data, args):
                 })
             continue
 
-        # Optimization: Deduplicate reads based on feature content
-        unique_feats = sorted(list(set(f for r in read_names for f in read_strings[r])))
+        # Optimization: Deduplicate sequences based on feature content
+        unique_feats = sorted(list(set(f for r in seq_names for f in seq_strings[r])))
         feat_map = {f: chr(i+200) for i, f in enumerate(unique_feats)} 
         
         unique_structures = {} 
-        for r in read_names:
-            encoded = "".join([feat_map[f] for f in read_strings[r]])
+        for r in seq_names:
+            encoded = "".join([feat_map[f] for f in seq_strings[r]])
             if encoded not in unique_structures:
                 unique_structures[encoded] = []
             unique_structures[encoded].append(r)
             
         unique_structure_list = sorted(unique_structures.keys())
         n_unique = len(unique_structure_list)
-        print(f"  {n_reads} reads -> {n_unique} unique structures")
+        print(f"  {n_reads} sequences -> {n_unique} unique structures")
         
         if n_unique > 1:
             print(f"  Computing distances for {n_unique} unique structures...")
@@ -368,7 +368,7 @@ def run_structure_mode(in_data, args):
 
     # Save
     matrix_file = f"{args.output_prefix}.feature_matrix.npz"
-    assignments_file = f"{args.output_prefix}.read_assignments.tsv"
+    assignments_file = f"{args.output_prefix}.sequence_assignments.tsv"
     assignment_df = pd.DataFrame(all_cluster_assignments)
     if 'group' not in assignment_df.columns:
         assignment_df['group'] = assignment_df['sample']
@@ -800,32 +800,32 @@ for bed_file in args.bed:
     dfs.append(df)
 
 in_data = pd.concat(dfs, ignore_index=True)
-read_to_sample = in_data.groupby('read')['sample'].first().to_dict()
+seq_to_sample = in_data.groupby('sequence')['sample'].first().to_dict()
 
 print(f"\nTotal records: {len(in_data):,}")
-print(f"Unique reads: {in_data['read'].nunique():,}")
+print(f"Unique sequences: {in_data['sequence'].nunique():,}")
 
-# --- Filter by read list (if provided) ---
-if args.read_list:
-    print(f"\n--- Filtering by read list ---")
-    print(f"  Read list file: {args.read_list}")
-    with open(args.read_list) as f:
-        include_reads = set(line.strip() for line in f if line.strip())
-    print(f"  Reads in list: {len(include_reads):,}")
-    reads_before = in_data['read'].nunique()
-    in_data = in_data[in_data['read'].isin(include_reads)]
-    read_to_sample = {r: s for r, s in read_to_sample.items() if r in include_reads}
-    reads_after = in_data['read'].nunique()
-    print(f"  Reads before filter: {reads_before:,}")
-    print(f"  Reads after filter: {reads_after:,}")
-    print(f"  Reads from list found in BED: {reads_after:,}")
+# --- Filter by sequence list (if provided) ---
+if args.sequence_list:
+    print(f"\n--- Filtering by sequence list ---")
+    print(f"  Sequence list file: {args.sequence_list}")
+    with open(args.sequence_list) as f:
+        include_sequences = set(line.strip() for line in f if line.strip())
+    print(f"  Sequences in list: {len(include_sequences):,}")
+    sequences_before = in_data['sequence'].nunique()
+    in_data = in_data[in_data['sequence'].isin(include_sequences)]
+    seq_to_sample = {r: s for r, s in seq_to_sample.items() if r in include_sequences}
+    sequences_after = in_data['sequence'].nunique()
+    print(f"  Sequences before filter: {sequences_before:,}")
+    print(f"  Sequences after filter: {sequences_after:,}")
+    print(f"  Sequences from list found in BED: {sequences_after:,}")
 
 # Calculate feature lengths
 in_data['length'] = in_data['end'] - in_data['start']
 
 # Calculate read span (full coordinate range) BEFORE filtering
 # This is the actual read length including all features
-read_span_dict = in_data.groupby('read').apply(
+seq_span_dict = in_data.groupby('sequence').apply(
     lambda x: x['end'].max() - x['start'].min()
 ).to_dict()
 
@@ -836,7 +836,7 @@ if args.exclude_features:
     print(f"\n--- Filtering excluded features ---")
     print(f"  Excluding (component match): {sorted(exclude_patterns)}")
     before_count = len(in_data)
-    before_reads = in_data['read'].nunique()
+    before_sequences = in_data['sequence'].nunique()
 
     # Component matching: filter if any colon-separated part matches exclude patterns (supports wildcards)
     def has_excluded_component(feature):
@@ -851,38 +851,38 @@ if args.exclude_features:
     in_data = in_data[~mask]
 
     # Remove reads that have no remaining features after exclusion
-    reads_with_features = set(in_data['read'].unique())
-    read_to_sample = {r: s for r, s in read_to_sample.items() if r in reads_with_features}
+    sequences_with_features = set(in_data['sequence'].unique())
+    seq_to_sample = {r: s for r, s in seq_to_sample.items() if r in sequences_with_features}
 
     print(f"  Records before filter: {before_count:,}")
     print(f"  Records after filter: {len(in_data):,}")
-    print(f"  Reads before filter: {before_reads:,}")
-    print(f"  Reads after filter: {len(reads_with_features):,}")
+    print(f"  Sequences before filter: {before_sequences:,}")
+    print(f"  Sequences after filter: {len(sequences_with_features):,}")
 
 # Calculate annotated length per read (sum of remaining feature lengths)
 # This is the total annotated sequence, not the span from start to end
-read_lengths = in_data.groupby('read')['length'].sum()
-read_length_dict = read_lengths.to_dict()
+seq_lengths = in_data.groupby('sequence')['length'].sum()
+seq_length_dict = seq_lengths.to_dict()
 
 # --- Filter by annotated length ---
-if args.min_read_length > 0 or args.max_read_length is not None:
-    print(f"\n--- Filtering reads by annotated length ---")
-    reads_before = in_data['read'].nunique()
+if args.min_sequence_length > 0 or args.max_sequence_length is not None:
+    print(f"\n--- Filtering sequences by annotated length ---")
+    sequences_before = in_data['sequence'].nunique()
 
     # Apply min and max filters
-    valid_reads = set(r for r, l in read_length_dict.items()
-                     if l >= args.min_read_length and l <= args.max_read_length)
-    print(f"  Length range: {args.min_read_length:,} - {args.max_read_length:,} bp")
-        valid_reads = set(r for r, l in read_length_dict.items() if l >= args.min_read_length)
-        print(f"  Minimum annotated length: {args.min_read_length:,} bp")
+    valid_sequences = set(r for r, l in seq_length_dict.items()
+                     if l >= args.min_sequence_length and l <= args.max_sequence_length)
+    print(f"  Length range: {args.min_sequence_length:,} - {args.max_sequence_length:,} bp")
+        valid_sequences = set(r for r, l in seq_length_dict.items() if l >= args.min_sequence_length)
+        print(f"  Minimum annotated length: {args.min_sequence_length:,} bp")
 
-    in_data = in_data[in_data['read'].isin(valid_reads)]
-    read_to_sample = {r: s for r, s in read_to_sample.items() if r in valid_reads}
-    read_length_dict = {r: l for r, l in read_length_dict.items() if r in valid_reads}
-    reads_after = in_data['read'].nunique()
-    print(f"  Reads before filter: {reads_before:,}")
-    print(f"  Reads after filter: {reads_after:,}")
-    print(f"  Reads removed: {reads_before - reads_after:,}")
+    in_data = in_data[in_data['sequence'].isin(valid_sequences)]
+    seq_to_sample = {r: s for r, s in seq_to_sample.items() if r in valid_sequences}
+    seq_length_dict = {r: l for r, l in seq_length_dict.items() if r in valid_sequences}
+    sequences_after = in_data['sequence'].nunique()
+    print(f"  Sequences before filter: {sequences_before:,}")
+    print(f"  Sequences after filter: {sequences_after:,}")
+    print(f"  Sequences removed: {sequences_before - sequences_after:,}")
 
 # --- Branching Point ---
 if args.analysis_mode == 'structure':
@@ -900,11 +900,11 @@ print(f"  Groups found: {', '.join(all_groups)}")
 print(f"  Comparison mode: {args.comparison_mode}")
 
 # Map reads to groups
-read_to_group = {r: sample_to_group.get(s, s) for r, s in read_to_sample.items()}
+seq_to_group = {r: sample_to_group.get(s, s) for r, s in seq_to_sample.items()}
 
 # Count samples by group
-group_totals = Counter(read_to_group.values())
-sample_totals = Counter(read_to_sample.values())
+group_totals = Counter(seq_to_group.values())
+sample_totals = Counter(seq_to_sample.values())
 
 print(f"\n  Group counts:")
 for group, count in sorted(group_totals.items()):
@@ -952,11 +952,11 @@ edge_mode_str = f" [{args.edge_mode}]"
 print(f"\n--- Building adjacency matrix ({args.matrix_type}{edge_mode_str}) ---")
 
 # Get feature data per read (with lengths for weighting)
-read_feature_data = in_data.groupby('read').apply(
+seq_feature_data = in_data.groupby('sequence').apply(
     lambda x: list(zip(x['feature'], x['length']))
 ).to_dict()
 
-read_names = sorted(read_feature_data.keys())
+seq_names = sorted(seq_feature_data.keys())
 
 # Detect if features are merged (colon-separated) and count layers
 all_features = sorted(in_data['feature'].unique())
@@ -982,7 +982,7 @@ def get_weighted_edges(features_with_lengths, edge_mode="directional"):
     return edges
 
 
-def build_layer_matrix(read_names, read_feature_data, read_length_dict, layer_idx, n_layers,
+def build_layer_matrix(seq_names, seq_feature_data, seq_length_dict, layer_idx, n_layers,
                        edge_mode, matrix_type, include_abundance):
     """Build edge and abundance matrices for a single layer.
 
@@ -994,7 +994,7 @@ def build_layer_matrix(read_names, read_feature_data, read_length_dict, layer_id
     """
     # Extract layer-specific features for each read
     layer_read_data = {}
-    for read_name, feat_data in read_feature_data.items():
+    for read_name, feat_data in seq_feature_data.items():
         layer_read_data[read_name] = get_layer_features(feat_data, layer_idx, n_layers)
 
     # Get unique features for this layer
@@ -1019,11 +1019,11 @@ def build_layer_matrix(read_names, read_feature_data, read_length_dict, layer_id
     pair_to_idx = {pair: i for i, pair in enumerate(layer_pairs)}
 
     # Build edge matrix
-    edge_matrix = np.zeros((len(read_names), len(layer_pairs)), dtype=np.float32)
+    edge_matrix = np.zeros((len(seq_names), len(layer_pairs)), dtype=np.float32)
 
-    for i, read_name in enumerate(read_names):
+    for i, read_name in enumerate(seq_names):
         layer_data = layer_read_data[read_name]
-        read_len = read_length_dict.get(read_name, 1)
+        read_len = seq_length_dict.get(read_name, 1)
 
         if matrix_type == "binary":
             edges = get_edges([f for f, _ in layer_data], edge_mode=edge_mode)
@@ -1051,10 +1051,10 @@ def build_layer_matrix(read_names, read_feature_data, read_length_dict, layer_id
     # Build abundance matrix if requested
     if include_abundance:
         feature_to_idx = {f: i for i, f in enumerate(layer_features)}
-        abundance_matrix = np.zeros((len(read_names), len(layer_features)), dtype=np.float32)
+        abundance_matrix = np.zeros((len(seq_names), len(layer_features)), dtype=np.float32)
 
-        for i, read_name in enumerate(read_names):
-            read_len = read_length_dict.get(read_name, 1)
+        for i, read_name in enumerate(seq_names):
+            read_len = seq_length_dict.get(read_name, 1)
             layer_data = layer_read_data[read_name]
 
             # Sum lengths per feature
@@ -1076,7 +1076,7 @@ def build_layer_matrix(read_names, read_feature_data, read_length_dict, layer_id
     return matrix, n_edge_cols, n_abundance_cols, layer_features
 
 
-def build_combined_matrix(read_names, read_feature_data, read_length_dict, all_features,
+def build_combined_matrix(seq_names, seq_feature_data, seq_length_dict, all_features,
                           edge_mode, matrix_type, include_abundance):
     """Build edge and abundance matrices treating features as atomic (original approach).
 
@@ -1104,11 +1104,11 @@ def build_combined_matrix(read_names, read_feature_data, read_length_dict, all_f
     pair_to_idx = {pair: i for i, pair in enumerate(all_pairs)}
 
     # Build edge matrix
-    edge_matrix = np.zeros((len(read_names), len(all_pairs)), dtype=np.float32)
+    edge_matrix = np.zeros((len(seq_names), len(all_pairs)), dtype=np.float32)
 
-    for i, read_name in enumerate(read_names):
-        feat_data = read_feature_data[read_name]
-        read_len = read_length_dict.get(read_name, 1)
+    for i, read_name in enumerate(seq_names):
+        feat_data = seq_feature_data[read_name]
+        read_len = seq_length_dict.get(read_name, 1)
 
         if matrix_type == "binary":
             edges = get_edges([f for f, _ in feat_data], edge_mode=edge_mode)
@@ -1136,11 +1136,11 @@ def build_combined_matrix(read_names, read_feature_data, read_length_dict, all_f
     # Build abundance matrix if requested
     if include_abundance:
         feature_to_idx = {f: i for i, f in enumerate(all_features)}
-        abundance_matrix = np.zeros((len(read_names), len(all_features)), dtype=np.float32)
+        abundance_matrix = np.zeros((len(seq_names), len(all_features)), dtype=np.float32)
 
-        for i, read_name in enumerate(read_names):
-            read_len = read_length_dict.get(read_name, 1)
-            feat_data = read_feature_data[read_name]
+        for i, read_name in enumerate(seq_names):
+            read_len = seq_length_dict.get(read_name, 1)
+            feat_data = seq_feature_data[read_name]
 
             # Sum lengths per feature
             feature_lengths = defaultdict(float)
@@ -1172,7 +1172,7 @@ if args.matrix_mode == "layered" and n_layers > 1:
 
     for layer_idx in range(n_layers):
         layer_matrix, n_edge, n_abund, layer_feats = build_layer_matrix(
-            read_names, read_feature_data, read_length_dict, layer_idx, n_layers,
+            seq_names, seq_feature_data, seq_length_dict, layer_idx, n_layers,
             args.edge_mode, args.matrix_type, args.include_abundance
         )
         all_layer_matrices.append(layer_matrix)
@@ -1191,7 +1191,7 @@ else:
         print(f"  Using combined matrix mode (single featureset)")
 
     adj_matrix, total_edge_cols, total_abundance_cols = build_combined_matrix(
-        read_names, read_feature_data, read_length_dict, all_features,
+        seq_names, seq_feature_data, seq_length_dict, all_features,
         args.edge_mode, args.matrix_type, args.include_abundance
     )
     print(f"  Unique features: {len(all_features)}")
@@ -1262,8 +1262,8 @@ linkage_matrix = linkage(dist_matrix, method=args.linkage_method)
 print(f"\n--- Analyzing cluster structure ---")
 
 # Pre-compute arrays for faster k-optimization
-read_names_arr = np.array(read_names)
-read_groups_arr = np.array([read_to_group[r] for r in read_names])
+seq_names_arr = np.array(seq_names)
+read_groups_arr = np.array([seq_to_group[r] for r in seq_names])
 
 # Fast enrichment check for k-optimization (returns enrichment type and max purity)
 def fast_enrichment_check(cluster_mask, read_groups, group_totals_dict, control_grp, all_grps):
@@ -1284,7 +1284,7 @@ def fast_enrichment_check(cluster_mask, read_groups, group_totals_dict, control_
     max_purity = max((group_counts.get(g, 0) / total_in for g in all_grps), default=0.0)
 
     # Calculate expected proportions
-    total_reads = sum(group_totals_dict.values())
+    total_sequences = sum(group_totals_dict.values())
 
     # Use odds ratio to detect enrichment (works with skewed group sizes)
     # Odds ratio > 1.5 indicates meaningful enrichment
@@ -1295,7 +1295,7 @@ def fast_enrichment_check(cluster_mask, read_groups, group_totals_dict, control_
         in_cluster = group_counts.get(grp, 0)
         out_cluster = group_totals_dict[grp] - in_cluster
         other_in = total_in - in_cluster
-        other_out = total_reads - group_totals_dict[grp] - other_in
+        other_out = total_sequences - group_totals_dict[grp] - other_in
 
         # Calculate odds ratio with small pseudocount to avoid division by zero
         odds_ratio = ((in_cluster + 0.5) * (other_out + 0.5)) / ((out_cluster + 0.5) * (other_in + 0.5))
@@ -1310,9 +1310,9 @@ def fast_enrichment_check(cluster_mask, read_groups, group_totals_dict, control_
 if args.n_clusters is None:
     # Try different numbers of clusters and evaluate
     # Upper bound: min of max_k or n_reads/10 (need at least 10 reads per cluster on average)
-    max_k_limit = min(args.max_k + 1, len(read_names) // 10)
+    max_k_limit = min(args.max_k + 1, len(seq_names) // 10)
     k_range = list(range(args.min_k, max_k_limit))
-    n_samples = len(read_names)
+    n_samples = len(seq_names)
 
     if not k_range:
         print(f"ERROR: Empty k-range (min_k={args.min_k} >= max_k_limit={max_k_limit})")
@@ -1352,9 +1352,9 @@ if args.n_clusters is None:
         strong_enriched = 0
         any_enriched = 0
         # Track reads in enriched clusters
-        perfect_reads = 0
-        strong_reads = 0
-        any_enriched_reads = 0
+        perfect_sequences = 0
+        strong_sequences = 0
+        any_enriched_sequences = 0
 
         for cluster_id in range(1, k + 1):
             cluster_mask = labels_arr == cluster_id
@@ -1367,13 +1367,13 @@ if args.n_clusters is None:
 
                 if enrich != "mixed":
                     any_enriched += 1
-                    any_enriched_reads += cluster_size
+                    any_enriched_sequences += cluster_size
                     if purity >= args.perfect_threshold:
                         perfect_enriched += 1
-                        perfect_reads += cluster_size
+                        perfect_sequences += cluster_size
                     if purity >= args.strong_threshold:
                         strong_enriched += 1
-                        strong_reads += cluster_size
+                        strong_sequences += cluster_size
 
         # Count enrichments by group
         group_enriched_counts = {g: sum(1 for e in enrichments if e == f"{g}-enriched") for g in all_groups}
@@ -1385,10 +1385,10 @@ if args.n_clusters is None:
         strong_ratio = strong_enriched / valid_clusters if valid_clusters > 0 else 0
 
         # Calculate read percentages
-        total_reads = len(read_names)
-        perfect_reads_pct = (perfect_reads / total_reads * 100) if total_reads > 0 else 0
-        strong_reads_pct = (strong_reads / total_reads * 100) if total_reads > 0 else 0
-        any_enriched_reads_pct = (any_enriched_reads / total_reads * 100) if total_reads > 0 else 0
+        total_sequences = len(seq_names)
+        perfect_sequences_pct = (perfect_sequences / total_sequences * 100) if total_sequences > 0 else 0
+        strong_sequences_pct = (strong_sequences / total_sequences * 100) if total_sequences > 0 else 0
+        any_enriched_sequences_pct = (any_enriched_sequences / total_sequences * 100) if total_sequences > 0 else 0
 
         # Composite score: 50% silhouette, 10% any enriched ratio, 40% perfect ratio
         silhouette_norm = (silhouette + 1) / 2  # normalize from [-1,1] to [0,1]
@@ -1407,12 +1407,12 @@ if args.n_clusters is None:
             'enriched_ratio': enriched_ratio,
             'strong_ratio': strong_ratio,
             'perfect_ratio': perfect_ratio,
-            'any_enriched_reads': any_enriched_reads,
-            'strong_reads': strong_reads,
-            'perfect_reads': perfect_reads,
-            'any_enriched_reads_pct': any_enriched_reads_pct,
-            'strong_reads_pct': strong_reads_pct,
-            'perfect_reads_pct': perfect_reads_pct,
+            'any_enriched_sequences': any_enriched_sequences,
+            'strong_sequences': strong_sequences,
+            'perfect_sequences': perfect_sequences,
+            'any_enriched_sequences_pct': any_enriched_sequences_pct,
+            'strong_sequences_pct': strong_sequences_pct,
+            'perfect_sequences_pct': perfect_sequences_pct,
             'composite_score': composite_score,
             **{f'{g}_enriched': group_enriched_counts.get(g, 0) for g in all_groups},
             'mixed': mixed
@@ -1499,9 +1499,9 @@ if args.n_clusters is None:
 
         # 6. Reads in enriched clusters (absolute counts)
         ax6 = axes[1, 1]
-        ax6.plot(stats_df['k'], stats_df['any_enriched_reads'], '-o', markersize=3, label='Any enriched', color='blue')
-        ax6.plot(stats_df['k'], stats_df['strong_reads'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
-        ax6.plot(stats_df['k'], stats_df['perfect_reads'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='red')
+        ax6.plot(stats_df['k'], stats_df['any_enriched_sequences'], '-o', markersize=3, label='Any enriched', color='blue')
+        ax6.plot(stats_df['k'], stats_df['strong_sequences'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
+        ax6.plot(stats_df['k'], stats_df['perfect_sequences'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='red')
         ax6.set_xlabel('Number of clusters (k)')
         ax6.set_ylabel('Number of reads')
         ax6.set_title('Reads in Enriched Clusters (count)')
@@ -1509,9 +1509,9 @@ if args.n_clusters is None:
 
         # 7. Reads in enriched clusters (percentages)
         ax7 = axes[1, 2]
-        ax7.plot(stats_df['k'], stats_df['any_enriched_reads_pct'], '-o', markersize=3, label='Any enriched', color='blue')
-        ax7.plot(stats_df['k'], stats_df['strong_reads_pct'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
-        ax7.plot(stats_df['k'], stats_df['perfect_reads_pct'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='red')
+        ax7.plot(stats_df['k'], stats_df['any_enriched_sequences_pct'], '-o', markersize=3, label='Any enriched', color='blue')
+        ax7.plot(stats_df['k'], stats_df['strong_sequences_pct'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
+        ax7.plot(stats_df['k'], stats_df['perfect_sequences_pct'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='red')
         ax7.set_xlabel('Number of clusters (k)')
         ax7.set_ylabel('Percent of reads')
         ax7.set_title('Reads in Enriched Clusters (%)')
@@ -1671,11 +1671,11 @@ cluster_labels = fcluster(linkage_matrix, n_clusters, criterion='maxclust')
 # Analyze each cluster
 cluster_analysis = []
 cluster_reads_dict = {}
-read_centroid_distances = {}  # Store centroid distance for each read
+seq_centroid_distances = {}  # Store centroid distance for each read
 
 # Pre-compute arrays for faster cluster analysis
 cluster_labels_arr = np.array(cluster_labels)
-read_samples_arr = np.array([read_to_sample[r] for r in read_names])
+read_samples_arr = np.array([seq_to_sample[r] for r in seq_names])
 
 for cluster_id in range(1, n_clusters + 1):
     # Use numpy boolean indexing (faster than list comprehension)
@@ -1684,7 +1684,7 @@ for cluster_id in range(1, n_clusters + 1):
         continue
 
     cluster_indices = np.where(cluster_mask)[0]
-    cluster_reads = read_names_arr[cluster_mask].tolist()
+    cluster_reads = seq_names_arr[cluster_mask].tolist()
     cluster_samples = read_samples_arr[cluster_mask].tolist()
 
     cluster_reads_dict[cluster_id] = cluster_reads
@@ -1704,7 +1704,7 @@ for cluster_id in range(1, n_clusters + 1):
 
     # Store centroid distances for all reads in this cluster
     for i, read in enumerate(cluster_reads):
-        read_centroid_distances[read] = distances_to_centroid[i]
+        seq_centroid_distances[read] = distances_to_centroid[i]
 
     # Build cluster analysis record
     cluster_record = {
@@ -1714,8 +1714,8 @@ for cluster_id in range(1, n_clusters + 1):
         'p_value': stats['p_value'],
         'enrichment': stats['enrichment'],
         'centroid_read': centroid_read,
-        'centroid_sample': read_to_sample[centroid_read],
-        'centroid_group': sample_to_group.get(read_to_sample[centroid_read], read_to_sample[centroid_read])
+        'centroid_sample': seq_to_sample[centroid_read],
+        'centroid_group': sample_to_group.get(seq_to_sample[centroid_read], seq_to_sample[centroid_read])
     }
 
     # Add group/sample-specific columns
@@ -1873,15 +1873,15 @@ print(f"\n  Saved cluster analysis to: {analysis_file}")
 
 # Save read assignments with stats (sorted by cluster, then centroid distance)
 # Build list of read records
-read_records = []
-for i, read in enumerate(read_names):
+seq_records = []
+for i, read in enumerate(seq_names):
     cluster = cluster_labels[i]
-    sample = read_to_sample[read]
+    sample = seq_to_sample[read]
     group = sample_to_group.get(sample, sample)
-    centroid_dist = read_centroid_distances.get(read, np.nan)
-    read_len = read_length_dict.get(read, 0)
-    read_span = read_span_dict.get(read, 0)
-    read_records.append({
+    centroid_dist = seq_centroid_distances.get(read, np.nan)
+    read_len = seq_length_dict.get(read, 0)
+    read_span = seq_span_dict.get(read, 0)
+    seq_records.append({
         'read': read,
         'cluster': cluster,
         'sample': sample,
@@ -1892,7 +1892,7 @@ for i, read in enumerate(read_names):
     })
 
 # Create DataFrame and sort by cluster, then centroid_distance
-assignments = pd.DataFrame(read_records)
+assignments = pd.DataFrame(seq_records)
 assignments = assignments.sort_values(['cluster', 'centroid_distance'], ascending=[True, True])
 
 # Add rank within cluster (1 = closest to centroid)
@@ -1903,7 +1903,7 @@ assignments['rank'] = assignments.groupby('cluster').cumcount() + 1
 # read_span = full coordinate range (actual read length for visualization)
 assignments = assignments[['read', 'cluster', 'sample', 'group', 'centroid_distance', 'read_length', 'read_span', 'rank']]
 
-assignments_file = f"{args.output_prefix}.read_assignments.tsv"
+assignments_file = f"{args.output_prefix}.sequence_assignments.tsv"
 assignments.to_csv(assignments_file, sep='\t', index=False)
 print(f"  Saved read assignments to: {assignments_file}")
 
@@ -1912,7 +1912,7 @@ print(f"  Saved read assignments to: {assignments_file}")
 matrix_file = f"{args.output_prefix}.feature_matrix.npz"
 save_dict = {
     'adj_matrix': adj_matrix,
-    'read_names': np.array(read_names),
+    'seq_names': np.array(seq_names),
     'cluster_labels': cluster_labels,
     'linkage_method': args.linkage_method,
     'cluster_ids_ordered': np.array(cluster_ids_ordered),
@@ -2155,7 +2155,7 @@ if args.plot_circular_dendrogram:
     leaf_order = dend_data['leaves']
 
     # Prepare annotation data for each leaf (in dendrogram order)
-    leaf_samples = [read_to_sample[read_names[i]] for i in leaf_order]
+    leaf_samples = [seq_to_sample[seq_names[i]] for i in leaf_order]
     leaf_clusters = [cluster_labels[i] for i in leaf_order]
     leaf_enrichments = [cluster_to_enrichment.get(c, 'mixed') for c in leaf_clusters]
 
@@ -2267,14 +2267,14 @@ if args.plot_circular_dendrogram:
         print(f"  Saved circular dendrogram to: {circ_dend_file}")
 
 # --- UMAP Visualization ---
-if args.plot_umap and len(read_names) > 10:
+if args.plot_umap and len(seq_names) > 10:
     print(f"\n--- Generating UMAP visualization ---")
     try:
         import umap
 
         # Fit UMAP
         reducer = umap.UMAP(
-            n_neighbors=min(args.umap_neighbors, len(read_names) - 1),
+            n_neighbors=min(args.umap_neighbors, len(seq_names) - 1),
             min_dist=args.umap_min_dist,
             metric='euclidean',
             random_state=42
@@ -2283,13 +2283,13 @@ if args.plot_umap and len(read_names) > 10:
         print(f"  UMAP parameters: n_neighbors={args.umap_neighbors}, min_dist={args.umap_min_dist}")
 
         # Create read-to-cluster mapping
-        read_to_cluster = dict(zip(read_names, cluster_labels))
+        seq_to_cluster = dict(zip(seq_names, cluster_labels))
         cluster_to_enrichment = dict(zip(cluster_df['cluster_id'], cluster_df['enrichment']))
 
         # Prepare data for plotting
-        sample_list = [read_to_sample[r] for r in read_names]
+        sample_list = [seq_to_sample[r] for r in seq_names]
         group_list = [sample_to_group.get(s, s) for s in sample_list]
-        cluster_list = [read_to_cluster[r] for r in read_names]
+        cluster_list = [seq_to_cluster[r] for r in seq_names]
 
         # Color mappings
         if args.comparison_mode == 'per-sample':
@@ -2324,8 +2324,8 @@ if args.plot_umap and len(read_names) > 10:
 
             # 2. Top-right: Colored by enrichment
             point_colors_enrich = []
-            for r in read_names:
-                cluster = read_to_cluster[r]
+            for r in seq_names:
+                cluster = seq_to_cluster[r]
                 enrich = cluster_to_enrichment.get(cluster, 'mixed')
                 point_colors_enrich.append(enrichment_colors.get(enrich, '#CCCCCC'))
             axes[0, 1].scatter(embedding[:, 0], embedding[:, 1], c=point_colors_enrich, s=15, alpha=0.6)
@@ -2387,7 +2387,7 @@ if args.plot_umap and len(read_names) > 10:
 
         # Save UMAP coordinates
         umap_coords = pd.DataFrame({
-            'read': read_names,
+            'read': seq_names,
             'umap_1': embedding[:, 0],
             'umap_2': embedding[:, 1],
             'sample': sample_list,
@@ -2414,7 +2414,7 @@ if args.plot_umap and len(read_names) > 10:
 
                 # Hover text (same for all views)
                 hover_text = [f"Read: {r[:20]}...<br>Group: {g}<br>Cluster: {c}<br>Enrichment: {e}"
-                             for r, g, c, e in zip(read_names, group_list, cluster_list, enrichment_list)]
+                             for r, g, c, e in zip(seq_names, group_list, cluster_list, enrichment_list)]
 
                 # 1. Add traces for GROUP coloring (default view)
                 for group in sorted(set(group_list)):
@@ -2481,15 +2481,15 @@ if args.plot_umap and len(read_names) > 10:
                                 dict(label="Color by Group",
                                      method="update",
                                      args=[{"visible": vis_group},
-                                           {"title": f"UMAP - Colored by Group ({len(read_names):,} reads)"}]),
+                                           {"title": f"UMAP - Colored by Group ({len(seq_names):,} reads)"}]),
                                 dict(label="Color by Cluster",
                                      method="update",
                                      args=[{"visible": vis_cluster},
-                                           {"title": f"UMAP - Colored by Cluster ({len(read_names):,} reads)"}]),
+                                           {"title": f"UMAP - Colored by Cluster ({len(seq_names):,} reads)"}]),
                                 dict(label="Color by Enrichment",
                                      method="update",
                                      args=[{"visible": vis_enrichment},
-                                           {"title": f"UMAP - Colored by Enrichment ({len(read_names):,} reads)"}]),
+                                           {"title": f"UMAP - Colored by Enrichment ({len(seq_names):,} reads)"}]),
                             ],
                             direction="down",
                             showactive=True,
@@ -2499,7 +2499,7 @@ if args.plot_umap and len(read_names) > 10:
                             yanchor="top"
                         )
                     ],
-                    title=f"UMAP - Colored by Group ({len(read_names):,} reads)",
+                    title=f"UMAP - Colored by Group ({len(seq_names):,} reads)",
                     xaxis_title="UMAP 1",
                     yaxis_title="UMAP 2",
                     hovermode='closest',
@@ -2550,11 +2550,11 @@ else:
     pct_matrix = np.zeros((n_rows, n_clusters))
 
     # Calculate expected percentage for each group (based on total reads)
-    total_reads = len(read_names)
+    total_sequences = len(seq_names)
     expected_pcts = {}
     for g in all_groups:
-        group_total = sum(1 for s in read_to_sample.values() if sample_to_group.get(s) == g)
-        expected_pcts[g] = (group_total / total_reads * 100) if total_reads > 0 else 0
+        group_total = sum(1 for s in seq_to_sample.values() if sample_to_group.get(s) == g)
+        expected_pcts[g] = (group_total / total_sequences * 100) if total_sequences > 0 else 0
 
     for j, cid in enumerate(cluster_ids):
         row = cluster_df[cluster_df['cluster_id'] == cid].iloc[0]
@@ -2704,7 +2704,7 @@ for bg_mode, suffix in get_backgrounds_to_generate():
 print(f"\n" + "=" * 60)
 print("Summary")
 print("=" * 60)
-print(f"Total reads: {len(read_names):,}")
+print(f"Total sequences: {len(seq_names):,}")
 print(f"Number of clusters: {n_clusters}")
 print(f"Valid clusters (size >= {args.min_cluster_size}): {len(cluster_df)}")
 if args.comparison_mode == 'per-sample':
@@ -2725,7 +2725,7 @@ print(f"  - {matrix_file}")
 print(f"  - {plot_file}")
 if args.log_file:
     print(f"  - {log_path}")
-print(f"\nNext step: Use read_assignments.tsv with KaryoScope_cluster_plot.py")
+print(f"\nNext step: Use sequence_assignments.tsv with KaryoScope_cluster_plot.py")
 print(f"to visualize reads from each cluster (sorted by centroid distance).")
 print(f"Use --feature-matrix with the .feature_matrix.npz file for dendrogram header.")
 
@@ -2755,8 +2755,8 @@ print(fmt_param('min-k', args.min_k))
 print(fmt_param('max-k', args.max_k))
 print(fmt_param('k-selection', args.k_selection))
 print(fmt_param('min-cluster-size', args.min_cluster_size))
-print(fmt_param('min-read-length', args.min_read_length))
-print(fmt_param('max-read-length', args.max_read_length))
+print(fmt_param('min-sequence-length', args.min_sequence_length))
+print(fmt_param('max-sequence-length', args.max_sequence_length))
 print(fmt_param('exclude-features', args.exclude_features))
 print(fmt_param('linkage-method', args.linkage_method))
 print(fmt_param('matrix-type', args.matrix_type))
