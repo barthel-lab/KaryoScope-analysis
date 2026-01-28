@@ -459,17 +459,6 @@ Edges counted:
 Each transition creates a distinct, ordered edge.
 ```
 
-**Bidirectional** (counts both forward and reverse):
-```
-Sequence path: q_arm → ct
-
-Edges counted:
-  q_arm → ct (forward edge)
-  ct → q_arm (reverse edge, also added)
-
-Each physical transition generates two directional edges in the matrix.
-```
-
 **Symmetric** (default, order-independent):
 ```
 Sequence path: q_arm → ct → q_arm
@@ -505,15 +494,6 @@ Counts the total number of times each transition is observed within the sequence
 ```python
 for each transition (feature_i → feature_j):
     edge_weight = length_i / total_sequence_length
-```
-
-For **bidirectional mode**, edges use asymmetric weights:
-```python
-forward_edge (feature_i → feature_j):
-    edge_weight = length_i / total_sequence_length
-
-reverse_edge (feature_j → feature_i):
-    edge_weight = (length_i + length_j) / (2 × total_sequence_length)
 ```
 
 **Normalization:** All weights are divided by sequence length to make sequences of different lengths comparable.
@@ -689,15 +669,9 @@ CH = calinski_harabasz_score(feature_matrix, cluster_labels)
 ```
 Ratio of between-cluster to within-cluster variance.
 
-**Davies-Bouldin Index** (optional, lower is better):
-```python
-DB = davies_bouldin_score(feature_matrix, cluster_labels)
-```
-Average similarity between clusters and their most similar neighbor.
-
 #### B. Biological Enrichment Metrics
 
-For each cluster, perform Fisher's exact test (or Chi-square for multi-group):
+For each cluster, perform Fisher's exact test:
 
 ```python
 # Fast enrichment check during k-optimization
@@ -710,7 +684,7 @@ for cluster in clusters:
 
     # Classify by purity
     purity = max_sample_percentage(cluster)
-    if purity >= 0.95:
+    if purity >= 1.0:
         category = "perfect"
     elif purity >= 0.80:
         category = "strong"
@@ -722,7 +696,7 @@ for cluster in clusters:
 
 - `any_enriched`: Clusters with p < 0.05 (any enrichment)
 - `strong_enriched`: Clusters with ≥80% from one sample
-- `perfect_enriched`: Clusters with ≥95% from one sample
+- `perfect_enriched`: Clusters with 100% from one sample
 
 **Ratios:**
 ```python
@@ -863,34 +837,7 @@ else:
 
 **Key advantage:** Odds ratio correctly handles unbalanced group sizes (e.g., 90% tumor, 10% normal).
 
-#### Mode 2: Multi-Group Comparison
-
-**Use case:** 3+ groups without a designated control
-
-**Statistical test:** Chi-square test of independence
-
-**Contingency table:**
-```
-               Group1  Group2  Group3  ...
-In cluster     n1      n2      n3    ...
-Out cluster    m1      m2      m3    ...
-```
-
-**Test:**
-```python
-chi2, p_value, dof, expected = chi2_contingency(contingency)
-```
-
-**Enrichment assignment:**
-```python
-if p_value < 0.05:
-    dominant_group = max(groups, key=lambda g: percentage_in_cluster[g])
-    enrichment = f"{dominant_group}-enriched"
-else:
-    enrichment = "mixed"
-```
-
-#### Mode 3: Per-Sample Comparison
+#### Mode 2: Per-Sample Comparison
 
 **Use case:** Each sample tested individually vs. all others (most granular)
 
@@ -930,8 +877,8 @@ Clusters are classified by purity:
 ```python
 purity = max_sample_percentage / 100
 
-if purity >= 0.95:
-    category = "perfect"    # ≥95% from one sample
+if purity >= 1.0:
+    category = "perfect"    # 100% from one sample
 elif purity >= 0.80:
     category = "strong"     # ≥80% from one sample
 elif p_value < 0.05:
@@ -1065,7 +1012,6 @@ q_values = false_discovery_control(raw_pvals, method='by')
 
 - `symmetric` (default): Reduces dimensions, order-independent
 - `directional`: Use if transition direction matters (e.g., strand-specific)
-- `bidirectional`: Use to emphasize transitions (creates asymmetric weights)
 
 **Abundance:**
 
@@ -1105,8 +1051,7 @@ q_values = false_discovery_control(raw_pvals, method='by')
 
 **Early stopping:**
 
-- `150` (default): Good for most cases
-- `50`: Faster, less thorough
+- `150` (default): Recommended - stops if no improvement for 150 iterations
 - `0`: Disable (test full range)
 
 ### 9.4 Enrichment Parameters {#94-enrichment-parameters}
@@ -1115,7 +1060,6 @@ q_values = false_discovery_control(raw_pvals, method='by')
 
 - `per-sample`: Most granular, recommended for initial exploration
 - `two-group`: Use if clear control/treatment design
-- `multi-group`: Use for 3+ groups without designated control
 
 **FDR threshold:**
 
@@ -1125,7 +1069,7 @@ q_values = false_discovery_control(raw_pvals, method='by')
 
 **Enrichment thresholds:**
 
-- `perfect_threshold=0.95`: Very stringent
+- `perfect_threshold=1.0`: Very stringent (100% purity)
 - `strong_threshold=0.80`: Moderate stringency
 
 ### 9.5 Sequence Filtering {#95-sequence-filtering}
@@ -1133,7 +1077,7 @@ q_values = false_discovery_control(raw_pvals, method='by')
 **Length filters:**
 
 - `min_sequence_length=10000`: Removes noisy short sequences
-- `max_sequence_length=100000`: Removes rare long outliers
+- `max_sequence_length=50000`: Removes rare long outliers (default: 50000)
 - Adjust based on expected biological sequence length distribution
 
 **Feature exclusion:**
