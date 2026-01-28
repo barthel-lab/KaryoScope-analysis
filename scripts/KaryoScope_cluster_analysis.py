@@ -32,7 +32,7 @@ from collections import defaultdict, Counter
 from scipy.cluster.hierarchy import linkage, dendrogram, leaves_list, fcluster, cut_tree
 from scipy.spatial.distance import pdist, squareform
 from scipy.stats import fisher_exact, chi2_contingency, false_discovery_control
-from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
+from sklearn.metrics import silhouette_score, calinski_harabasz_score
 from sklearn.decomposition import TruncatedSVD
 import matplotlib.pyplot as plt
 import matplotlib
@@ -63,10 +63,10 @@ parser.add_argument("--control-group", dest="control_group", default=None,
                     help="Name of control group for two-group comparison (default: auto-detect)")
 parser.add_argument("--n-clusters", dest="n_clusters", type=int, default=None,
                     help="Number of clusters to cut tree into (default: auto-determine)")
-parser.add_argument("--min-k", dest="min_k", type=int, default=20,
-                    help="Minimum number of clusters to test during auto-detection (default: 20)")
-parser.add_argument("--max-k", dest="max_k", type=int, default=200,
-                    help="Maximum number of clusters to test during auto-detection (default: 200)")
+parser.add_argument("--min-k", dest="min_k", type=int, default=40,
+                    help="Minimum number of clusters to test during auto-detection (default: 40)")
+parser.add_argument("--max-k", dest="max_k", type=int, default=300,
+                    help="Maximum number of clusters to test during auto-detection (default: 300)")
 parser.add_argument("--k-selection", dest="k_selection", default="composite-knee",
                     choices=["composite", "silhouette", "calinski", "composite-knee"],
                     help="Metric for selecting optimal k:\n"
@@ -76,13 +76,10 @@ parser.add_argument("--k-selection", dest="k_selection", default="composite-knee
                          "  composite-knee: knee/elbow of composite score curve (default, diminishing returns)")
 parser.add_argument("--min-cluster-size", dest="min_cluster_size", type=int, default=3,
                     help="Minimum cluster size to consider (default: 3)")
-parser.add_argument("--davies-bouldin", dest="compute_davies_bouldin",
-                    action=argparse.BooleanOptionalAction, default=False,
-                    help="Compute Davies-Bouldin index (not recommended, favors high k) (default: False)")
 parser.add_argument("--min-read-length", dest="min_read_length", type=int, default=10000,
                     help="Minimum read length in bp to include (default: 10000)")
-parser.add_argument("--max-read-length", dest="max_read_length", type=int, default=None,
-                    help="Maximum read length in bp to include (default: no limit)")
+parser.add_argument("--max-read-length", dest="max_read_length", type=int, default=50000,
+                    help="Maximum read length in bp to include (default: 50000)")
 parser.add_argument("--read-list", dest="read_list", default=None,
                     help="File with read names to include (one per line). Filters BED to only these reads.")
 parser.add_argument("--exclude-features", dest="exclude_features", default="novel,unknown,canonical_telomere*",
@@ -122,12 +119,12 @@ parser.add_argument("--umap-min-dist", dest="umap_min_dist", type=float, default
 parser.add_argument("--umap-html", dest="umap_html",
                     action=argparse.BooleanOptionalAction, default=False,
                     help="Generate interactive HTML UMAP with Plotly (default: False, requires plotly)")
-parser.add_argument("--perfect-threshold", dest="perfect_threshold", type=float, default=0.95,
-                    help="Threshold for perfect enrichment (default: 0.95 = 95%%)")
+parser.add_argument("--perfect-threshold", dest="perfect_threshold", type=float, default=1.0,
+                    help="Threshold for perfect enrichment (default: 1.0 = 100%%)")
 parser.add_argument("--strong-threshold", dest="strong_threshold", type=float, default=0.80,
                     help="Threshold for strong enrichment (default: 0.80 = 80%%)")
-parser.add_argument("--early-stopping", dest="early_stopping", type=int, default=50,
-                    help="Stop k search if no improvement for N iterations (0 to disable) (default: 50)")
+parser.add_argument("--early-stopping", dest="early_stopping", type=int, default=150,
+                    help="Stop k search if no improvement for N iterations (0 to disable) (default: 150)")
 parser.add_argument("--silhouette-sample-size", dest="silhouette_sample_size", type=int, default=2000,
                     help="Sample size for silhouette score calculation (default: 2000)")
 parser.add_argument("--nested", dest="nested",
@@ -1062,11 +1059,9 @@ if args.min_read_length > 0 or args.max_read_length is not None:
     reads_before = in_data['read'].nunique()
 
     # Apply min and max filters
-    if args.max_read_length is not None:
-        valid_reads = set(r for r, l in read_length_dict.items()
-                         if l >= args.min_read_length and l <= args.max_read_length)
-        print(f"  Length range: {args.min_read_length:,} - {args.max_read_length:,} bp")
-    else:
+    valid_reads = set(r for r, l in read_length_dict.items()
+                     if l >= args.min_read_length and l <= args.max_read_length)
+    print(f"  Length range: {args.min_read_length:,} - {args.max_read_length:,} bp")
         valid_reads = set(r for r, l in read_length_dict.items() if l >= args.min_read_length)
         print(f"  Minimum annotated length: {args.min_read_length:,} bp")
 
@@ -1534,14 +1529,9 @@ if args.n_clusters is None:
             else:
                 silhouette = silhouette_score(adj_matrix, labels)
             calinski_harabasz = calinski_harabasz_score(adj_matrix, labels)
-            if args.compute_davies_bouldin:
-                davies_bouldin = davies_bouldin_score(adj_matrix, labels)
-            else:
-                davies_bouldin = np.nan
         else:
             silhouette = 0
             calinski_harabasz = 0
-            davies_bouldin = np.nan
 
         # Count clusters meeting minimum size
         cluster_sizes = Counter(labels)
@@ -1602,7 +1592,6 @@ if args.n_clusters is None:
             'k': k,
             'silhouette': silhouette,
             'calinski_harabasz': calinski_harabasz,
-            'davies_bouldin': davies_bouldin,
             'valid_clusters': valid_clusters,
             'any_enriched': any_enriched,
             'strong_enriched': strong_enriched,
@@ -1835,9 +1824,6 @@ if args.n_clusters is None:
     print(f"\n  Optimal k by metric:")
     print(f"    Silhouette:        k={best_silhouette_k} (score={stats_df['silhouette'].max():.4f})")
     print(f"    Calinski-Harabasz: k={best_ch_k} (score={stats_df['calinski_harabasz'].max():.1f})")
-    if args.compute_davies_bouldin:
-        best_db_k = int(stats_df.loc[stats_df['davies_bouldin'].idxmin(), 'k'])
-        print(f"    Davies-Bouldin:    k={best_db_k} (score={stats_df['davies_bouldin'].min():.4f})")
     print(f"    Composite:         k={best_composite_k} (score={stats_df['composite_score'].max():.4f})")
     print(f"    Composite-knee:    k={best_knee_raw_k} (raw), k={best_knee_k} (smoothed, window={window_size})")
 
