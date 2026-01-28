@@ -54,10 +54,9 @@ parser.add_argument("--sample-metadata", dest="sample_metadata", default=None,
                          "If not provided, each sample becomes its own group.\n"
                          "Use --control-group to specify the reference group.")
 parser.add_argument("--comparison-mode", dest="comparison_mode", default="two-group",
-                    choices=["two-group", "multi-group", "per-sample"],
+                    choices=["two-group", "per-sample"],
                     help="Comparison mode for enrichment testing:\n"
                          "  two-group: Fisher's exact test between control and treatment\n"
-                         "  multi-group: Chi-square test across all groups\n"
                          "  per-sample: Each sample vs all others (default: two-group)")
 parser.add_argument("--control-group", dest="control_group", default=None,
                     help="Name of control group for two-group comparison (default: auto-detect)")
@@ -93,10 +92,9 @@ parser.add_argument("--matrix-type", dest="matrix_type", default="length_weighte
                          "  count: count of each transition\n"
                          "  length_weighted: transitions weighted by feature length (default: length_weighted)")
 parser.add_argument("--edges", dest="edge_mode", default="symmetric",
-                    choices=["directional", "bidirectional", "symmetric"],
+                    choices=["directional", "symmetric"],
                     help="Edge counting mode:\n"
                          "  directional: standard A->B edge counting\n"
-                         "  bidirectional: A->B and B->A are both counted separately\n"
                          "  symmetric: edges are sorted alphabetically, A->B and B->A both count as A->B (default: symmetric)")
 parser.add_argument("--matrix-mode", dest="matrix_mode", default="combined",
                     choices=["layered", "combined"],
@@ -500,9 +498,6 @@ def get_edges(features, edge_mode="directional"):
 
         if edge_mode == "directional":
             edges.append((from_feat, to_feat))
-        elif edge_mode == "bidirectional":
-            edges.append((from_feat, to_feat))
-            edges.append((to_feat, from_feat))
         elif edge_mode == "symmetric":
             # Sort alphabetically so A->B and B->A both become the same edge
             sorted_pair = tuple(sorted([from_feat, to_feat]))
@@ -720,62 +715,6 @@ def calculate_enrichment_two_group(cluster_samples, sample_to_group, control_gro
         'group_counts': group_counts,
         'group_pcts': group_pcts,
         'odds_ratio': odds_ratio,
-        'p_value': p_value,
-        'enrichment': enrichment,
-        'dominant_group': dominant_group
-    }
-
-
-def calculate_enrichment_multi_group(cluster_samples, sample_to_group, group_totals):
-    """Calculate enrichment using chi-square test (multi-group comparison)."""
-    groups = list(group_totals.keys())
-
-    # Handle edge case: empty or single group
-    if len(groups) < 2:
-        return {
-            'group_counts': {g: len(cluster_samples) for g in groups} if groups else {},
-            'group_pcts': {g: 100.0 for g in groups} if groups else {},
-            'odds_ratio': np.nan,
-            'p_value': 1.0,
-            'enrichment': 'mixed',
-            'dominant_group': groups[0] if groups else None
-        }
-
-    # Count samples in cluster by group
-    group_counts = Counter(sample_to_group.get(s, s) for s in cluster_samples)
-
-    # Build contingency table: [in_cluster, out_cluster] for each group
-    observed_in = [group_counts.get(g, 0) for g in groups]
-    observed_out = [group_totals[g] - group_counts.get(g, 0) for g in groups]
-
-    contingency = [observed_in, observed_out]
-
-    # Chi-square test (handle edge cases)
-    try:
-        if sum(observed_in) > 0 and len(groups) > 1:
-            chi2, p_value, dof, expected = chi2_contingency(contingency)
-        else:
-            p_value = 1.0
-    except ValueError:
-        p_value = 1.0
-
-    # Calculate percentages
-    total_in = sum(observed_in)
-    group_pcts = {g: (group_counts.get(g, 0) / total_in * 100) if total_in > 0 else 0 for g in groups}
-
-    # Determine dominant group (guard against empty groups - shouldn't happen after check above)
-    dominant_group = max(groups, key=lambda g: group_pcts[g]) if groups else None
-
-    # Enrichment label
-    if p_value < 0.05:
-        enrichment = f"{dominant_group}-enriched"
-    else:
-        enrichment = "mixed"
-
-    return {
-        'group_counts': {g: group_counts.get(g, 0) for g in groups},
-        'group_pcts': group_pcts,
-        'odds_ratio': np.nan,  # Not applicable for multi-group
         'p_value': p_value,
         'enrichment': enrichment,
         'dominant_group': dominant_group
@@ -1165,9 +1104,6 @@ def get_weighted_edges(features_with_lengths, edge_mode="directional"):
 
         if edge_mode == "directional":
             edges.append((from_feat, to_feat, from_len))
-        elif edge_mode == "bidirectional":
-            edges.append((from_feat, to_feat, from_len))
-            edges.append((to_feat, from_feat, avg_len))
         elif edge_mode == "symmetric":
             sorted_pair = tuple(sorted([from_feat, to_feat]))
             edges.append((sorted_pair[0], sorted_pair[1], avg_len))
@@ -1884,8 +1820,6 @@ for cluster_id in range(1, n_clusters + 1):
     # Calculate enrichment using appropriate method
     if args.comparison_mode == "two-group":
         stats = calculate_enrichment_two_group(cluster_samples, sample_to_group, control_group, group_totals)
-    elif args.comparison_mode == "multi-group":
-        stats = calculate_enrichment_multi_group(cluster_samples, sample_to_group, group_totals)
     else:  # per-sample
         stats = calculate_enrichment_per_sample(cluster_samples, sample_totals)
 
