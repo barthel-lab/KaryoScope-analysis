@@ -873,8 +873,6 @@ if args.min_sequence_length > 0 or args.max_sequence_length is not None:
     valid_sequences = set(r for r, l in seq_length_dict.items()
                      if l >= args.min_sequence_length and l <= args.max_sequence_length)
     print(f"  Length range: {args.min_sequence_length:,} - {args.max_sequence_length:,} bp")
-        valid_sequences = set(r for r, l in seq_length_dict.items() if l >= args.min_sequence_length)
-        print(f"  Minimum annotated length: {args.min_sequence_length:,} bp")
 
     in_data = in_data[in_data['sequence'].isin(valid_sequences)]
     seq_to_sample = {r: s for r, s in seq_to_sample.items() if r in valid_sequences}
