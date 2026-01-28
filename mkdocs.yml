@@ -21,7 +21,7 @@ theme:
 
 nav:
   - Home: index.md
-  - Technical Guide: comprehensive-guide.md
+  - Technical Guide: Comprehensive_Technical_Guide.md
 
 plugins:
   - search

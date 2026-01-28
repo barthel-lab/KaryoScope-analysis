@@ -415,9 +415,9 @@ When using **concatenation merging** (which produces colon-separated multi-layer
 **Example comparison:**
 
 ```
-Input: Two reads with merged features
-Read 1: chr7:p_arm:LINE → chr7:q_arm:SINE
-Read 2: chr7:p_arm:SINE → chr7:q_arm:LINE
+Input: Two sequences with merged features
+Sequence 1: chr7:p_arm:LINE → chr7:q_arm:SINE
+Sequence 2: chr7:p_arm:SINE → chr7:q_arm:LINE
 
 Combined mode creates edges:
   - chr7:p_arm:LINE → chr7:q_arm:SINE
