@@ -125,15 +125,6 @@ parser.add_argument("--early-stopping", dest="early_stopping", type=int, default
                     help="Stop k search if no improvement for N iterations (0 to disable) (default: 150)")
 parser.add_argument("--silhouette-sample-size", dest="silhouette_sample_size", type=int, default=2000,
                     help="Sample size for silhouette score calculation (default: 2000)")
-parser.add_argument("--nested", dest="nested",
-                    action=argparse.BooleanOptionalAction, default=False,
-                    help="Hierarchical testing: first test groups, then test samples within enriched groups (default: False)")
-parser.add_argument("--also-test-samples", dest="also_test_samples",
-                    action=argparse.BooleanOptionalAction, default=False,
-                    help="Run per-sample Fisher's tests in addition to group-level tests (default: False)")
-parser.add_argument("--stratified", dest="stratified",
-                    action=argparse.BooleanOptionalAction, default=False,
-                    help="Report within-group sample breakdown and variance metrics (default: False)")
 parser.add_argument("--reduce-dims", dest="reduce_dims", type=int, default=500,
                     help="Reduce matrix to N dimensions using truncated SVD before clustering.\n"
                          "Recommended for merged BED files which can create very high-dimensional matrices.\n"
@@ -790,125 +781,6 @@ def calculate_enrichment_per_sample(cluster_samples, sample_totals):
         'all_p_values': p_values,
         'all_odds_ratios': odds_ratios
     }
-
-
-def calculate_nested_within_group(cluster_samples, enriched_group, sample_to_group, sample_totals):
-    """Calculate within-group sample enrichment for nested/hierarchical testing.
-
-    Tests each sample within the enriched group to see if it drives the enrichment.
-    """
-    # Get samples belonging to the enriched group
-    group_samples = [s for s in sample_totals.keys() if sample_to_group.get(s, s) == enriched_group]
-
-    # Count samples in cluster
-    sample_counts = Counter(cluster_samples)
-    cluster_group_samples = [s for s in cluster_samples if sample_to_group.get(s, s) == enriched_group]
-    total_in_group_cluster = len(cluster_group_samples)
-
-    within_group_results = {}
-    for sample in group_samples:
-        in_cluster = sample_counts.get(sample, 0)
-        out_cluster = sample_totals[sample] - in_cluster
-        other_in = total_in_group_cluster - in_cluster
-        # Other samples in this group, not in cluster
-        other_group_total = sum(sample_totals[s] for s in group_samples if s != sample)
-        other_out = other_group_total - other_in
-
-        if other_group_total > 0:
-            _, p_val = fisher_exact([[in_cluster, other_in], [out_cluster, other_out]])
-        else:
-            p_val = 1.0
-
-        pct_of_group = (in_cluster / total_in_group_cluster * 100) if total_in_group_cluster > 0 else 0
-
-        within_group_results[sample] = {
-            'count': in_cluster,
-            'pct_of_group': pct_of_group,
-            'p_value': p_val,
-            'enriched': p_val < 0.05 and pct_of_group > (100 / len(group_samples)),
-            'depleted': p_val < 0.05 and pct_of_group < (100 / len(group_samples))
-        }
-
-    return within_group_results
-
-
-def calculate_all_sample_tests(cluster_samples, sample_totals):
-    """Calculate per-sample Fisher's tests for all samples (Option B: --also-test-samples)."""
-    sample_counts = Counter(cluster_samples)
-    total_in = len(cluster_samples)
-    total_all = sum(sample_totals.values())
-
-    sample_results = {}
-    for sample, sample_total in sample_totals.items():
-        in_cluster = sample_counts.get(sample, 0)
-        out_cluster = sample_total - in_cluster
-        other_in = total_in - in_cluster
-        other_out = total_all - sample_total - other_in
-
-        _, p_val = fisher_exact([[in_cluster, other_in], [out_cluster, other_out]])
-        pct = (in_cluster / total_in * 100) if total_in > 0 else 0
-        expected_pct = (sample_total / total_all * 100) if total_all > 0 else 0
-
-        sample_results[sample] = {
-            'count': in_cluster,
-            'pct': pct,
-            'expected_pct': expected_pct,
-            'p_value': p_val,
-            'enriched': p_val < 0.05 and pct > expected_pct,
-            'depleted': p_val < 0.05 and pct < expected_pct
-        }
-
-    return sample_results
-
-
-def calculate_stratified_variance(cluster_samples, sample_to_group, sample_totals, group_totals):
-    """Calculate within-group variance metrics (Option C: --stratified)."""
-    sample_counts = Counter(cluster_samples)
-
-    # Group samples by their group
-    groups = set(sample_to_group.values())
-
-    stratified_results = {}
-    for group in groups:
-        group_sample_names = [s for s, g in sample_to_group.items() if g == group]
-        if not group_sample_names:
-            continue
-
-        # Get counts for each sample in this group
-        counts = [sample_counts.get(s, 0) for s in group_sample_names]
-
-        # Calculate statistics
-        mean_count = np.mean(counts)
-        std_count = np.std(counts)
-        cv = (std_count / mean_count) if mean_count > 0 else 0  # Coefficient of variation
-
-        # Normalized counts (as % of each sample's total reads)
-        normalized = []
-        for s in group_sample_names:
-            if sample_totals[s] > 0:
-                normalized.append(sample_counts.get(s, 0) / sample_totals[s] * 100)
-            else:
-                normalized.append(0)
-
-        mean_normalized = np.mean(normalized)
-        std_normalized = np.std(normalized)
-        cv_normalized = (std_normalized / mean_normalized) if mean_normalized > 0 else 0
-
-        stratified_results[group] = {
-            'samples': group_sample_names,
-            'counts': dict(zip(group_sample_names, counts)),
-            'mean_count': mean_count,
-            'std_count': std_count,
-            'cv': cv,
-            'normalized_pcts': dict(zip(group_sample_names, normalized)),
-            'mean_normalized': mean_normalized,
-            'std_normalized': std_normalized,
-            'cv_normalized': cv_normalized,
-            'consistent': cv_normalized < 0.5,  # True if CV < 50% (consistent across samples)
-            'n_samples': len(group_sample_names)
-        }
-
-    return stratified_results
 
 
 # --- Load and process data ---
@@ -1875,44 +1747,6 @@ for cluster_id in range(1, n_clusters + 1):
             cluster_record[f'{g}_count'] = stats['group_counts'].get(g, 0)
             cluster_record[f'{g}_pct'] = stats['group_pcts'].get(g, 0)
 
-    # Option A: Nested/hierarchical testing within enriched group
-    if args.nested and stats['enrichment'] != 'mixed' and args.comparison_mode != 'per-sample':
-        enriched_group = stats['enrichment'].replace('-enriched', '')
-        nested_results = calculate_nested_within_group(
-            cluster_samples, enriched_group, sample_to_group, sample_totals
-        )
-        cluster_record['nested_results'] = nested_results
-        # Add summary columns
-        enriched_samples = [s for s, r in nested_results.items() if r['enriched']]
-        depleted_samples = [s for s, r in nested_results.items() if r['depleted']]
-        cluster_record['nested_enriched_samples'] = ','.join(enriched_samples) if enriched_samples else ''
-        cluster_record['nested_depleted_samples'] = ','.join(depleted_samples) if depleted_samples else ''
-        cluster_record['nested_n_enriched'] = len(enriched_samples)
-        cluster_record['nested_n_depleted'] = len(depleted_samples)
-
-    # Option B: Per-sample tests for all samples
-    if args.also_test_samples and args.comparison_mode != 'per-sample':
-        sample_test_results = calculate_all_sample_tests(cluster_samples, sample_totals)
-        cluster_record['sample_test_results'] = sample_test_results
-        # Add summary columns for each sample
-        for sample, result in sample_test_results.items():
-            cluster_record[f'sample_{sample}_count'] = result['count']
-            cluster_record[f'sample_{sample}_pct'] = result['pct']
-            cluster_record[f'sample_{sample}_pval'] = result['p_value']
-            cluster_record[f'sample_{sample}_enriched'] = result['enriched']
-
-    # Option C: Stratified variance metrics
-    if args.stratified and args.comparison_mode != 'per-sample':
-        stratified_results = calculate_stratified_variance(
-            cluster_samples, sample_to_group, sample_totals, group_totals
-        )
-        cluster_record['stratified_results'] = stratified_results
-        # Add summary columns per group
-        for g, result in stratified_results.items():
-            cluster_record[f'{g}_cv'] = result['cv_normalized']
-            cluster_record[f'{g}_consistent'] = result['consistent']
-            cluster_record[f'{g}_sample_counts'] = ','.join(f"{s}:{c}" for s, c in result['counts'].items())
-
     cluster_analysis.append(cluster_record)
 
 # --- Compute cluster-level dendrogram ---
@@ -2034,10 +1868,7 @@ for _, row in cluster_df.iterrows():
 
 # Save cluster analysis
 analysis_file = f"{args.output_prefix}.cluster_analysis.tsv"
-# Drop columns containing nested dictionaries (can't be serialized to TSV)
-cols_to_drop = [c for c in cluster_df.columns if c in ['nested_results', 'sample_test_results', 'stratified_results']]
-cluster_df_export = cluster_df.drop(columns=cols_to_drop, errors='ignore')
-cluster_df_export.to_csv(analysis_file, sep='\t', index=False)
+cluster_df.to_csv(analysis_file, sep='\t', index=False)
 print(f"\n  Saved cluster analysis to: {analysis_file}")
 
 # Save read assignments with stats (sorted by cluster, then centroid distance)
@@ -2940,9 +2771,6 @@ print(fmt_param('circular-dendrogram', args.plot_circular_dendrogram, 'plot_circ
 print(fmt_param('perfect-threshold', args.perfect_threshold))
 print(fmt_param('strong-threshold', args.strong_threshold))
 print(fmt_param('early-stopping', args.early_stopping))
-print(fmt_param('nested', args.nested))
-print(fmt_param('also-test-samples', args.also_test_samples))
-print(fmt_param('stratified', args.stratified))
 print(fmt_param('background', args.background))
 print(fmt_param('log-file', args.log_file))
 
