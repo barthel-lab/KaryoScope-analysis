@@ -2,14 +2,14 @@
 """
 KaryoScope Sequence Annotation
 
-Joins read_assignments.tsv with readnames.txt and stats.tsv files to add
+Joins sequence_assignments.tsv with readnames.txt and stats.tsv files to add
 sequencing approach and mapping statistics to each sequence.
 
 Usage:
   python KaryoScope_annotate_sequences.py \
-    --read-assignments analysis.read_assignments.tsv \
+    --read-assignments analysis.sequence_assignments.tsv \
     --readnames-dir /path/to/samples \
-    --output analysis.read_assignments.annotated.tsv
+    --output analysis.sequence_assignments.annotated.tsv
 
 The script expects:
   - readnames.txt files at: {readnames_dir}/{sample}/telogator/{sample}.readnames.txt
@@ -28,14 +28,14 @@ Added columns:
   - total_align_fraction: Total aligned / read length (can exceed 1.0 if overlapping)
 
 Join behavior:
-  - Inner joins are performed: every read in read_assignments.tsv must have a
+  - Inner joins are performed: every sequence in sequence_assignments.tsv must have a
     matching entry in both readnames.txt and stats.tsv
-  - The script will ERROR if any read from read_assignments.tsv is missing from
+  - The script will ERROR if any sequence from sequence_assignments.tsv is missing from
     readnames.txt or stats.tsv (this would indicate data corruption or mismatch)
-  - Reads present in readnames.txt/stats.tsv but NOT in read_assignments.tsv are
-    expected and ignored (these are reads filtered out by cluster analysis, e.g.,
-    due to minimum read length requirements)
-  - The output row count will always equal the input read_assignments.tsv row count
+  - Sequences present in readnames.txt/stats.tsv but NOT in sequence_assignments.tsv are
+    expected and ignored (these are sequences filtered out by cluster analysis, e.g.,
+    due to minimum sequence length requirements)
+  - The output row count will always equal the input sequence_assignments.tsv row count
 """
 
 import argparse
@@ -69,7 +69,7 @@ def load_readnames(readnames_dir, samples):
     combined = pd.concat(all_readnames, ignore_index=True)
 
     # Check for duplicates
-    duplicates = combined[combined.duplicated(subset=['read'], keep=False)]
+    duplicates = combined[combined.duplicated(subset=['sequence'], keep=False)]
     if len(duplicates) > 0:
         raise ValueError(f"Found {len(duplicates)} duplicate read names in readnames files")
 
@@ -183,9 +183,9 @@ def load_stats(readnames_dir, samples, reference="CHM13"):
     combined = pd.concat(all_stats, ignore_index=True)
 
     # Verify no duplicates - should be exactly one row per read
-    duplicates = combined[combined.duplicated(subset=['read'], keep=False)]
+    duplicates = combined[combined.duplicated(subset=['sequence'], keep=False)]
     if len(duplicates) > 0:
-        dup_reads = duplicates['read'].unique()[:5]
+        dup_reads = duplicates['sequence'].unique()[:5]
         raise ValueError(
             f"Found {len(duplicates)} duplicate reads in stats after filtering. "
             f"Expected exactly one row per read. Examples: {list(dup_reads)}"
@@ -201,7 +201,7 @@ def main():
     )
 
     parser.add_argument("--read-assignments", dest="read_assignments", required=True,
-                        help="Input read_assignments.tsv file from cluster analysis")
+                        help="Input sequence_assignments.tsv file from cluster analysis")
     parser.add_argument("--readnames-dir", dest="readnames_dir", required=True,
                         help="Base directory containing sample folders with readnames.txt files")
     parser.add_argument("--reference", default="CHM13",
@@ -243,8 +243,8 @@ def main():
     # === Join 1: assignments + readnames ===
     print("\n--- Joining with readnames ---")
     n_before = len(assignments)
-    reads_in_assignments = set(assignments['read'])
-    reads_in_readnames = set(readnames['read'])
+    reads_in_assignments = set(assignments['sequence'])
+    reads_in_readnames = set(readnames['sequence'])
 
     # Check that all assignment reads are in readnames (required)
     only_in_assignments = reads_in_assignments - reads_in_readnames
@@ -272,8 +272,8 @@ def main():
     # === Join 2: merged + stats ===
     print("\n--- Joining with stats ---")
     n_before = len(merged)
-    reads_in_merged = set(merged['read'])
-    reads_in_stats = set(stats['read'])
+    reads_in_merged = set(merged['sequence'])
+    reads_in_stats = set(stats['sequence'])
 
     # Check that all assignment reads are in stats (required)
     only_in_merged = reads_in_merged - reads_in_stats
@@ -289,7 +289,7 @@ def main():
         print(f"  Note: {len(only_in_stats)} reads in stats not in assignments (filtered by cluster analysis)")
 
     # Select only the columns we want from stats
-    stats_subset = stats[['read'] + [c for c in stats_cols if c in stats.columns]].copy()
+    stats_subset = stats[['sequence'] + [c for c in stats_cols if c in stats.columns]].copy()
     missing_cols = [c for c in stats_cols if c not in stats.columns]
     if missing_cols:
         print(f"  Warning: Stats columns not found: {missing_cols}")
