@@ -2,7 +2,7 @@
 
 ## Overview
 
-KaryoScope analysis is a graph-based method for analyzing long-read sequencing data that identifies structural patterns in sequences based on genomic feature abundance and adjacencies as annotated by KaryoScope. This guide provides a detailed technical explanation of the clustering algorithm, from input data to final enrichment calls.
+KaryoScope analysis is a graph-based method for analyzing sequencing data that identifies structural patterns based on genomic feature abundance and adjacencies as annotated by KaryoScope. This guide provides a detailed technical explanation of the clustering algorithm, from input data to final enrichment calls.
 
 ---
 
@@ -10,13 +10,12 @@ KaryoScope analysis is a graph-based method for analyzing long-read sequencing d
 
 **1. [Input Data Structure](#1-input-data-structure)**
 
-   - 1.1 [K-mer Classification Overview](#11-k-mer-classification-overview)
+   - 1.1 [K-mer Coordinate System](#11-k-mer-classification-overview)
    - 1.2 [Feature Sets](#12-feature-sets)
-   - 1.3 [BED File Format](#13-bed-file-format)
-   - 1.4 [Graph Representation](#14-graph-representation)
-   - 1.5 [Sequence Filtering and Quality Control](#15-sequence-filtering-and-quality-control)
+   - 1.3 [Graph Representation](#14-graph-representation)
+   - 1.4 [Sequence Filtering and Quality Control](#15-sequence-filtering-and-quality-control)
 
-**2. [Featureset Merging Strategies](#2-featureset-merging-strategies)**
+**2. [Feature Set Merging Strategies](#2-feature-set-merging-strategies)**
 
    - 2.1 [Overview and Rationale](#21-overview-and-rationale)
    - 2.2 [Concatenation Merging (Default Mode)](#22-concatenation-merging-default-mode)
@@ -72,45 +71,37 @@ KaryoScope analysis is a graph-based method for analyzing long-read sequencing d
    - 9.4 [Enrichment Parameters](#94-enrichment-parameters)
    - 9.5 [Sequence Filtering](#95-sequence-filtering)
 
-**Note:** For information on input sequence filtering and preprocessing, see `KaryoScope_Preprocessing.md` (for e.g. selecting telomeric sequences)
+**Note:** For information on filtering and preprocessing the input sequences (e.g. for selecting telomere sequences) see `KaryoScope_Preprocessing.md`.
 
 ---
 
 ## 1. Input Data Structure {#1-input-data-structure}
 
-### 1.1 K-mer Classification Overview {#11-k-mer-classification-overview}
+### 1.1 K-mer Coordinate System {#11-k-mer-classification-overview}
 
-KaryoScope classifies sequences at the **k-mer level**. Each sequence is processed by extracting all the k-mers and classifying them according to multiple independent feature sets.
+A typical bed file is defined on the individual nucleotides of an input sequence. KaryoScope on the other hand is defined on the k-mers of an input sequence (by default, k=31). A position in this k-mer coordinate system corresponds to the k-mer which **starts** at that genomic position in the input. Note that a bed file in the k-mer coordinate system will include all but the final k-1 positions of every sequence in the input.
 
-**K-mer extraction:**
+After k-mer annotation, consecutive k-mers with the same feature label are merged into intervals and represented in BED format:
 
-- K-mer size: **k = 31 bp** (default)
-- A sequence of length L yields **L - k + 1** = **L - 30** k-mers
-- Example: A 10,000 bp sequence produces 9,970 k-mers (10,000 - 30)
+```
+sequence_id    start    end    feature
+uuid           0        19     novel
+uuid           19       182    q_arm_specific
+uuid           182      183    ct_specific
+uuid           183      314    q_arm_specific
+```
 
-**Classification process:**
-
-For each k-mer, KaryoScope independently classifies the k-mer according to **multiple independent feature sets** (detailed in Section 1.2). For example, a single k-mer might simultaneously be classified as:
-
-- Chromosome: `chr7`
-- Region: `p_arm`
-- Repeat: `LINE`
-- Subtelomeric: `nonsubtelomeric`
-
-Each feature set annotates every k-mer position independently and completely - there are no gaps or unannotated positions within any featureset.
-
-**Special feature labels:**
-
-Across all featuresets, certain labels indicate k-mers that couldn't be definitively classified:
-
-- **`novel`**: K-mers that cannot be classified by the featureset (uncharacterized sequences)
-- **`*_multigroup*`**: K-mers matching multiple specific subtypes within a feature class
-  - Examples: `hor_multigroup1` (matches multiple HOR subtypes), `hsat_multigroup1` (matches multiple hsat variants), `arm_multigroup1`
-  - Indicates the k-mer is genuinely ambiguous between similar but distinct sequence variants
+In the above, the first 19 k-mers (starting at positions 1-19) are `novel` k-mers not found in the database, the next 163 k-mers (starting at positions 20-182) are `q_arm_specific`, the next k-mer (starting at position 183) is `ct_specific`, and the final 131 k-mers (starting at positions 184-314) are `q_arm_specific`. Note that in this representation, a feature "length" (i.e. `end` - `start`) actually corresponds to the number of k-mers.
 
 ### 1.2 Feature Sets {#12-feature-sets}
 
-Features are organized into multiple independent feature sets, each providing a different annotation layer. KaryoScope is built on the 2,512,377,669 distinct k-mers of the CHM13 genome (excluding chrM). Each feature set is a database that assigns each of those 2,512,377,669 k-mers to a single feature. KaryoScope consists of 6 feature sets:
+Features are organized into multiple independent feature sets, each providing a different annotation layer. KaryoScope is built on the 2,512,377,669 distinct k-mers of the CHM13 genome (excluding chrM). Each feature set is a database that assigns each of those 2,512,377,669 k-mers to a single feature. Any k-mer not in the database is assigned as the `novel` feature.
+
+A feature set is built from a bed file with every position annotated as one of several initial features. However, k-mers may occur in multiple of these initial features (for example a `hsat1A` k-mer may also be a `hsat1B` k-mer). To ensure that k-mers are assigned to a single feature, KaryoScope constructs corresponding "feature_specific" and "feature_multigroup" sets of k-mers which are disjoint from each other.
+
+For every initial feature, KaryoScope will construct a corresponding main "feature_specific" feature which consists of k-mers in that initial feature and no other initial feature. For k-mers belonging to multiple features, KaryoScope defines "feature_multigroup" features using a feature phylogeny. Each "feature_multigroup" feature consists of k-mers in a subset of initial features and not in any of the other initial features. For example, the `hsat1_multigroup1` feature consists of k-mers in `hsat1A` and `hsat1B` but no other initial features. 
+
+KaryoScope consists of 6 feature sets:
 
 **1. Chromosome feature set:** Chromosomal assignment
 
@@ -120,9 +111,8 @@ Features are organized into multiple independent feature sets, each providing a 
 
 **2. Region feature set:** Chromosomal regions and centromeric satellites
 
-This feature set consist of three main groups: telomere features, arm features, and centromere features.
+This feature set consist of two main groups: arm features and centromere features.
 
-- Telomere Features: `canonical_telomere_specific`, `noncanonical_telomere_specific`
 - Arm Features: `p_arm_specific`, `q_arm_specific`
 - Centromere Features: `active_specific` (active aSat HOR), `inactive_specific` (inactive aSat HOR), `divergent_specific` (divergent aSat HOR), `monomeric_specific` (monomeric aSat), `hsat1A_specific`, `hsat1B_specific`, `hsat2_specific`, `hsat3_specific`, `bsat_specific` (beta satellite), `gsat_specific` (gamma satellite), `censat_specific` (other centromeric satellites), `ct_specific` (centromeric transition regions)
 - rDNA Feature: `rDNA_specific`
@@ -151,57 +141,34 @@ This feature set consist of three main groups: telomere features, arm features, 
 
 **6. Acrocentric feature set:** Acrocentric sequences
 
-- Main Features: `DJ_specific`, `PJ_specific`, `rDNA_specific`, `SST1_specific`, `PHR_specific`
+- Main Features: `DJ_specific` (distal junction of rDNA array), `PJ_specific` (proximal junction of rDNA array), `rDNA_specific`, `SST1_specific`, `PHR_specific` (pseudo-homologous regions)
 - Non-features: `nonacrocentric_specific`
 - Phylogeny-informed Features: `array_multigroup1`
 - File suffix: `.acrocentric.bed`
 
-**Note:** Each featureset is annotated in a separate BED file. Because each featureset provides complete coverage (every k-mer gets exactly one label), when merging multiple featuresets, every genomic interval will have features from all featuresets being merged (see Section 2: Featureset Merging Strategies).
+**Note:** KaryoScope annotations are output to a separate BED file for each feature set. One may wish to merge multiple feature sets such that every genomic interval is annotated with the corresponding features from all the feature sets being merged (see [Feature Set Merging Strategies](#2-feature-set-merging-strategies)).
 
-### 1.3 BED File Format {#13-bed-file-format}
+### 1.3 Graph Representation {#14-graph-representation}
 
-After k-mer classification and smoothing, consecutive k-mers with the same feature label are merged into intervals and represented in BED format:
+We construct a **path graph** for each annotated sequence:
 
-```
-sequence_id    start    end    feature
-uuid           0        19     novel
-uuid           19       182    q_arm
-uuid           182      183    ct
-uuid           183      314    q_arm
-```
-
-**Coordinate system:**
-
-- **start/end:** K-mer positions (0-indexed, half-open intervals)
-- For a sequence of actual length L bp, k-mer coordinates range from 0 to L - 30
-- Example: A 10,000 bp sequence has k-mer coordinates 0-9,970
-
-**Feature labels:**
-
-- Can be from a single featureset: `q_arm`, `chr17`, `LINE`
-- Or from merged featuresets (See [Featureset Merging Strategies](#2-featureset-merging-strategies)): e.g. `chr7:p_arm:nonrepeat`
-
-### 1.4 Graph Representation {#14-graph-representation}
-
-Each BED file creates a **path graph** for each sequence:
-
-- **Nodes** = genomic features (e.g., "chr17" from chromosome featureset, "asat" from region featureset, "LINE" from repeat featureset, "ITS" from subtelomeric featureset)
-- **Edges** = transitions between consecutive features along the sequence
-- **Edge weights** = average length of the two adjacent features forming the transition: (length_feature_i + length_feature_j) / 2
+- **Nodes** = features
+- **Edges** = transitions between adjacent features along the sequence
+- **Edge weights** = average length (i.e. number of k-mers) of the two adjacent features forming the transition: (length_feature_i + length_feature_j) / 2
 
 **Example path graph:**
 ```
 Sequence: uuid
-Path: novel → q_arm → ct → q_arm
+Path: novel → q_arm_specific → ct_specific → q_arm_specific
 
-Nodes: {novel, q_arm, ct}
-Edges: {novel→q_arm, q_arm→ct, ct→q_arm}
-Edge weights: {19, 82.5, 0.5} (lengths in k-mer positions)
+Nodes: {novel, q_arm_specific, ct_specific}
+Edges: {novel→q_arm_specific, q_arm_specific→ct_specific, ct_specific→q_arm_specific}
+Edge weights: {19, 82.5, 0.5}
 ```
 
 This graph representation enables clustering sequences by their structural patterns (which features appear and how they connect).
 
-### 1.5 Sequence Filtering and Quality Control {#15-sequence-filtering-and-quality-control}
+### 1.4 Sequence Filtering and Quality Control {#15-sequence-filtering-and-quality-control}
 
 Sequences undergo filtering to ensure optimized input for clustering (default parameters shown below, modifiable via script arguments):
 
@@ -214,8 +181,7 @@ Sequences undergo filtering to ensure optimized input for clustering (default pa
 **Feature exclusion:**
 Sequences containing only the following features are excluded:
 
-- `novel` - uncharacterized sequences
-- `unknown` - unclassified regions
+- `novel` - sequences not present in the KaryoScope database
 - `canonical_telomere*` - canonical telomeric repeats (using wildcard matching)
   - Rationale: Canonical telomere abundance is sample-dependent and can bias clustering results unnecessarily.
 
@@ -236,66 +202,65 @@ This dual filtering ensures:
 
 ---
 
-## 2. Featureset Merging Strategies {#2-featureset-merging-strategies}
+## 2. Feature Set Merging Strategies {#2-feature-set-merging-strategies}
 
 ### 2.1 Overview and Rationale {#21-overview-and-rationale}
 
-By design, features within a single featureset do not overlap. However, when combining multiple featuresets (e.g., chromosome + region + repeat), overlapping intervals from different featuresets must be merged to create unified feature annotations for each genomic interval.
+When combining multiple KaryoScope feature sets (e.g., chromosome + region + repeat), overlapping intervals from different feature sets must be merged to create unified feature annotations for each genomic interval.
 
-**Why merge featuresets?**
+**Why merge feature sets?**
 
 Merging enables the measurement of associations between independent genomic annotation layers, revealing biologically meaningful structural patterns:
 
-- **Juxtapositions:** Detecting adjacency between satellite DNA (region featureset) and subtelomeric features (subtelomeric featureset)
-- **Context-specific repeats:** Identifying repeat elements (repeat featureset) enriched in specific chromosomal locations (chromosome featureset)
+- **Juxtapositions:** Detecting adjacency between satellite DNA (region feature set) and subtelomeric features (subtelomeric feature set)
+- **Context-specific repeats:** Identifying repeat elements (repeat feature set) enriched in specific chromosomal locations (chromosome feature set)
 - **Multi-dimensional patterns:** Capturing complex genomic architectures that span multiple annotation types
 
 **Example biological question:**
-"Are certain satellite arrays (e.g., hsat, bsat) preferentially found adjacent to specific subtelomeric elements (e.g., non-canonical telomere, TAR1)?"
+"Are certain satellite arrays (e.g. hsat, bsat) preferentially found adjacent to specific subtelomeric elements (e.g. noncanonical_telomere, TAR1)?"
 
-This requires merging the region featureset (containing satellite annotations) with the subtelomeric featureset (containing non-canonical telomere/TAR1 annotations) to identify juxtapositions.
+This requires merging the region feature set (containing satellite annotations) with the subtelomeric feature set (containing non-canonical telomere/TAR1 annotations) to identify juxtapositions.
 
 ### 2.2 Concatenation Merging (Default Mode) {#22-concatenation-merging-default-mode}
 
-The default strategy preserves all information from all featuresets by creating hierarchical feature labels.
+The default strategy preserves information from all feature sets by concatenating feature labels.
 
 **Algorithm:**
-1. Identify overlapping intervals between featuresets
+
+1. Identify overlapping intervals between feature sets
 2. For each overlapping region, concatenate feature labels using a separator (default: `:`)
 3. Create a new interval with the combined label
 
-**Comprehensive example showing fragmentation:**
+**Comprehensive example showing increased granularity:**
 
-Since each featureset annotates **every position**, the merged result will always contain features from all input featuresets.
+Since each feature set annotates every k-mer (using `novel` as necessary), the merged result will annotate every k-mer with a feature from each input feature set.
 
 ```
 Position:       0         100       200       300       400       500       600
                 |         |         |         |         |         |         |
-Chromosome:     [chr7───────────────────────────────────────────────────-───]
-Region:         [p_arm───────────-─-][bsat──────────────────][q_arm─────────]
-Repeat:         [nonrepeat][LINE────][SINE][nonrepeat──────────────────────-]
+Chromosome:     [chr7───────────────────────────────────────────────────────]
+Region:         [p_arm──────────────][bsat──────────────][q_arm─────────────]
+Repeat:         [nonrepeat][LINE────][SINE────][nonrepeat───────────────────]
 
 Merged result (fragmented into non-overlapping intervals):
 Interval 1:  0-100    → chr7:p_arm:nonrepeat
 Interval 2:  100-200  → chr7:p_arm:LINE
-Interval 3:  200-300  → chr7:bsat:LINE
-Interval 4:  300-400  → chr7:bsat:SINE
-Interval 5:  400-500  → chr7:bsat:nonrepeat
-Interval 6:  500-600  → chr7:q_arm:nonrepeat
+Interval 3:  200-300  → chr7:bsat:SINE
+Interval 4:  300-400  → chr7:bsat:nonrepeat
+Interval 5:  400-600  → chr7:q_arm:nonrepeat
 ```
 
 **Key observations:**
 
-- **Every interval contains features from all featuresets** (chromosome:region:repeat)
-- The merged BED file is **always more fragmented** than any single input BED file
-- Intervals are split wherever feature boundaries from different featuresets intersect
-- Number of merged intervals = union of all boundary positions across all featuresets
+- **Every interval contains a feature from each input feature set**
+- The merged BED file is **more granular than** any single input BED file
+- Intervals are split wherever feature boundaries from different feature sets differ
+- Number of merged intervals is determined by union of all boundary positions across all feature sets
 
 **Output characteristics:**
 
-- Preserves complete information from all input featuresets
-- Creates multi-level hierarchical features
-- Typical format: `chromosome:region:repeat` (e.g., `chr7:p_arm:LINE`)
+- Preserves complete information from all input feature sets
+- Typical format: `chromosome:region:repeat` (e.g. `chr7:p_arm:LINE`)
 - Increases feature dimensionality (more unique feature combinations)
 - Higher fragmentation = more granular annotation
 
@@ -303,66 +268,67 @@ Interval 6:  500-600  → chr7:q_arm:nonrepeat
 
 ### 2.3 Priority-Based Override Merging {#23-priority-based-override-merging}
 
-Alternative strategy that uses conditional logic to select features from one featureset over another based on biological priority rules. This reduces dimensionality at the cost of information loss.
+An alternative strategy is to use conditional logic to select features from one feature set over another based on biological priority rules. This reduces dimensionality at the cost of information loss.
 
 #### 2.3.1 Telomere-Satellite Priority Merge (`--telomere-satellite-merge`)
 
-Prioritizes telomeric features over satellite/region features.
+This mode prioritizes subtelomeric features over region/centromeric features.
 
-**Priority features from subtelomeric featureset:**
+**Priority features from the subtelomeric feature set:**
 
-- `canonical_telomere`
-- `noncanonical_telomere`
-- `TAR1`
-- `ITS`
+- `canonical_telomere_specific`
+- `noncanonical_telomere_specific`
+- `TAR1_specific`
+- `ITS_specific`
 
 **Algorithm:**
-1. Identify priority features from subtelomeric featureset (BED1)
-2. Identify all features from satellite/region featureset (BED2)
+
+1. Identify priority features from subtelomeric feature set (BED1)
+2. Identify all features from satellite/region feature set (BED2)
 3. Keep priority features in their entirety
 4. Fill remaining (non-priority) positions with satellite/region features
 5. Discard any satellite/region features that overlap with priority features
 
 **Example showing merging decisions at every position:**
 
-Since both featuresets annotate every position, a merging decision must be made at every interval.
+Since both feature sets annotate every position, a merging decision must be made at every interval.
 
 ```
-Position:       0         100       200       300       400       500
-                |         |         |         |         |         |
-Subtelomeric:   [canon───][nonsubtel─────────][ITS─────][nonsub───]
-Region:         [hsat──────────────────────────────────][bsat─────]
+Position:       0          100        200        300        400        500        600        700
+                |          |          |          |          |          |          |          |
+Subtelomeric:   [canonical_telomere───][nonsubtelomeric─────][ITS──────][nonsubtelomeric─────]
+Region:         [hsat1A─────────────────────────────────────][bsat───────────────────────────]
 
-Decision:       priority  non-priority          priority  non-priority
-                feature   (use region)          feature   (use region)
+Decision:       priority               non-priority          priority   non-priority
+                feature                (use region)          feature    (use region)
 
-Merged result:  [canon───][hsat──────────────][ITS─────][bsat─────]
-                0-100     100-300              300-400   400-500
+Merged result:  [canonical_telomere───][hsat1A──────────────][ITS─────][bsat─────────────────]
+                0-200                  200-400               400-500   500-700
 ```
 
-**Explanation:**
-
-- At positions 0-100: `canonical_telomere` (priority) overrides `hsat`
-- At positions 100-300: `nonsubtelomeric` (non-priority) → use `hsat` from BED2
-- At positions 300-400: `ITS` (priority) overrides `hsat`/`bsat` boundary
-- At positions 400-500: `nonsubtelomeric` (non-priority) → use `bsat` from BED2
-
-**Every position requires a merging decision** - there are no gaps. Priority features override non-priority features.
+Merged result:
+```
+sequence_id    start    end    feature
+uuid           0        200    canonical_telomere_specific
+uuid           200      400    hsat1A_specific
+uuid           400      500    ITS_specific
+uuid           500      700    bsat_specific
+```
 
 #### 2.3.2 3-Way Priority Merge (`--priority-merge`)
 
-Hierarchical priority: subtelomeric > region > repeat, with conditional rules.
+This mode prioritizes subtelomeric features over region features and region features over repeat features with a few additional conditional rules.
 
 **Conditional rules:**
 
-- `ct` (centromeric transition) + `nonrepeat` → `ct`
-- `ct` + other repeat → use repeat feature
-- `noncentromeric` + `rRNA` → `rRNA`
-- `noncentromeric` + other repeat → `rDNA`
-- Arm regions (`p_arm`, `q_arm`) → use repeat feature (background)
+- `nonsubtelomeric` + `ct` + repeat (not `nonrepeat`) → use repeat feature
+- `nonsubtelomeric` + `rDNA` + `rRNA` → `rRNA`
+- `nonsubtelomeric` + `p_arm` + repeat → use repeat feature
+- `nonsubtelomeric` + `q_arm` + repeat → use repeat feature
 
 **Algorithm:**
-1. Extract priority subtelomeric features (canonical_telomere, noncanonical_telomere, ITS, TAR1, telomere_like_multigroup1)
+
+1. Extract priority subtelomeric features (`canonical_telomere`, `noncanonical_telomere`, `ITS`, `TAR1`, `telomere_like_multigroup1`)
 2. Merge region + repeat using conditional rules
 3. Subtract priority subtelomeric regions from region+repeat merged intervals
 4. Combine priority subtelomeric + remaining region/repeat intervals
@@ -370,7 +336,7 @@ Hierarchical priority: subtelomeric > region > repeat, with conditional rules.
 **Output characteristics:**
 
 - Reduces feature complexity by selecting single labels
-- Loses information from lower-priority featuresets
+- Loses information from lower-priority feature sets
 - Biologically-informed feature selection
 - Lower feature dimensionality
 - Simpler interpretation
@@ -389,7 +355,7 @@ Hierarchical priority: subtelomeric > region > repeat, with conditional rules.
 **Use priority-based merging when:**
 
 - You want simpler, lower-dimensional features
-- Specific features (e.g., subtelomeric) are biologically more important
+- Specific features (e.g. subtelomeric) are biologically more important
 - Computational efficiency is critical
 - You're willing to sacrifice information for interpretability
 
