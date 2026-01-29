@@ -15,6 +15,10 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
+# Keep text editable in output files (not converted to paths)
+plt.rcParams['pdf.fonttype'] = 42
+plt.rcParams['svg.fonttype'] = 'none'
+
 
 def parse_args():
     parser = argparse.ArgumentParser(

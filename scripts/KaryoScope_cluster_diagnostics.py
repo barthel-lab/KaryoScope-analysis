@@ -79,6 +79,8 @@ PUBLICATION_RCPARAMS = {
     'axes.spines.right': False,
     'lines.linewidth': 1.5,
     'patch.linewidth': 0.5,
+    'pdf.fonttype': 42,      # TrueType fonts (editable text)
+    'svg.fonttype': 'none',  # Keep text as text elements
 }
 
 ENRICHMENT_COLORS = {

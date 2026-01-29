@@ -30,6 +30,10 @@ import seaborn as sns
 from matplotlib.backends.backend_pdf import PdfPages
 from scipy import stats
 
+# Keep text editable in output files (not converted to paths)
+plt.rcParams['pdf.fonttype'] = 42
+plt.rcParams['svg.fonttype'] = 'none'
+
 
 def load_clustering(assignments_file, analysis_file=None):
     """Load read assignments and optionally cluster analysis for enrichment labels."""
