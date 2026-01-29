@@ -13,7 +13,7 @@ KaryoScope analysis is a graph-based method for analyzing sequencing data that i
    - 1.1 [K-mer Coordinate System](#11-k-mer-classification-overview)
    - 1.2 [Feature Sets](#12-feature-sets)
    - 1.3 [Graph Representation](#14-graph-representation)
-   - 1.4 [Sequence Filtering and Quality Control](#15-sequence-filtering-and-quality-control)
+   - 1.5 [Sequence Filtering and Quality Control](#15-sequence-filtering-and-quality-control)
 
 **2. [Feature Set Merging Strategies](#2-feature-set-merging-strategies)**
 
@@ -163,27 +163,35 @@ Path: novel → q_arm_specific → ct_specific → q_arm_specific
 
 Nodes: {novel, q_arm_specific, ct_specific}
 Edges: {novel→q_arm_specific, q_arm_specific→ct_specific, ct_specific→q_arm_specific}
-Edge weights: {19, 82.5, 0.5}
+Edge weights: {20, 80, 10}
 ```
 
 This graph representation enables clustering sequences by their structural patterns (which features appear and how they connect).
 
-### 1.4 Sequence Filtering and Quality Control {#15-sequence-filtering-and-quality-control}
+### 1.5 Sequence Filtering and Quality Control {#15-sequence-filtering-and-quality-control}
 
 Sequences undergo filtering to ensure optimized input for clustering (default parameters shown below, modifiable via script arguments):
 
+#### 1.5.1 Sequence Length Filtering
+
 **Length filtering (default):**
 
-- Minimum: 10,000 bp (10 kb) - removes short, potentially fragmented sequences
-- Maximum: 100,000 bp (100 kb) - removes rare ultra-long outliers
-- Rationale: Focuses on high-quality long sequences with sufficient feature content
+- Minimum: 10,000 bp (10 kb) - removes short sequences
+- Maximum: 50,000 bp (50 kb) - removes rare ultra-long outliers
+- Rationale: Focuses on reasonably long sequences with sufficient feature content
 
-**Feature exclusion:**
-Sequences containing only the following features are excluded:
+#### 1.5.2 Feature Masking
 
-- `novel` - sequences not present in the KaryoScope database
-- `canonical_telomere*` - canonical telomeric repeats (using wildcard matching)
-  - Rationale: Canonical telomere abundance is sample-dependent and can bias clustering results unnecessarily.
+**Feature exclusion (default):**
+
+Certain features are masked/excluded from analysis:
+- `novel`: Uncharacterized k-mers (noisy, uninformative)
+- `unknown`: Ambiguous features
+- `canonical_telomere*`: Canonical telomere repeats (excluded to focus on subtelomeric regions)
+
+**Rationale:**
+- Removes noise and focuses on informative genomic features
+- Canonical telomeres are excluded because KaryoScope focuses on subtelomeric architecture
 
 **Example filtering impact (Core-4 telomeric sequences dataset):**
 ```
@@ -197,7 +205,7 @@ Final dataset: 8,422 sequences for clustering
 This dual filtering ensures:
 
 1. Structurally informative sequences (not just canonical telomeres)
-2. High-quality sequences suitable for statistical analysis
+2. Sufficient feature content for statistical analysis
 3. Computationally tractable datasets
 
 ---
@@ -317,31 +325,26 @@ uuid           500      700    bsat_specific
 
 #### 2.3.2 3-Way Priority Merge (`--priority-merge`)
 
-This mode prioritizes subtelomeric features over region features and region features over repeat features with a few additional conditional rules.
+This mode creates a hierarchy: subtelomeric features > region features > repeat features.
 
-**Conditional rules:**
+**Priority subtelomeric features:**
+- `canonical_telomere`, `noncanonical_telomere`, `ITS`, `TAR1`, `telomere_like_multigroup1`
 
-- `nonsubtelomeric` + `ct` + repeat (not `nonrepeat`) → use repeat feature
-- `nonsubtelomeric` + `rDNA` + `rRNA` → `rRNA`
-- `nonsubtelomeric` + `p_arm` + repeat → use repeat feature
-- `nonsubtelomeric` + `q_arm` + repeat → use repeat feature
+**Region + Repeat merge rules:**
+- `ct` + `nonrepeat` → `ct`
+- `ct` + other repeat → use repeat
+- `rDNA` + `rRNA` → `rRNA`
+- `p_arm`, `q_arm`, `arm_multigroup1` + repeat → use repeat (background features)
+- Satellite features + repeat → keep satellite feature
 
-**Algorithm:**
-
-1. Extract priority subtelomeric features (`canonical_telomere`, `noncanonical_telomere`, `ITS`, `TAR1`, `telomere_like_multigroup1`)
-2. Merge region + repeat using conditional rules
-3. Subtract priority subtelomeric regions from region+repeat merged intervals
-4. Combine priority subtelomeric + remaining region/repeat intervals
+**Result:** Priority subtelomeric features are preserved; remaining intervals are merged using the conditional rules above.
 
 **Output characteristics:**
-
 - Reduces feature complexity by selecting single labels
-- Loses information from lower-priority feature sets
 - Biologically-informed feature selection
 - Lower feature dimensionality
-- Simpler interpretation
 
-**Implementation:** `KaryoScope_merge_beds.py` (with `--priority-merge` or `--telomere-satellite-merge` flags)
+**Implementation:** `KaryoScope_merge_beds.py --priority-merge`
 
 ### 2.4 Choosing a Merging Strategy {#24-choosing-a-merging-strategy}
 
