@@ -335,6 +335,7 @@ This mode prioritizes subtelomeric features over region features and region feat
 - `nonsubtelomeric` + `rDNA` + `rRNA` → `rRNA`
 - `nonsubtelomeric` + `p_arm` + repeat → use repeat feature
 - `nonsubtelomeric` + `q_arm` + repeat → use repeat feature
+- `nonsubtelomeric` + any combination not above → use region feature
 
 **Output characteristics:**
 
