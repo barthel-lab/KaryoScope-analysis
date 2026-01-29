@@ -32,6 +32,24 @@ import sys
 
 import pandas as pd
 
+# Constants for log2 fold change capping (avoids Excel Inf display issues)
+LOG2FC_MIN = -10
+LOG2FC_MAX = 10
+
+
+def _calculate_log2_fc(odds):
+    """Calculate clamped log2 fold change from odds ratio."""
+    if odds is None:
+        return None
+    if odds == 0:
+        return LOG2FC_MIN
+    if math.isinf(odds):
+        return LOG2FC_MAX
+    if odds > 0:
+        log2_fc = math.log2(odds)
+        return round(max(LOG2FC_MIN, min(LOG2FC_MAX, log2_fc)), 2)
+    return None
+
 
 def load_bed_file(filepath):
     """Load a BED file (optionally gzipped) into a DataFrame."""
@@ -93,7 +111,7 @@ def matches_any_pattern(feature, patterns):
 
 def summarize_featureset(cluster_reads, bed_df, top_n=3, exclude_patterns=None):
     """Summarize features for a cluster from a single featureset."""
-    cluster_bed = bed_df[bed_df['sequence'].isin(cluster_reads)]
+    cluster_bed = bed_df[bed_df['read'].isin(cluster_reads)]
 
     if len(cluster_bed) == 0:
         return ''
@@ -266,7 +284,7 @@ def main():
     results = []
 
     for cluster_id in clusters:
-        cluster_reads = set(assignments[assignments['cluster'] == cluster_id]['sequence'].tolist())
+        cluster_reads = set(assignments[assignments['cluster'] == cluster_id]['sequence'])
 
         if len(cluster_reads) < args.min_size:
             continue
@@ -304,16 +322,7 @@ def main():
                 row['enriched_pval'] = f"{sample_pval:.4e}" if sample_pval is not None else None
 
                 # Calculate log2_fc from sample-specific odds ratio
-                if sample_odds is not None and sample_odds > 0:
-                    log2_fc = math.log2(sample_odds)
-                    row['log2_fc'] = round(max(-10, min(10, log2_fc)), 2)
-                elif sample_odds == 0:
-                    row['log2_fc'] = -10
-                elif sample_odds is not None and math.isinf(sample_odds):
-                    row['log2_fc'] = 10
-                else:
-                    row['log2_fc'] = None
-
+                row['log2_fc'] = _calculate_log2_fc(sample_odds)
                 row['odds_ratio'] = round(sample_odds, 2) if sample_odds is not None else None
             else:
                 # Fallback to global q_value and odds_ratio (for group comparison mode)
@@ -321,18 +330,7 @@ def main():
                 row['q_value'] = f"{q:.4e}" if q is not None else None
                 odds = info.get('odds_ratio')
                 row['odds_ratio'] = round(odds, 2) if odds is not None else None
-
-                # Calculate log2_fc from odds_ratio
-                # Cap at +/-10 for Excel compatibility (avoids Inf values)
-                if odds is not None and odds > 0:
-                    log2_fc = math.log2(odds)
-                    row['log2_fc'] = round(max(-10, min(10, log2_fc)), 2)
-                elif odds == 0:
-                    row['log2_fc'] = -10  # Cap at -10 instead of -Inf
-                elif odds is not None and math.isinf(odds):
-                    row['log2_fc'] = 10  # Cap at +10 instead of +Inf
-                else:
-                    row['log2_fc'] = None
+                row['log2_fc'] = _calculate_log2_fc(odds)
 
         # Annotate each featureset
         for fs in featuresets:
