@@ -325,26 +325,31 @@ uuid           500      700    bsat_specific
 
 #### 2.3.2 3-Way Priority Merge (`--priority-merge`)
 
-This mode creates a hierarchy: subtelomeric features > region features > repeat features.
+This mode prioritizes subtelomeric features over region features and region features over repeat features with a few additional conditional rules.
 
-**Priority subtelomeric features:**
-- `canonical_telomere`, `noncanonical_telomere`, `ITS`, `TAR1`, `telomere_like_multigroup1`
+**Conditional rules:**
 
-**Region + Repeat merge rules:**
-- `ct` + `nonrepeat` → `ct`
-- `ct` + other repeat → use repeat
-- `rDNA` + `rRNA` → `rRNA`
-- `p_arm`, `q_arm`, `arm_multigroup1` + repeat → use repeat (background features)
-- Satellite features + repeat → keep satellite feature
+- `nonsubtelomeric` + `ct` + repeat (not `nonrepeat`) → use repeat feature
+- `nonsubtelomeric` + `rDNA` + `rRNA` → `rRNA`
+- `nonsubtelomeric` + `p_arm` + repeat → use repeat feature
+- `nonsubtelomeric` + `q_arm` + repeat → use repeat feature
 
-**Result:** Priority subtelomeric features are preserved; remaining intervals are merged using the conditional rules above.
+**Algorithm:**
+
+1. Extract priority subtelomeric features (`canonical_telomere`, `noncanonical_telomere`, `ITS`, `TAR1`, `telomere_like_multigroup1`)
+2. Merge region + repeat using conditional rules
+3. Subtract priority subtelomeric regions from region+repeat merged intervals
+4. Combine priority subtelomeric + remaining region/repeat intervals
 
 **Output characteristics:**
+
 - Reduces feature complexity by selecting single labels
+- Loses information from lower-priority feature sets
 - Biologically-informed feature selection
 - Lower feature dimensionality
+- Simpler interpretation
 
-**Implementation:** `KaryoScope_merge_beds.py --priority-merge`
+**Implementation:** `KaryoScope_merge_beds.py` (with `--priority-merge` or `--telomere-satellite-merge` flags)
 
 ### 2.4 Choosing a Merging Strategy {#24-choosing-a-merging-strategy}
 
