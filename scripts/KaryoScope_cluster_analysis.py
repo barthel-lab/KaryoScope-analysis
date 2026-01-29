@@ -416,6 +416,9 @@ def apply_plot_style(bg_mode):
         plt.style.use('dark_background')
     else:
         plt.style.use('default')
+    # Re-apply fonttype settings (style.use resets them)
+    plt.rcParams['pdf.fonttype'] = 42
+    plt.rcParams['svg.fonttype'] = 'none'
     return style
 
 def get_backgrounds_to_generate():
