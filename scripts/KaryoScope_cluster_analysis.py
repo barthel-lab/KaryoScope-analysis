@@ -453,7 +453,7 @@ def load_bed_file(filepath, sample_label=None):
                 chrom = parts[4] if len(parts) >= 5 else "unknown"
                 
                 records.append({
-                    'read': read,
+                    'sequence': read,
                     'start': start,
                     'end': end,
                     'feature': feature,
