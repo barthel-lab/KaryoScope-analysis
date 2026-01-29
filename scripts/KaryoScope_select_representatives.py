@@ -26,6 +26,31 @@ from collections import defaultdict
 
 import pandas as pd
 
+# Constants for read length filtering
+MIN_READ_LENGTH = 10000
+DEFAULT_PREFERRED_MIN = 20000
+DEFAULT_PREFERRED_MAX = 30000
+
+
+def _get_length(row, primary_col='read_span', fallback_col='read_length', default=0):
+    """Get read length with fallback to alternative column."""
+    if hasattr(row, 'get'):
+        return row.get(primary_col, row.get(fallback_col, default))
+    return getattr(row, primary_col, getattr(row, fallback_col, default))
+
+
+def _create_rep_dict(row, length_column, has_top_feature, n_feature_matches):
+    """Create representative read dictionary."""
+    return {
+        'sequence': row['sequence'],
+        'sample': row['sample'],
+        'read_length': _get_length(row, 'read_length', length_column),
+        'read_span': _get_length(row, 'read_span', length_column),
+        'centroid_distance': row['centroid_distance'],
+        'has_top_feature': has_top_feature,
+        'n_feature_matches': n_feature_matches
+    }
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Select representative reads for cluster visualization")
@@ -121,7 +146,8 @@ def check_read_features_cached(read_id, sample, cluster_features, feature_cache)
 
 
 def select_representatives(cluster_data, cluster_features, n_reps, feature_cache,
-                           preferred_min_length=20000, preferred_max_length=30000,
+                           preferred_min_length=DEFAULT_PREFERRED_MIN,
+                           preferred_max_length=DEFAULT_PREFERRED_MAX,
                            length_column='read_span'):
     """Select best representative reads for a cluster.
 
@@ -148,21 +174,21 @@ def select_representatives(cluster_data, cluster_features, n_reps, feature_cache
     in_range = cluster_data[(cluster_data[length_column] >= preferred_min_length) &
                             (cluster_data[length_column] <= preferred_max_length)].copy()
     in_range['_dist'] = abs(in_range[length_column] - preferred_mid)
-    in_range = in_range.sort_values('_dist')
+    in_range = in_range.sort_values('_dist').drop(columns=['_dist'])
 
     # For below range: sort by closeness to min (prefer longer)
-    below_range = cluster_data[(cluster_data[length_column] >= 10000) &
+    below_range = cluster_data[(cluster_data[length_column] >= MIN_READ_LENGTH) &
                                (cluster_data[length_column] < preferred_min_length)].copy()
     below_range['_dist'] = preferred_min_length - below_range[length_column]
-    below_range = below_range.sort_values('_dist')
+    below_range = below_range.sort_values('_dist').drop(columns=['_dist'])
 
     # For above range: sort by closeness to max (prefer shorter)
     above_range = cluster_data[cluster_data[length_column] > preferred_max_length].copy()
     above_range['_dist'] = above_range[length_column] - preferred_max_length
-    above_range = above_range.sort_values('_dist')
+    above_range = above_range.sort_values('_dist').drop(columns=['_dist'])
 
     # Very short reads last
-    very_short = cluster_data[cluster_data[length_column] < 10000].copy()
+    very_short = cluster_data[cluster_data[length_column] < MIN_READ_LENGTH].copy()
     very_short = very_short.sort_values(length_column, ascending=False)
 
     # Tier order: preferred range, then closest to range boundaries
@@ -182,15 +208,7 @@ def select_representatives(cluster_data, cluster_features, n_reps, feature_cache
             )
 
             if has_top or n_matches > 0:
-                selected.append({
-                    'read': row['sequence'],
-                    'sample': row['sample'],
-                    'read_length': row.get('read_length', row.get(length_column, 0)),
-                    'read_span': row.get('read_span', row.get(length_column, 0)),
-                    'centroid_distance': row['centroid_distance'],
-                    'has_top_feature': has_top,
-                    'n_feature_matches': n_matches
-                })
+                selected.append(_create_rep_dict(row, length_column, has_top, n_matches))
 
     # If not enough found, fall back to reads closest to preferred range
     if len(selected) < n_reps:
@@ -199,16 +217,8 @@ def select_representatives(cluster_data, cluster_features, n_reps, feature_cache
         for _, row in all_reads.iterrows():
             if len(selected) >= n_reps:
                 break
-            if row['sequence'] not in [s['sequence'] for s in selected]:
-                selected.append({
-                    'read': row['sequence'],
-                    'sample': row['sample'],
-                    'read_length': row.get('read_length', row.get(length_column, 0)),
-                    'read_span': row.get('read_span', row.get(length_column, 0)),
-                    'centroid_distance': row['centroid_distance'],
-                    'has_top_feature': False,
-                    'n_feature_matches': 0
-                })
+            if row['sequence'] not in {s['sequence'] for s in selected}:
+                selected.append(_create_rep_dict(row, length_column, False, 0))
 
     return selected
 
@@ -225,7 +235,7 @@ def normalize_by_rank(cluster_reps, n_per_cluster):
     # Prefer read_span (full length) over read_length (filtered)
     all_lengths = []
     for cluster_id, reps in cluster_reps.items():
-        lengths = sorted([r.get('read_span', r.get('read_length', 0)) for r in reps], reverse=True)
+        lengths = sorted([_get_length(r) for r in reps], reverse=True)
         all_lengths.append(lengths)
 
     # Compute median length for each rank position
@@ -252,7 +262,7 @@ def normalize_by_rank(cluster_reps, n_per_cluster):
             target = target_lengths[rank]
             # Find read with length closest to target (using read_span)
             best_idx = min(range(len(available)),
-                          key=lambda i: abs(available[i].get('read_span', available[i].get('read_length', 0)) - target))
+                          key=lambda i: abs(_get_length(available[i]) - target))
             assigned[rank] = available.pop(best_idx)
 
         normalized[cluster_id] = [r for r in assigned if r is not None]
@@ -347,7 +357,7 @@ def main():
             rows.append({
                 'cluster_id': cluster_id,
                 'rank': rank,
-                'read': rep['sequence'],
+                'sequence': rep['sequence'],
                 'sample': rep['sample'],
                 'read_length': rep.get('read_length', 0),
                 'read_span': rep.get('read_span', rep.get('read_length', 0)),
@@ -372,12 +382,15 @@ def main():
     print(f"  Clusters: {len(normalized_reps)}")
     print(f"  Total reads: {len(rows)}")
 
-    has_features = sum(1 for r in rows if r['has_top_feature'])
-    print(f"  Reads with top feature: {has_features} ({has_features/len(rows)*100:.1f}%)")
+    if rows:
+        has_features = sum(1 for r in rows if r['has_top_feature'])
+        print(f"  Reads with top feature: {has_features} ({has_features/len(rows)*100:.1f}%)")
 
-    # Use read_span for length statistics (actual read length)
-    spans = [r['read_span'] for r in rows]
-    print(f"  Read span range: {min(spans):,} - {max(spans):,} bp")
+        # Use read_span for length statistics (actual read length)
+        spans = [r['read_span'] for r in rows]
+        print(f"  Read span range: {min(spans):,} - {max(spans):,} bp")
+    else:
+        print("  No representatives selected")
 
 
 if __name__ == '__main__':

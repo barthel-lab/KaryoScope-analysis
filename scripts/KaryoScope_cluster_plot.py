@@ -2297,10 +2297,8 @@ def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_me
 
     for cluster_id in cluster_ids:
         cluster_df = full_df[full_df['cluster'] == cluster_id]
-        counts = {sample: 0 for sample in all_samples}
-        for sample in cluster_df['sample']:
-            if sample in counts:
-                counts[sample] += 1
+        sample_counts = cluster_df['sample'].value_counts()
+        counts = {sample: sample_counts.get(sample, 0) for sample in all_samples}
         cluster_sample_counts[cluster_id] = counts
         max_count = max(max_count, max(counts.values()) if counts.values() else 1)
 
@@ -3027,25 +3025,85 @@ def draw_enrichment_bubbles(d, cluster_y_start, cluster_y_end, x_center, cluster
         ))
 
 
-def draw_enrichment_grid(d, cluster_y_start, cluster_y_end, x_start, cluster_stats,
-                         sample_colors, bubble_radius=6, bubble_spacing=2):
+def _compute_bubble_style(pct, pval, odds, base_color, bubble_radius, max_log2_or=4.0):
+    """Compute bubble color, radius, and alpha from enrichment statistics.
+
+    Args:
+        pct: Percentage of cluster reads from this sample
+        pval: P-value for enrichment
+        odds: Odds ratio
+        base_color: Base hex color for the sample
+        bubble_radius: Maximum bubble radius
+        max_log2_or: Maximum log2(OR) for color intensity scaling
+
+    Returns:
+        tuple: (color, radius, alpha)
+    """
+    import math
+
+    # Size based on percentage (0-100% -> min to max radius)
+    size_scale = min(1.0, pct / 100.0) if pct > 0 else 0.1
+    radius = bubble_radius * max(0.3, size_scale)
+
+    # Calculate log2(odds ratio) for color intensity
+    if odds > 0 and odds != 1.0:
+        log2_or = math.log2(odds)
+        log2_or_clamped = max(-max_log2_or, min(max_log2_or, log2_or))
+        intensity = log2_or_clamped / max_log2_or if log2_or > 0 else 0
+    else:
+        intensity = 0
+
+    # Alpha based on significance
+    if pval > 0 and pval < 1:
+        neg_log_p = -math.log10(pval)
+        neg_log_p = min(10, max(0, neg_log_p))
+        alpha = 0.3 + 0.7 * (neg_log_p / 10)
+    else:
+        alpha = 0.3 if pval >= 1 else 1.0
+
+    # For samples with low percentage, use gray
+    if pct < 5:
+        color = '#444444'
+        alpha = 0.3
+    else:
+        try:
+            r = int(base_color[1:3], 16)
+            g = int(base_color[3:5], 16)
+            b = int(base_color[5:7], 16)
+            blend = 1 - intensity * 0.5
+            r = int(r + (255 - r) * blend * 0.3)
+            g = int(g + (255 - g) * blend * 0.3)
+            b = int(b + (255 - b) * blend * 0.3)
+            color = f'rgb({min(255, r)},{min(255, g)},{min(255, b)})'
+        except (ValueError, IndexError):
+            color = base_color
+
+    return color, radius, alpha
+
+
+def draw_enrichment_grid(d, cluster_pos_start, cluster_pos_end, grid_start, cluster_stats,
+                         sample_colors, bubble_radius=6, bubble_spacing=2,
+                         orientation='vertical', text_color='white', draw_labels=False):
     """Draw a grid of enrichment bubbles showing per-sample statistics.
+
+    Supports both vertical (clusters as rows) and horizontal (clusters as columns) layouts.
 
     Args:
         d: Drawing object
-        cluster_y_start: Dict of cluster_id -> y start position
-        cluster_y_end: Dict of cluster_id -> y end position
-        x_start: X position where grid starts
+        cluster_pos_start: Dict of cluster_id -> start position (y for vertical, x for horizontal)
+        cluster_pos_end: Dict of cluster_id -> end position
+        grid_start: Position where grid starts (x for vertical, y for horizontal)
         cluster_stats: Dict of cluster_id -> {'per_sample': {sample: {'pct', 'pval', 'odds'}}, 'samples': [...]}
         sample_colors: Dict of sample name -> hex color
         bubble_radius: Radius of each bubble
         bubble_spacing: Spacing between bubbles
+        orientation: 'vertical' (clusters as rows) or 'horizontal' (clusters as columns)
+        text_color: Color for labels (horizontal mode only)
+        draw_labels: Whether to draw sample labels (horizontal mode)
 
     Returns:
-        tuple: (grid_width, sample_order) - total width of the grid and ordered sample list
+        tuple: (grid_size, sample_order) - width for vertical, height for horizontal
     """
-    import math
-
     if not cluster_stats:
         return 0, []
 
@@ -3060,12 +3118,22 @@ def draw_enrichment_grid(d, cluster_y_start, cluster_y_end, x_start, cluster_sta
         return 0, []
 
     num_samples = len(sample_order)
-    grid_width = num_samples * (bubble_radius * 2 + bubble_spacing) - bubble_spacing
+    grid_size = num_samples * (bubble_radius * 2 + bubble_spacing) - bubble_spacing
 
-    # Max log2(OR) for color intensity scaling
-    max_log2_or = 4.0
+    # Draw sample labels for horizontal mode
+    if orientation == 'horizontal' and draw_labels:
+        label_x = min(cluster_pos_start.values()) - 5 if cluster_pos_start else 50
+        for i, sample in enumerate(sample_order):
+            y_center = grid_start + bubble_radius + i * (bubble_radius * 2 + bubble_spacing)
+            color = sample_colors.get(sample, text_color)
+            d.append(draw.Text(
+                sample, font_size=8, x=label_x, y=y_center,
+                fill=color, font_family='sans-serif',
+                text_anchor='end', dominant_baseline='middle'
+            ))
 
-    for cluster_id in cluster_y_start:
+    # Draw bubbles for each cluster
+    for cluster_id in cluster_pos_start:
         if cluster_id not in cluster_stats:
             continue
 
@@ -3075,10 +3143,10 @@ def draw_enrichment_grid(d, cluster_y_start, cluster_y_end, x_start, cluster_sta
         if not per_sample:
             continue
 
-        # Y position (center of cluster)
-        y_start_pos = cluster_y_start[cluster_id]
-        y_end_pos = cluster_y_end[cluster_id]
-        y_center = (y_start_pos + y_end_pos) / 2
+        # Cluster center position
+        pos_start = cluster_pos_start[cluster_id]
+        pos_end = cluster_pos_end[cluster_id]
+        cluster_center = (pos_start + pos_end) / 2
 
         # Draw a bubble for each sample
         for i, sample in enumerate(sample_order):
@@ -3087,66 +3155,23 @@ def draw_enrichment_grid(d, cluster_y_start, cluster_y_end, x_start, cluster_sta
             pval = sample_stats.get('pval', 1.0)
             odds = sample_stats.get('odds', 1.0)
 
-            # X position for this sample's bubble
-            x_center = x_start + bubble_radius + i * (bubble_radius * 2 + bubble_spacing)
-
-            # Get base color from sample_colors
             base_color = sample_colors.get(sample, '#888888')
+            color, radius, alpha = _compute_bubble_style(pct, pval, odds, base_color, bubble_radius)
 
-            # Size based on percentage (0-100% -> min to max radius)
-            # Use percentage to scale the bubble size
-            size_scale = min(1.0, pct / 100.0) if pct > 0 else 0.1
-            radius = bubble_radius * max(0.3, size_scale)  # Minimum 30% of max radius
-
-            # Calculate log2(odds ratio) for color intensity
-            if odds > 0 and odds != 1.0:
-                log2_or = math.log2(odds)
-                log2_or_clamped = max(-max_log2_or, min(max_log2_or, log2_or))
-                # Only show intensity if enriched (odds > 1)
-                if log2_or > 0:
-                    intensity = log2_or_clamped / max_log2_or
-                else:
-                    intensity = 0
+            # Position depends on orientation
+            sample_pos = grid_start + bubble_radius + i * (bubble_radius * 2 + bubble_spacing)
+            if orientation == 'vertical':
+                x_center, y_center = sample_pos, cluster_center
             else:
-                intensity = 0
+                x_center, y_center = cluster_center, sample_pos
 
-            # Alpha based on significance
-            if pval > 0 and pval < 1:
-                neg_log_p = -math.log10(pval)
-                neg_log_p = min(10, max(0, neg_log_p))
-                # Map to alpha: 0.3 (NS) to 1.0 (highly significant)
-                alpha = 0.3 + 0.7 * (neg_log_p / 10)
-            else:
-                alpha = 0.3 if pval >= 1 else 1.0
-
-            # For samples with low percentage, use gray
-            if pct < 5:
-                color = '#444444'
-                alpha = 0.3
-            else:
-                # Use sample color with intensity based on enrichment
-                # Convert hex to RGB, then blend toward white based on inverse intensity
-                try:
-                    r = int(base_color[1:3], 16)
-                    g = int(base_color[3:5], 16)
-                    b = int(base_color[5:7], 16)
-                    # Blend toward white for lower intensity
-                    blend = 1 - intensity * 0.5  # At max intensity, 50% saturation
-                    r = int(r + (255 - r) * blend * 0.3)
-                    g = int(g + (255 - g) * blend * 0.3)
-                    b = int(b + (255 - b) * blend * 0.3)
-                    color = f'rgb({min(255, r)},{min(255, g)},{min(255, b)})'
-                except (ValueError, IndexError):
-                    color = base_color
-
-            # Draw bubble
             d.append(draw.Circle(
                 x_center, y_center, radius,
                 fill=color, fill_opacity=alpha,
                 stroke='white', stroke_width=0.3
             ))
 
-    return grid_width, sample_order
+    return grid_size, sample_order
 
 
 def draw_enrichment_grid_header(d, x_start, y_pos, sample_order, sample_colors,
@@ -3254,138 +3279,6 @@ def draw_grid_legend(d, x_start, y_start, sample_order, sample_colors, text_colo
         d.append(draw.Circle(cx, cy + 5, bubble_radius * 0.7, fill=color, stroke='white', stroke_width=0.3))
         d.append(draw.Text(sample, font_size=7, x=cx + bubble_radius + 5, y=cy + 8,
                           fill=color, font_family='sans-serif', text_anchor='start'))
-
-
-def draw_enrichment_grid_horizontal(d, cluster_x_start, cluster_x_end, y_start, cluster_stats,
-                                     sample_colors, bubble_radius=6, bubble_spacing=2, text_color='white'):
-    """Draw a grid of enrichment bubbles for horizontal mode (bubbles below dendrogram).
-
-    In horizontal mode:
-    - Clusters are arranged horizontally (left to right)
-    - Each cluster gets a column of bubbles (one per sample)
-    - Samples are stacked vertically (rows)
-    - Sample labels are on the left
-
-    Args:
-        d: Drawing object
-        cluster_x_start: Dict of cluster_id -> x start position
-        cluster_x_end: Dict of cluster_id -> x end position
-        y_start: Y position where grid starts (below dendrogram)
-        cluster_stats: Dict of cluster_id -> {'per_sample': {sample: {'pct', 'pval', 'odds'}}, 'samples': [...]}
-        sample_colors: Dict of sample name -> hex color
-        bubble_radius: Radius of each bubble
-        bubble_spacing: Spacing between bubbles
-        text_color: Color for text labels
-
-    Returns:
-        tuple: (grid_height, sample_order) - total height of the grid and ordered sample list
-    """
-    import math
-
-    if not cluster_stats:
-        return 0, []
-
-    # Get sample names from first cluster that has per_sample data
-    sample_order = []
-    for stats in cluster_stats.values():
-        if stats.get('samples'):
-            sample_order = stats['samples']
-            break
-
-    if not sample_order:
-        return 0, []
-
-    num_samples = len(sample_order)
-    grid_height = num_samples * (bubble_radius * 2 + bubble_spacing) - bubble_spacing
-
-    # Max log2(OR) for color intensity scaling
-    max_log2_or = 4.0
-
-    # Draw sample labels on the left
-    label_x = min(cluster_x_start.values()) - 5 if cluster_x_start else 50
-    for i, sample in enumerate(sample_order):
-        y_center = y_start + bubble_radius + i * (bubble_radius * 2 + bubble_spacing)
-        color = sample_colors.get(sample, text_color)
-        d.append(draw.Text(
-            sample, font_size=8, x=label_x, y=y_center,
-            fill=color, font_family='sans-serif',
-            text_anchor='end', dominant_baseline='middle'
-        ))
-
-    # Draw bubbles for each cluster
-    for cluster_id in cluster_x_start:
-        if cluster_id not in cluster_stats:
-            continue
-
-        stats = cluster_stats[cluster_id]
-        per_sample = stats.get('per_sample', {})
-
-        if not per_sample:
-            continue
-
-        # X position (center of cluster)
-        x_start_pos = cluster_x_start[cluster_id]
-        x_end_pos = cluster_x_end[cluster_id]
-        x_center = (x_start_pos + x_end_pos) / 2
-
-        # Draw a bubble for each sample (vertically stacked)
-        for i, sample in enumerate(sample_order):
-            sample_stats = per_sample.get(sample, {})
-            pct = sample_stats.get('pct', 0)
-            pval = sample_stats.get('pval', 1.0)
-            odds = sample_stats.get('odds', 1.0)
-
-            # Y position for this sample's bubble
-            y_center = y_start + bubble_radius + i * (bubble_radius * 2 + bubble_spacing)
-
-            # Get base color from sample_colors
-            base_color = sample_colors.get(sample, '#888888')
-
-            # Size based on percentage (0-100% -> min to max radius)
-            size_scale = min(1.0, pct / 100.0) if pct > 0 else 0.1
-            radius = bubble_radius * max(0.3, size_scale)
-
-            # Calculate log2(odds ratio) for color intensity
-            if odds > 0 and odds != 1.0:
-                log2_or = math.log2(odds)
-                log2_or_clamped = max(-max_log2_or, min(max_log2_or, log2_or))
-                intensity = log2_or_clamped / max_log2_or if log2_or > 0 else 0
-            else:
-                intensity = 0
-
-            # Alpha based on significance
-            if pval > 0 and pval < 1:
-                neg_log_p = -math.log10(pval)
-                neg_log_p = min(10, max(0, neg_log_p))
-                alpha = 0.3 + 0.7 * (neg_log_p / 10)
-            else:
-                alpha = 0.3 if pval >= 1 else 1.0
-
-            # For samples with low percentage, use gray
-            if pct < 5:
-                color = '#444444'
-                alpha = 0.3
-            else:
-                try:
-                    r = int(base_color[1:3], 16)
-                    g = int(base_color[3:5], 16)
-                    b = int(base_color[5:7], 16)
-                    blend = 1 - intensity * 0.5
-                    r = int(r + (255 - r) * blend * 0.3)
-                    g = int(g + (255 - g) * blend * 0.3)
-                    b = int(b + (255 - b) * blend * 0.3)
-                    color = f'rgb({min(255, r)},{min(255, g)},{min(255, b)})'
-                except (ValueError, IndexError):
-                    color = base_color
-
-            # Draw bubble
-            d.append(draw.Circle(
-                x_center, y_center, radius,
-                fill=color, fill_opacity=alpha,
-                stroke='white', stroke_width=0.3
-            ))
-
-    return grid_height, sample_order
 
 
 def draw_bubble_legend(d, x_start, y_start, cluster_stats, text_color='white', max_radius=8, min_radius=2):
@@ -3731,10 +3624,10 @@ def draw_feature_bars(d, drawing_data, featuresets, bar_width, read_heights, num
 
                     # Add filled area under the line (to base_x)
                     # Create path: start at bottom-left, go up the line, then back down
-                    path_d = f"M {base_x},{points[0][1]} "
-                    for x, y in points:
-                        path_d += f"L {x},{y} "
-                    path_d += f"L {base_x},{points[-1][1]} Z"
+                    path_parts = [f"M {base_x},{points[0][1]}"]
+                    path_parts.extend(f"L {x},{y}" for x, y in points)
+                    path_parts.append(f"L {base_x},{points[-1][1]} Z")
+                    path_d = " ".join(path_parts)
 
                     d.append(draw.Path(
                         d=path_d,
@@ -4071,41 +3964,26 @@ def _find_common_label(feature_names):
     return unique_cleaned[0] if unique_cleaned else 'unknown'
 
 
-def draw_color_legends(d, featuresets, featureset_colors, featureset_color_order,
-                       fs_display_names, color_legend_y_start, left_margin, text_color,
-                       displayed_features=None):
-    """Draw featureset color legends at bottom.
+def _build_legend_items(featuresets, featureset_colors, featureset_color_order, displayed_features=None):
+    """Build legend items for each featureset.
 
     Args:
-        d: Drawing object
         featuresets: List of featuresets to include
         featureset_colors: Dict of fs -> feature -> (color, opacity)
         featureset_color_order: Dict of fs -> list of feature names (ordering)
-        fs_display_names: Dict of fs -> display name
-        color_legend_y_start: Y position to start legend
-        left_margin: Left margin for positioning
-        text_color: Color for text
         displayed_features: Optional dict of fs -> set of actually displayed features.
-                           If provided, only these features are shown in the legend,
-                           grouped by color with common labels.
+
+    Returns:
+        dict: fs -> list of (color_hex, display_name)
     """
     import re
 
-    color_box_size = 10
-    color_text_offset = 14
-    colors_per_column = 12  # More items per column = fewer columns
-    item_width = 120  # Narrower columns
-    row_height = 14  # Tighter row spacing
-
-    # Build legend items for each featureset
-    # If displayed_features is provided, filter and group by color
-    legend_items = {}  # fs -> list of (color, display_name)
+    legend_items = {}
 
     for fs in featuresets:
         fs_colors = featureset_colors.get(fs, {})
 
         if displayed_features is not None and fs in displayed_features:
-            # Filter to only displayed features, group by color
             fs_displayed = displayed_features.get(fs, set())
             if not fs_displayed:
                 legend_items[fs] = []
@@ -4116,7 +3994,7 @@ def draw_color_legends(d, featuresets, featureset_colors, featureset_color_order
             for feature_name in fs_displayed:
                 color_info = fs_colors.get(feature_name)
                 if color_info is None:
-                    color_hex = '#808080'  # Default gray for unknown features
+                    color_hex = '#808080'
                 elif isinstance(color_info, tuple):
                     color_hex = color_info[0]
                 else:
@@ -4133,19 +4011,44 @@ def draw_color_legends(d, featuresets, featureset_colors, featureset_color_order
                 if len(feature_names) > 1:
                     display_name = _find_common_label(feature_names)
                 else:
-                    # Single feature - clean up and strip trailing numbers from multigroup names
                     display_name = feature_names[0].replace('_', ' ').replace(' specific', '')
                     if 'multigroup' in display_name.lower():
                         display_name = re.sub(r'\d+$', '', display_name).rstrip()
                 items.append((color_hex, display_name))
             legend_items[fs] = items
         else:
-            # No filtering - use all features in order
             items = []
             for feature_name in featureset_color_order.get(fs, []):
                 color, opacity = fs_colors.get(feature_name, ("#ffffff", 1.0))
                 items.append((color, feature_name))
             legend_items[fs] = items
+
+    return legend_items
+
+
+def draw_color_legends(d, featuresets, featureset_colors, featureset_color_order,
+                       fs_display_names, color_legend_y_start, left_margin, text_color,
+                       displayed_features=None):
+    """Draw featureset color legends at bottom (horizontal layout).
+
+    Args:
+        d: Drawing object
+        featuresets: List of featuresets to include
+        featureset_colors: Dict of fs -> feature -> (color, opacity)
+        featureset_color_order: Dict of fs -> list of feature names (ordering)
+        fs_display_names: Dict of fs -> display name
+        color_legend_y_start: Y position to start legend
+        left_margin: Left margin for positioning
+        text_color: Color for text
+        displayed_features: Optional dict of fs -> set of actually displayed features.
+    """
+    color_box_size = 10
+    color_text_offset = 14
+    colors_per_column = 12
+    item_width = 120
+    row_height = 14
+
+    legend_items = _build_legend_items(featuresets, featureset_colors, featureset_color_order, displayed_features)
 
     def get_featureset_width(fs):
         num_items = len(legend_items.get(fs, []))
@@ -4214,57 +4117,11 @@ def draw_color_legends_vertical(d, featuresets, featureset_colors, featureset_co
     Returns:
         float: Total height used by the legend
     """
-    import re
-
     swatch_size = 8
     item_height = 11
-    section_gap = 15  # Gap between featureset sections
+    section_gap = 15
 
-    # Build legend items for each featureset (same logic as horizontal version)
-    legend_items = {}
-
-    for fs in featuresets:
-        fs_colors = featureset_colors.get(fs, {})
-
-        if displayed_features is not None and fs in displayed_features:
-            fs_displayed = displayed_features.get(fs, set())
-            if not fs_displayed:
-                legend_items[fs] = []
-                continue
-
-            # Group features by color
-            color_to_features = {}
-            for feature_name in fs_displayed:
-                color_info = fs_colors.get(feature_name)
-                if color_info is None:
-                    color_hex = '#808080'
-                elif isinstance(color_info, tuple):
-                    color_hex = color_info[0]
-                else:
-                    color_hex = color_info
-                if color_hex not in color_to_features:
-                    color_to_features[color_hex] = []
-                color_to_features[color_hex].append(feature_name)
-
-            # Sort by feature name for consistency
-            sorted_items = sorted(color_to_features.items(), key=lambda x: x[1][0] if x[1] else '')
-
-            items = []
-            for color_hex, feature_names in sorted_items:
-                if len(feature_names) > 1:
-                    display_name = _find_common_label(feature_names)
-                else:
-                    display_name = feature_names[0].replace('_', ' ').replace(' specific', '')
-                    if 'multigroup' in display_name.lower():
-                        display_name = re.sub(r'\d+$', '', display_name).rstrip()
-                items.append((color_hex, display_name))
-            legend_items[fs] = items
-        else:
-            items = []
-            for feature_name in featureset_color_order.get(fs, []):
-                color, opacity = fs_colors.get(feature_name, ("#ffffff", 1.0))
-                items.append((color, feature_name))
-            legend_items[fs] = items
+    legend_items = _build_legend_items(featuresets, featureset_colors, featureset_color_order, displayed_features)
 
     # Draw legends vertically
     current_y = legend_y_start
@@ -5792,11 +5649,13 @@ def main():
     if use_enrichment_grid_horiz and grid_sample_names_horiz:
         # Position grid just below the dendrogram base (dendro_base_y = dendro_top_margin + 20)
         grid_y_start = dendro_top_margin + 25  # Just below dendrogram leaves
-        draw_enrichment_grid_horizontal(d, cluster_x_start, cluster_x_end, grid_y_start,
-                                        cluster_stats, sample_colors,
-                                        bubble_radius=grid_bubble_radius_horiz,
-                                        bubble_spacing=grid_bubble_spacing_horiz,
-                                        text_color=text_color)
+        draw_enrichment_grid(d, cluster_x_start, cluster_x_end, grid_y_start,
+                             cluster_stats, sample_colors,
+                             bubble_radius=grid_bubble_radius_horiz,
+                             bubble_spacing=grid_bubble_spacing_horiz,
+                             orientation='horizontal',
+                             text_color=text_color,
+                             draw_labels=True)
 
     # Cluster brackets - positioned below feature labels per cluster
     # Calculate label height: longest featureset name × font_size (~4.5px per char for font_size=6)
