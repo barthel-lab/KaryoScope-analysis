@@ -105,6 +105,10 @@ def create_vertical_bubble_plot(df, labels, args):
         text_color = 'black'
         grid_color = '#cccccc'
 
+    # Re-apply fonttype settings (style.use resets them)
+    plt.rcParams['pdf.fonttype'] = 42
+    plt.rcParams['svg.fonttype'] = 'none'
+
     # Parse figure size
     figsize = tuple(float(x) for x in args.figsize.split(','))
     fig, ax = plt.subplots(figsize=figsize)

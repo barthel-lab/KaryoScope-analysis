@@ -1294,6 +1294,10 @@ def main():
         STRIP_COLOR = 'black'
         STRIP_ALPHA = 0.3
 
+    # Re-apply fonttype settings (style.use resets them)
+    plt.rcParams['pdf.fonttype'] = 42
+    plt.rcParams['svg.fonttype'] = 'none'
+
     print("=" * 60)
     print("KaryoScope Cluster Diagnostics")
     print("=" * 60)

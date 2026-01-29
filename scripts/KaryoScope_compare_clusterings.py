@@ -344,6 +344,9 @@ def main():
         TEXT_COLOR = 'black'
         HIST_COLORS = ['blue', 'orange']
     plt.rcParams['figure.dpi'] = 150
+    # Re-apply fonttype settings (style.use resets them)
+    plt.rcParams['pdf.fonttype'] = 42
+    plt.rcParams['svg.fonttype'] = 'none'
 
     with PdfPages(plots_file) as pdf:
         # Page 1: Enrichment flow and cluster sizes

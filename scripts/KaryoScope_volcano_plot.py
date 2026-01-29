@@ -89,6 +89,10 @@ def create_volcano_plot(df, labels, args):
         grid_color = '#cccccc'
         threshold_color = 'black'
 
+    # Re-apply fonttype settings (style.use resets them)
+    plt.rcParams['pdf.fonttype'] = 42
+    plt.rcParams['svg.fonttype'] = 'none'
+
     fig, ax = plt.subplots(figsize=figsize)
 
     if args.dark_mode:
