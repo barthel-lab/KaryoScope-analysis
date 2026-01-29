@@ -39,6 +39,10 @@ import matplotlib
 import matplotlib.colors as mcolors
 matplotlib.use('Agg')
 
+# Keep text editable in output files (not converted to paths)
+plt.rcParams['pdf.fonttype'] = 42
+plt.rcParams['svg.fonttype'] = 'none'
+
 # --- Argument parsing ---
 parser = argparse.ArgumentParser(
     description="Analyze KaryoScope clustering to identify sample-enriched clusters.",
