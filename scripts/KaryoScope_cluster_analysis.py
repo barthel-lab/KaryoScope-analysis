@@ -2605,7 +2605,11 @@ for bg_mode, suffix in get_backgrounds_to_generate():
     style = apply_plot_style(bg_mode)
 
     # === Plot 1: Bubble plot (enrichment significance and direction) ===
-    fig1, ax1 = plt.subplots(figsize=(max(14, n_clusters * 0.4 + 4), n_rows * 0.8 + 3))
+    # Scale figure size for approximately square cells
+    cell_size = 0.5  # inches per cell
+    fig_width = max(10, n_clusters * cell_size + 4)
+    fig_height = max(4, n_rows * cell_size + 2)
+    fig1, ax1 = plt.subplots(figsize=(fig_width, fig_height))
     fig1.patch.set_facecolor(style['bg_color'])
     ax1.set_facecolor(style['bg_color'])
 
@@ -2661,11 +2665,12 @@ for bg_mode, suffix in get_backgrounds_to_generate():
     print(f"  Saved bubble plot: {bubble_file}")
 
     # === Plot 2: Heatmap of sample/group percentage per cluster ===
-    fig2, ax2 = plt.subplots(figsize=(max(14, n_clusters * 0.4 + 4), n_rows * 0.8 + 3))
+    # Scale figure size for approximately square cells (same as bubble plot)
+    fig2, ax2 = plt.subplots(figsize=(fig_width, fig_height))
     fig2.patch.set_facecolor(style['bg_color'])
     ax2.set_facecolor(style['bg_color'])
 
-    im = ax2.imshow(pct_matrix, aspect='auto', cmap='YlOrRd', vmin=0, vmax=100)
+    im = ax2.imshow(pct_matrix, aspect='equal', cmap='YlOrRd', vmin=0, vmax=100)
 
     # Add text annotations
     for i in range(n_rows):
