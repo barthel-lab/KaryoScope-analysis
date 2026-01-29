@@ -12,8 +12,8 @@ KaryoScope analysis is a graph-based method for analyzing sequencing data that i
 
    - 1.1 [K-mer Coordinate System](#11-k-mer-classification-overview)
    - 1.2 [Feature Sets](#12-feature-sets)
-   - 1.3 [Graph Representation](#14-graph-representation)
-   - 1.5 [Sequence Filtering and Quality Control](#15-sequence-filtering-and-quality-control)
+   - 1.3 [Graph Representation](#13-graph-representation)
+   - 1.4 [Sequence Filtering and Quality Control](#14-sequence-filtering-and-quality-control)
 
 **2. [Feature Set Merging Strategies](#2-feature-set-merging-strategies)**
 
@@ -148,7 +148,7 @@ This feature set consist of two main groups: arm features and centromere feature
 
 **Note:** KaryoScope annotations are output to a separate BED file for each feature set. One may wish to merge multiple feature sets such that every genomic interval is annotated with the corresponding features from all the feature sets being merged (see [Feature Set Merging Strategies](#2-feature-set-merging-strategies)).
 
-### 1.3 Graph Representation {#14-graph-representation}
+### 1.3 Graph Representation {#13-graph-representation}
 
 We construct a **path graph** for each annotated sequence:
 
@@ -168,28 +168,29 @@ Edge weights: {20, 80, 10}
 
 This graph representation enables clustering sequences by their structural patterns (which features appear and how they connect).
 
-### 1.5 Sequence Filtering and Quality Control {#15-sequence-filtering-and-quality-control}
+### 1.4 Sequence Filtering and Quality Control {#14-sequence-filtering-and-quality-control}
 
 Sequences undergo filtering to ensure optimized input for clustering (default parameters shown below, modifiable via script arguments):
 
-#### 1.5.1 Sequence Length Filtering
+#### 1.4.1 Sequence Length Filtering
 
 **Length filtering (default):**
 
-- Minimum: 10,000 bp (10 kb) - removes short sequences
-- Maximum: 50,000 bp (50 kb) - removes rare ultra-long outliers
+- Minimum: 10 Kbp - removes short sequences
+- Maximum: 50 Kbp - removes long sequences
 - Rationale: Focuses on reasonably long sequences with sufficient feature content
 
-#### 1.5.2 Feature Masking
+#### 1.4.2 Feature Masking
 
 **Feature exclusion (default):**
 
 Certain features are masked/excluded from analysis:
-- `novel`: Uncharacterized k-mers (noisy, uninformative)
-- `unknown`: Ambiguous features
-- `canonical_telomere*`: Canonical telomere repeats (excluded to focus on subtelomeric regions)
+
+- `novel`: K-mers not present in the database (noisy, uninformative)
+- `canonical_telomere_specific`: Canonical telomere repeats (excluded to focus on subtelomeric regions)
 
 **Rationale:**
+
 - Removes noise and focuses on informative genomic features
 - Canonical telomeres are excluded because KaryoScope focuses on subtelomeric architecture
 
@@ -288,6 +289,7 @@ This mode prioritizes subtelomeric features over region/centromeric features.
 - `noncanonical_telomere_specific`
 - `TAR1_specific`
 - `ITS_specific`
+- `telomere_like_multigroup1`
 
 **Algorithm:**
 
@@ -333,13 +335,6 @@ This mode prioritizes subtelomeric features over region features and region feat
 - `nonsubtelomeric` + `rDNA` + `rRNA` → `rRNA`
 - `nonsubtelomeric` + `p_arm` + repeat → use repeat feature
 - `nonsubtelomeric` + `q_arm` + repeat → use repeat feature
-
-**Algorithm:**
-
-1. Extract priority subtelomeric features (`canonical_telomere`, `noncanonical_telomere`, `ITS`, `TAR1`, `telomere_like_multigroup1`)
-2. Merge region + repeat using conditional rules
-3. Subtract priority subtelomeric regions from region+repeat merged intervals
-4. Combine priority subtelomeric + remaining region/repeat intervals
 
 **Output characteristics:**
 
