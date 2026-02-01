@@ -140,6 +140,46 @@ The analysis produces the following outputs in `results/`:
 
 ---
 
+## Example Output Figures
+
+### Cluster Analysis Overview
+
+The main cluster analysis figure shows the dendrogram (left) and sample composition per cluster (right):
+
+![Cluster Analysis](images/Core4.cluster_analysis.png)
+
+### UMAP Projection
+
+UMAP visualization shows sample separation in 2D space. Points are colored by sample (left) and cluster (right):
+
+![UMAP](images/Core4.umap.png)
+
+### k-Selection Diagnostics
+
+The k-selection plot shows how different metrics vary with cluster count, helping identify the optimal k:
+
+![k-Selection](images/Core4.k_selection.png)
+
+### Enrichment Bubble Plot
+
+Bubble size indicates cluster size, color indicates enrichment direction, and position shows statistical significance:
+
+![Enrichment Bubble](images/Core4.enrichment_bubble.png)
+
+### Sample Composition Heatmap
+
+Heatmap showing the percentage of each sample within each cluster:
+
+![Sample Percentage](images/Core4.sample_percentage.png)
+
+### Circular Dendrogram
+
+Circular dendrogram with sample annotations around the perimeter:
+
+![Circular Dendrogram](images/Core4.circular_dendrogram.png)
+
+---
+
 ## Interpreting Results
 
 ### Cluster Summary
@@ -186,5 +226,5 @@ A ⚠️ next to the centroid indicates that the centroid sequence comes from a 
 ## Next Steps
 
 1. **Visualize specific clusters**: Use `KaryoScope_cluster_plot.py` to visualize reads from specific clusters
-2. **Explore UMAP**: Open `Core4.umap.pdf` to see sample separation in 2D
-3. **Check enrichment patterns**: Review `Core4.enrichment_bubble.pdf` for significance patterns
+2. **Explore the figures**: Review the output PDFs for detailed visualization
+3. **Check enrichment patterns**: Look for sample-specific structural patterns in the enrichment results
