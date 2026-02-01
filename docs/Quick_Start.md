@@ -160,6 +160,12 @@ The k-selection plot shows how different metrics vary with cluster count, helpin
 
 ![k-Selection](images/Core4.k_selection.png)
 
+### Composite-Knee Diagnostic
+
+The composite-knee method finds the point of diminishing returns by measuring distance from the diagonal:
+
+![Composite Knee](images/Core4.composite_knee_diagnostic.png)
+
 ### Enrichment Bubble Plot
 
 Bubble size indicates cluster size, color indicates enrichment direction, and position shows statistical significance:
