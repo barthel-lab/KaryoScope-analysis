@@ -102,7 +102,7 @@ python scripts/KaryoScope_cluster_analysis.py \
   --comparison-mode per-sample \
   --k-selection composite-knee \
   --min-sequence-length 10000 \
-  --max-sequence-length 100000 \
+  --max-sequence-length 50000 \
   --exclude-features "canonical_telomere*,novel,unknown" \
   --umap \
   --circular-dendrogram
@@ -115,7 +115,7 @@ python scripts/KaryoScope_cluster_analysis.py \
 | `--comparison-mode` | `per-sample` | Test each sample independently |
 | `--k-selection` | `composite-knee` | Auto-select optimal cluster count |
 | `--min-sequence-length` | `10000` | Minimum read length (bp) |
-| `--max-sequence-length` | `100000` | Maximum read length (bp) |
+| `--max-sequence-length` | `50000` | Maximum read length (bp) |
 | `--exclude-features` | `canonical_telomere*,novel,unknown` | Filter low-information features |
 
 **Expected runtime:** ~5-6 minutes for 8,000 sequences
@@ -190,18 +190,18 @@ Circular dendrogram with sample annotations around the perimeter:
 
 ### Cluster Summary
 
-The analysis produces ~40 clusters with enrichment categories:
+The analysis produces ~41 clusters with enrichment categories:
 
 ```
 Summary
 ============================================================
-Total sequences: 8,422
-Number of clusters: 40
+Total sequences: 7,182
+Number of clusters: 41
   - BJ-enriched: 6
-  - HeLa-enriched: 10
+  - HeLa-enriched: 9
   - IMR90-enriched: 3
-  - U2OS-enriched: 13
-  - mixed: 8
+  - U2OS-enriched: 12
+  - mixed: 11
 ```
 
 ### Reading cluster_analysis.tsv
