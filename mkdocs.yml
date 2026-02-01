@@ -21,7 +21,9 @@ theme:
 
 nav:
   - Home: index.md
+  - Quick Start: Quick_Start.md
   - Technical Guide: Comprehensive_Technical_Guide.md
+  - Preprocessing: KaryoScope_Preprocessing.md
 
 plugins:
   - search

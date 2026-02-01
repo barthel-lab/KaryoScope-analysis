@@ -41,5 +41,7 @@ env/
 # Logs
 *.log
 
-# Data
-data/
+# Data (keep raw/merged BED files local)
+data/raw_bed/
+data/merged_bed/
+!data/samples.tsv
