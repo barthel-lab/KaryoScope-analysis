@@ -111,26 +111,26 @@ KaryoScope consists of 6 feature sets:
 
 **2. Region feature set:** Chromosomal regions and centromeric satellites
 
-This feature set consist of two main groups: arm features and centromere features.
+This feature set consist of three main groups: arm features, centromere features, and rDNA.
 
 - Arm Features: `p_arm_specific`, `q_arm_specific`
-- Centromere Features: `active_specific` (active aSat HOR), `inactive_specific` (inactive aSat HOR), `divergent_specific` (divergent aSat HOR), `monomeric_specific` (monomeric aSat), `hsat1A_specific`, `hsat1B_specific`, `hsat2_specific`, `hsat3_specific`, `bsat_specific` (beta satellite), `gsat_specific` (gamma satellite), `censat_specific` (other centromeric satellites), `ct_specific` (centromeric transition regions)
+- Centromere Features: `active_specific` (active aSat HOR), `divergent_specific` (divergent aSat HOR), `inactive_specific` (inactive aSat HOR), `monomeric_specific` (monomeric aSat), `bsat_specific` (beta satellite), `censat_specific` (other centromeric satellites), `ct_specific` (centromeric transition regions), `gsat_specific` (gamma satellite), `hsat1A_specific`, `hsat1B_specific`, `hsat2_specific`, `hsat3_specific`
 - rDNA Feature: `rDNA_specific`
 - Phylogeny-informed Features: `arm_multigroup1`, `centromere_multigroup1`, `asat_multigroup1`, `hor_multigroup1`, `hsat_multigroup1`, `hsat1_multigroup1`
 - File suffix: `.region.bed`
 
 **3. Subtelomeric feature set:** Telomeric and subtelomeric sequences
 
-- Main Features: `canonical_telomere_specific`, `noncanonical_telomere_specific`, `ITS_specific` (interstitial telomeric sequence), `TAR1_specific`
+- Main Features: `canonical_telomere_specific`, `ITS_specific` (interstitial telomeric sequence), `noncanonical_telomere_specific`, `TAR1_specific`
 - Non-features: `nonsubtelomeric_specific`
 - Phylogeny-informed Features: `telomere_like_multigroup1`
 - File suffix: `.subtelomeric.bed`
 
 **4. Repeat feature set:** Transposable elements and repetitive sequences
 
-- Main Features: `rRNA_specific`, `scRNA_specific`, `snRNA_specific`, `tRNA_specific`, `LINE_specific`, `Retroposon_specific`, `SINE_specific`, `LTR_specific`, `DNA_specific`, `RC_specific`, `Unknown_specific`, `D20S16_specific`
+- Main Features: `D20S16_specific`, `rRNA_specific`, `scRNA_specific`, `snRNA_specific`, `tRNA_specific`, `LINE_specific`, `Retroposon_specific`, `SINE_specific`, `LTR_specific`, `DNA_specific`, `RC_specific`, `Unknown_specific`
 - Non-features: `nonrepeat_specific`
-- Phylogeny-informed Features: `LINE-dependent_Retroposon_multigroup1`, `Class_I_Retrotransposition_multigroup1`, `Class_II_DNA_Transposition_multigroup1`, `Transposable_Element_multigroup1`, `Interspersed_Repeat_multigroup1`, `repeat_multigroup1`
+- Phylogeny-informed Features: `repeat_multigroup1`, `Interspersed_Repeat_multigroup1`, `Transposable_Element_multigroup1`, `Class_I_Retrotransposition_multigroup1`, `LINE-dependent_Retroposon_multigroup1`, `Class_II_DNA_Transposition_multigroup1`
 - File suffix: `.repeat.bed`
 
 **5. Gene feature set:** Coding region annotations
@@ -141,7 +141,7 @@ This feature set consist of two main groups: arm features and centromere feature
 
 **6. Acrocentric feature set:** Acrocentric sequences
 
-- Main Features: `DJ_specific` (distal junction of rDNA array), `PJ_specific` (proximal junction of rDNA array), `rDNA_specific`, `SST1_specific`, `PHR_specific` (pseudo-homologous regions)
+- Main Features: `DJ_specific` (distal junction of rDNA array), `PJ_specific` (proximal junction of rDNA array), `rDNA_specific`, `PHR_specific` (pseudo-homologous regions), `SST1_specific`
 - Non-features: `nonacrocentric_specific`
 - Phylogeny-informed Features: `array_multigroup1`
 - File suffix: `.acrocentric.bed`
