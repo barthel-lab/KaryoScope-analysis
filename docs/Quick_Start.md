@@ -190,18 +190,20 @@ Circular dendrogram with sample annotations around the perimeter:
 
 ### Cluster Summary
 
-The analysis produces ~41 clusters with enrichment categories:
+The analysis produces ~42 clusters with enrichment categories:
 
 ```
 Summary
 ============================================================
 Total sequences: 7,182
-Number of clusters: 41
+Number of clusters: 42
   - BJ-enriched: 6
   - HeLa-enriched: 9
+  - HeLa-depleted: 2
   - IMR90-enriched: 3
   - U2OS-enriched: 12
-  - mixed: 11
+  - U2OS-depleted: 1
+  - mixed: 9
 ```
 
 ### Reading cluster_analysis.tsv
@@ -215,13 +217,14 @@ Key columns:
 | `{Sample}%` | Percentage of cluster from each sample |
 | `P-value` | Fisher's exact test p-value |
 | `Q-value` | FDR-corrected q-value |
-| `Enrichment` | Enrichment call (e.g., "U2OS-enriched", "mixed") |
+| `Enrichment` | Enrichment call (e.g., "U2OS-enriched", "HeLa-depleted", "mixed") |
 | `Centroid` | Sample of the centroid sequence (⚠️ = mismatch) |
 
 ### Enrichment Categories
 
 - **Sample-enriched** (q < 0.05): Cluster significantly over-represented by one sample
-- **mixed**: No significant enrichment after FDR correction
+- **Sample-depleted** (q < 0.05): Cluster significantly under-represented by one sample
+- **mixed**: No significant enrichment or depletion after FDR correction
 
 ### Centroid Warnings
 
