@@ -108,6 +108,7 @@ KaryoScope consists of 6 feature sets:
 - Main Features: `chr1_specific`, `chr2_specific`, ..., `chr22_specific`, `chrX_specific`, `chrY_specific`
 - Phylogeny-informed Features: `chromosome_multigroup1`, `autosome_multigroup1`, `acrocentric_multigroup1`, `metacentric_multigroup1`, `submetacentric_multigroup1`, `sex_multigroup1`
 - File suffix: `.chromosome.bed`
+- Feature phylogeny: ![Chromosome feature phylogeny](images/KS_human_CHM13.chromosome.phylogeny.svg)
 
 **2. Region feature set:** Chromosomal regions and centromeric satellites
 
@@ -118,6 +119,7 @@ This feature set consist of three main groups: arm features, centromere features
 - rDNA Feature: `rDNA_specific`
 - Phylogeny-informed Features: `arm_multigroup1`, `centromere_multigroup1`, `asat_multigroup1`, `hor_multigroup1`, `hsat_multigroup1`, `hsat1_multigroup1`
 - File suffix: `.region.bed`
+- Feature phylogeny: ![Region feature phylogeny](images/KS_human_CHM13.region.phylogeny.svg)
 
 **3. Subtelomeric feature set:** Telomeric and subtelomeric sequences
 
@@ -125,6 +127,7 @@ This feature set consist of three main groups: arm features, centromere features
 - Non-features: `nonsubtelomeric_specific`
 - Phylogeny-informed Features: `telomere_like_multigroup1`
 - File suffix: `.subtelomeric.bed`
+- Feature phylogeny: ![Subtelomeric feature phylogeny](images/KS_human_CHM13.subtelomeric.phylogeny.svg)
 
 **4. Repeat feature set:** Transposable elements and repetitive sequences
 
@@ -132,12 +135,14 @@ This feature set consist of three main groups: arm features, centromere features
 - Non-features: `nonrepeat_specific`
 - Phylogeny-informed Features: `repeat_multigroup1`, `Interspersed_Repeat_multigroup1`, `Transposable_Element_multigroup1`, `Class_I_Retrotransposition_multigroup1`, `LINE-dependent_Retroposon_multigroup1`, `Class_II_DNA_Transposition_multigroup1`
 - File suffix: `.repeat.bed`
+- Feature phylogeny: ![Repeat feature phylogeny](images/KS_human_CHM13.repeat.phylogeny.svg)
 
 **5. Gene feature set:** Coding region annotations
 
 - Main Features: `exon_specific`, `intron_specific`
 - Non-features: `intergenic_specific`
 - File suffix: `.gene.bed`
+- Feature phylogeny: ![Gene feature phylogeny](images/KS_human_CHM13.gene.phylogeny.svg)
 
 **6. Acrocentric feature set:** Acrocentric sequences
 
@@ -145,6 +150,7 @@ This feature set consist of three main groups: arm features, centromere features
 - Non-features: `nonacrocentric_specific`
 - Phylogeny-informed Features: `array_multigroup1`
 - File suffix: `.acrocentric.bed`
+- Feature phylogeny: ![Acrocentric feature phylogeny](images/KS_human_CHM13.acrocentric.phylogeny.svg)
 
 **Note:** KaryoScope annotations are output to a separate BED file for each feature set. One may wish to merge multiple feature sets such that every genomic interval is annotated with the corresponding features from all the feature sets being merged (see [Feature Set Merging Strategies](#2-feature-set-merging-strategies)).
 
