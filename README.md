@@ -52,4 +52,5 @@ If you use KaryoScope in your research, please cite:
 ## Contact
 
 [Barthel Lab](https://www.barthel-lab.com/)
+
 [Translational Genomics Research Institute (TGen)](https://www.tgen.org/)
