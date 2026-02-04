@@ -1502,7 +1502,7 @@ if args.n_clusters is None:
         ax5.set_title('Enrichment by Group')
         ax5.legend()
 
-        # 6. Reads in enriched clusters (absolute counts)
+        # 6. Reads in enriched clusters (absolute counts) - log scale
         ax6 = axes[1, 1]
         ax6.plot(stats_df['k'], stats_df['any_enriched_sequences'], '-o', markersize=3, label='Any enriched', color='blue')
         ax6.plot(stats_df['k'], stats_df['strong_sequences'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
@@ -1511,6 +1511,7 @@ if args.n_clusters is None:
         ax6.set_ylabel('Number of reads')
         ax6.set_title('Reads in Enriched Clusters (count)')
         ax6.legend()
+        ax6.set_yscale('log')
 
         # 7. Reads in enriched clusters (percentages)
         ax7 = axes[1, 2]
