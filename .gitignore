@@ -46,3 +46,6 @@ env/
 data/raw_bed/
 data/merged_bed/
 !data/samples.tsv
+
+# Results (generated output)
+results/
