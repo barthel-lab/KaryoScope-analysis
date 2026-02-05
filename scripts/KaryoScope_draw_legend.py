@@ -341,27 +341,51 @@ def draw_legend(items, config):
     rows = config["rows"]
     cols = config["cols"]
 
-    # Distribute items into columns (fill top-to-bottom, then next column)
+    # Separate headers from regular items, tracking which items each header covers
+    has_headers = any(is_header for _, _, is_header in items)
+    regular_items = []
+    # Map: index in regular_items where a header's group starts -> header label
+    header_at = {}
+    for label, color, is_header in items:
+        if is_header:
+            header_at[len(regular_items)] = label
+        else:
+            regular_items.append((label, color, False))
+
+    # Distribute regular items into columns (fill top-to-bottom, then next column)
     columns = [[] for _ in range(cols)]
     col_idx = 0
     row_idx = 0
-    for item in items:
+    # Track which column each header lands in
+    col_headers = {}  # col_index -> header label
+    for i, item in enumerate(regular_items):
         if col_idx >= cols:
             break
+        if i in header_at:
+            # If this item starts a new group mid-column, advance to next column
+            if row_idx > 0:
+                col_idx += 1
+                row_idx = 0
+                if col_idx >= cols:
+                    break
+            col_headers[col_idx] = header_at[i]
         columns[col_idx].append(item)
         row_idx += 1
         if row_idx >= rows:
             row_idx = 0
             col_idx += 1
 
-    # Calculate per-column widths based on longest label
+    # Calculate per-column widths based on longest label (including header)
     swatch_gap = swatch + 3  # gap between swatch and text
     col_widths = []
-    for col in columns:
+    for ci, col in enumerate(columns):
         if not col:
             col_widths.append(0)
             continue
-        max_label_w = max(estimate_text_width(label, font_size) for label, _, _ in col)
+        labels = [label for label, _, _ in col]
+        if ci in col_headers:
+            labels.append(col_headers[ci])
+        max_label_w = max(estimate_text_width(l, font_size) for l in labels)
         col_widths.append(swatch_gap + max_label_w)
 
     col_spacing = config["col_spacing"]
@@ -371,55 +395,57 @@ def draw_legend(items, config):
     # Canvas dimensions
     total_width = round(padding * 2 + sum(col_widths) + col_spacing * max(0, len(col_widths) - 1), 1)
     max_rows_in_col = max((len(c) for c in columns), default=0)
-    total_height = round(padding * 2 + max_rows_in_col * row_sp, 1)
+    header_offset = row_sp if has_headers else 0
+    total_height = round(padding * 2 + max_rows_in_col * row_sp + header_offset, 1)
 
     d = draw.Drawing(total_width, total_height, id_prefix="legend")
     d.append(draw.Rectangle(0, 0, total_width, total_height, fill=bg))
 
     # Draw items
     x_offset = padding
-    for col in columns:
-        y_offset = padding
+    for ci, col in enumerate(columns):
+        # Draw header if this column has one
+        if ci in col_headers:
+            d.append(
+                draw.Text(
+                    col_headers[ci],
+                    font_size,
+                    x_offset,
+                    padding + swatch - 1,
+                    fill=text_color,
+                    font_family="Basic Sans",
+                    font_weight="bold",
+                )
+            )
+
+        # Draw regular items below the header row
+        y_offset = padding + header_offset
         for label, color, is_header in col:
-            if is_header:
-                # Bold header text, no swatch
-                d.append(
-                    draw.Text(
-                        label,
-                        font_size,
-                        x_offset,
-                        y_offset + swatch - 1,
-                        fill=text_color,
-                        font_family="Basic Sans",
-                        font_weight="bold",
-                    )
+            # Colored swatch
+            d.append(
+                draw.Rectangle(
+                    x_offset,
+                    y_offset,
+                    swatch,
+                    swatch,
+                    fill=color,
+                    stroke=stroke_color,
+                    stroke_width=0.5,
                 )
-            else:
-                # Colored swatch
-                d.append(
-                    draw.Rectangle(
-                        x_offset,
-                        y_offset,
-                        swatch,
-                        swatch,
-                        fill=color,
-                        stroke=stroke_color,
-                        stroke_width=0.5,
-                    )
+            )
+            # Label text
+            d.append(
+                draw.Text(
+                    label,
+                    font_size,
+                    x_offset + swatch_gap,
+                    y_offset + swatch - 1,
+                    fill=text_color,
+                    font_family="Basic Sans",
                 )
-                # Label text
-                d.append(
-                    draw.Text(
-                        label,
-                        font_size,
-                        x_offset + swatch_gap,
-                        y_offset + swatch - 1,
-                        fill=text_color,
-                        font_family="Basic Sans",
-                    )
-                )
+            )
             y_offset += row_sp
-        x_offset += col_widths[columns.index(col)] + col_spacing
+        x_offset += col_widths[ci] + col_spacing
 
     return d
 
