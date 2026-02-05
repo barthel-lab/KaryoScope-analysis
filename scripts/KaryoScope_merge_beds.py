@@ -54,6 +54,11 @@ parser.add_argument("--priority-merge", dest="priority_merge", action="store_tru
                          "  - noncentromeric + rRNA -> rRNA; noncentromeric + other -> rDNA\n"
                          "  - arm/p_arm/q_arm -> use repeat (background)\n"
                          "  - satellite features (censat, hsat*, etc.) -> keep region")
+parser.add_argument("--chromosome-acrocentric-merge", dest="chromosome_acrocentric_merge", action="store_true",
+                    help="Priority merge mode: acrocentric detail features have priority over chromosome labels.\n"
+                         "Requires exactly 2 BED files: BED1=chromosome, BED2=acrocentric.\n"
+                         "Acrocentric features (DJ, PHR, rDNA, SST1, PJ, array_multigroup1, acrocentric_multigroup1)\n"
+                         "take priority; remaining positions filled with chromosome labels.")
 
 args = parser.parse_args()
 
@@ -129,6 +134,12 @@ SUBTEL_PRIORITY_FEATURES = {'canonical_telomere', 'noncanonical_telomere', 'TAR1
 
 # Region features that are considered "background" (can be overwritten by repeat)
 REGION_BACKGROUND_FEATURES = {'p_arm', 'q_arm', 'arm_multigroup1'}
+
+# Acrocentric features that have priority over chromosome labels
+ACROCENTRIC_PRIORITY_FEATURES = {
+    'DJ', 'PHR', 'rDNA', 'SST1', 'PJ',
+    'array_multigroup1', 'acrocentric_multigroup1'
+}
 
 
 def apply_conditional_region_repeat_rules(region_feature, repeat_feature):
@@ -513,6 +524,129 @@ def _telomere_satellite_merge_pandas(df_subtelo, df_satellite):
     return pd.DataFrame(results, columns=['read', 'start', 'end', 'feature'])
 
 
+def chromosome_acrocentric_merge(df_chrom, df_acro):
+    """
+    Priority merge: acrocentric detail features have priority over chromosome labels.
+    Positions with meaningful acrocentric features (DJ, PHR, rDNA, etc.) use the
+    acrocentric label; remaining positions use the chromosome label.
+
+    Args:
+        df_chrom: DataFrame from chromosome BED file
+        df_acro: DataFrame from acrocentric BED file
+
+    Returns:
+        DataFrame with merged features (single feature per interval)
+    """
+    try:
+        import pyranges as pr
+        return _chromosome_acrocentric_merge_pyranges(df_chrom, df_acro)
+    except ImportError:
+        return _chromosome_acrocentric_merge_pandas(df_chrom, df_acro)
+
+
+def _chromosome_acrocentric_merge_pyranges(df_chrom, df_acro):
+    """Fast chromosome-acrocentric merge using pyranges subtract."""
+    import pyranges as pr
+
+    common_reads = set(df_chrom['read'].unique()) & set(df_acro['read'].unique())
+    if not common_reads:
+        print("  Warning: No common reads between BED files")
+        return pd.DataFrame(columns=['read', 'start', 'end', 'feature'])
+
+    print(f"  Common reads: {len(common_reads):,}")
+    print(f"  Acrocentric priority features: {', '.join(sorted(ACROCENTRIC_PRIORITY_FEATURES))}")
+
+    # Filter to common reads
+    df_chrom_f = df_chrom[df_chrom['read'].isin(common_reads)].copy()
+    df_acro_f = df_acro[df_acro['read'].isin(common_reads)].copy()
+
+    # Extract acrocentric priority intervals
+    priority_mask = df_acro_f['feature'].isin(ACROCENTRIC_PRIORITY_FEATURES)
+    df_priority = df_acro_f[priority_mask][['read', 'start', 'end', 'feature']].copy()
+    df_priority['start'] = df_priority['start'].astype(int)
+    df_priority['end'] = df_priority['end'].astype(int)
+
+    print(f"  Acrocentric priority intervals: {len(df_priority):,}")
+
+    # Prepare chromosome intervals
+    df_chrom_f = df_chrom_f[['read', 'start', 'end', 'feature']].copy()
+    df_chrom_f['start'] = df_chrom_f['start'].astype(int)
+    df_chrom_f['end'] = df_chrom_f['end'].astype(int)
+
+    # Convert to pyranges format
+    pr_priority = pr.PyRanges(df_priority.rename(columns={
+        'read': 'Chromosome', 'start': 'Start', 'end': 'End', 'feature': 'Feature'
+    }))
+    pr_chrom = pr.PyRanges(df_chrom_f.rename(columns={
+        'read': 'Chromosome', 'start': 'Start', 'end': 'End', 'feature': 'Feature'
+    }))
+
+    # Subtract acrocentric priority regions from chromosome
+    pr_subtracted = pr_chrom.subtract(pr_priority)
+
+    # Convert results back to DataFrame
+    if len(pr_subtracted) > 0:
+        df_subtracted = pr_subtracted.df.rename(columns={
+            'Chromosome': 'read', 'Start': 'start', 'End': 'end', 'Feature': 'feature'
+        })[['read', 'start', 'end', 'feature']]
+    else:
+        df_subtracted = pd.DataFrame(columns=['read', 'start', 'end', 'feature'])
+
+    # Combine acrocentric priority + remaining chromosome
+    result = pd.concat([df_priority, df_subtracted], ignore_index=True)
+
+    return result.sort_values(['read', 'start'])
+
+
+def _chromosome_acrocentric_merge_pandas(df_chrom, df_acro):
+    """Fallback chromosome-acrocentric merge using pandas (slower)."""
+    common_reads = set(df_chrom['read'].unique()) & set(df_acro['read'].unique())
+    if not common_reads:
+        print("  Warning: No common reads between BED files")
+        return pd.DataFrame(columns=['read', 'start', 'end', 'feature'])
+
+    print(f"  Common reads: {len(common_reads):,}")
+    print(f"  Acrocentric priority features: {', '.join(sorted(ACROCENTRIC_PRIORITY_FEATURES))}")
+    print("  Note: Install pyranges for faster processing")
+
+    # Filter to common reads and convert to int
+    df_chrom_f = df_chrom[df_chrom['read'].isin(common_reads)].copy()
+    df_acro_f = df_acro[df_acro['read'].isin(common_reads)].copy()
+    df_chrom_f['start'] = df_chrom_f['start'].astype(int)
+    df_chrom_f['end'] = df_chrom_f['end'].astype(int)
+    df_acro_f['start'] = df_acro_f['start'].astype(int)
+    df_acro_f['end'] = df_acro_f['end'].astype(int)
+
+    # Group by read
+    chrom_grouped = {read: grp[['start', 'end', 'feature']].values
+                     for read, grp in df_chrom_f.groupby('read')}
+    acro_grouped = {read: grp[['start', 'end', 'feature']].values
+                    for read, grp in df_acro_f.groupby('read')}
+
+    results = []
+    for read in common_reads:
+        chrom_intervals = chrom_grouped.get(read, [])
+        acro_intervals = acro_grouped.get(read, [])
+
+        # Extract acrocentric priority intervals
+        priority_intervals = [(s, e, f) for s, e, f in acro_intervals
+                              if f in ACROCENTRIC_PRIORITY_FEATURES]
+        priority_coords = sorted([(s, e) for s, e, _ in priority_intervals])
+
+        # Add acrocentric priority intervals
+        for start, end, feature in priority_intervals:
+            results.append((read, start, end, feature))
+
+        # Add chromosome intervals for non-priority positions
+        for start, end, feature in chrom_intervals:
+            uncovered = subtract_intervals((start, end), priority_coords)
+            for seg_start, seg_end in uncovered:
+                if seg_end > seg_start:
+                    results.append((read, seg_start, seg_end, feature))
+
+    return pd.DataFrame(results, columns=['read', 'start', 'end', 'feature']).sort_values(['read', 'start'])
+
+
 def merge_two_beds(df1, df2, sep=":"):
     """Merge two BED DataFrames by position overlay."""
     try:
@@ -688,6 +822,49 @@ if args.priority_merge:
     for feat, count in feature_counts.head(10).items():
         pct = count / len(merged_df) * 100
         print(f"    {feat}: {count:,} ({pct:.1f}%)")
+
+    print(f"\nWriting to: {args.output}")
+    if args.output.endswith('.gz'):
+        merged_df.to_csv(args.output, sep='\t', index=False, header=False, compression='gzip')
+    else:
+        merged_df.to_csv(args.output, sep='\t', index=False, header=False)
+
+    print("Done!")
+    sys.exit(0)
+
+# Handle chromosome-acrocentric merge mode
+if args.chromosome_acrocentric_merge:
+    if len(args.bed) != 2:
+        print("Error: --chromosome-acrocentric-merge requires exactly 2 BED files", file=sys.stderr)
+        print("  BED1: chromosome features", file=sys.stderr)
+        print("  BED2: acrocentric features", file=sys.stderr)
+        sys.exit(1)
+
+    print("\n--- Chromosome-Acrocentric Priority Merge Mode ---")
+    print("  Acrocentric detail features take priority over chromosome labels")
+
+    df_chrom = load_bed_file(args.bed[0])
+    print(f"  Chromosome intervals: {len(df_chrom):,}")
+
+    df_acro = load_bed_file(args.bed[1])
+    print(f"  Acrocentric intervals: {len(df_acro):,}")
+
+    merged_df = chromosome_acrocentric_merge(df_chrom, df_acro)
+    print(f"\n  Merged intervals: {len(merged_df):,}")
+
+    if merged_df.empty:
+        print("Error: Merge resulted in no intervals", file=sys.stderr)
+        sys.exit(1)
+
+    # Count unique features
+    feature_counts = merged_df['feature'].value_counts()
+    print(f"  Unique features: {len(feature_counts):,}")
+    print("\n  Top 10 features:")
+    for feat, count in feature_counts.head(10).items():
+        pct = count / len(merged_df) * 100
+        print(f"    {feat}: {count:,} ({pct:.1f}%)")
+
+    merged_df = merged_df.sort_values(['read', 'start'])
 
     print(f"\nWriting to: {args.output}")
     if args.output.endswith('.gz'):
