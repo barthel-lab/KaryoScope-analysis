@@ -27,6 +27,13 @@ nav:
 
 plugins:
   - search
+  - encryptcontent:
+      global_password: 'beta'
+      title_prefix: ''
+      summary: 'Enter the password to view this content.'
+      webcrypto: true
+      remember_password: true
+      session_storage: false
 
 markdown_extensions:
   - admonition

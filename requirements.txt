@@ -2,6 +2,7 @@
 mkdocs>=1.5.0
 mkdocs-material>=9.4.0
 pymdown-extensions>=10.3.0
+mkdocs-encryptcontent-plugin>=3.0.0
 
 # Analysis scripts
 numpy>=1.24.0
