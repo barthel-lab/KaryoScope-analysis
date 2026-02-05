@@ -1,6 +1,7 @@
 # MkDocs
 site/
 .cache/
+encryptcontent.cache
 
 # Python
 __pycache__/
