@@ -24,10 +24,28 @@ from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 
 
-def hex_to_rgb(hex_color):
-    """Convert hex color to RGB tuple."""
+def hex_to_rgba(hex_color):
+    """Convert hex color to RGBA tuple.
+
+    Supports both 6-character (#RRGGBB) and 8-character (#RRGGBBAA) hex codes.
+    For 6-character codes, alpha defaults to 255 (fully opaque).
+    """
     hex_color = hex_color.lstrip('#')
-    return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+    if len(hex_color) == 6:
+        r, g, b = (int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+        return (r, g, b, 255)
+    elif len(hex_color) == 8:
+        r, g, b, a = (int(hex_color[i:i+2], 16) for i in (0, 2, 4, 6))
+        return (r, g, b, a)
+    else:
+        # Fallback for invalid formats
+        return (255, 255, 255, 255)
+
+
+def hex_to_rgb(hex_color):
+    """Convert hex color to RGB tuple (for backward compatibility)."""
+    rgba = hex_to_rgba(hex_color)
+    return rgba[:3]
 
 
 MAX_PNG_DIMENSION = 32000  # Stay under common image library limits
@@ -141,10 +159,10 @@ def draw_reads_png(reads, colors, output_path, config):
     print(f"  PNG scale: height={height_scale:.2f}x, width={width_scale:.2f}x")
     print(f"  Target dimensions: {image_width} x {image_height} pixels")
 
-    # Create image
-    bg_color = (0, 0, 0) if background == "black" else (255, 255, 255)
+    # Create image in RGBA mode to support transparency
+    bg_color = (0, 0, 0, 255) if background == "black" else (255, 255, 255, 255)
     text_color = (255, 255, 255) if background == "black" else (0, 0, 0)
-    img = Image.new('RGB', (image_width, image_height), bg_color)
+    img = Image.new('RGBA', (image_width, image_height), bg_color)
     draw_ctx = ImageDraw.Draw(img)
 
     # Try to load font at scaled size
@@ -185,7 +203,7 @@ def draw_reads_png(reads, colors, output_path, config):
             y_end = top_margin + int(end * ratio)
             height = max(1, y_end - y_start)
             color_hex = colors.get(feature, "#ffffff")
-            color_rgb = hex_to_rgb(color_hex)
+            color_rgba = hex_to_rgba(color_hex)
 
             # Draw directly to numpy array for speed
             x1 = max(0, current_x)
@@ -193,7 +211,17 @@ def draw_reads_png(reads, colors, output_path, config):
             y1 = max(0, y_start)
             y2 = min(image_height, y_start + height)
             if x1 < x2 and y1 < y2:
-                img_array[y1:y2, x1:x2] = color_rgb
+                alpha = color_rgba[3] / 255.0
+                if alpha >= 1.0:
+                    # Fully opaque - direct assignment
+                    img_array[y1:y2, x1:x2] = color_rgba
+                else:
+                    # Alpha blending: new = alpha * fg + (1-alpha) * bg
+                    fg = np.array(color_rgba[:3], dtype=np.float32)
+                    bg = img_array[y1:y2, x1:x2, :3].astype(np.float32)
+                    blended = alpha * fg + (1 - alpha) * bg
+                    img_array[y1:y2, x1:x2, :3] = blended.astype(np.uint8)
+                    img_array[y1:y2, x1:x2, 3] = 255  # Keep alpha channel at full
 
         current_x += bar_width + read_spacing
 
@@ -239,9 +267,15 @@ def draw_reads_png(reads, colors, output_path, config):
                     fill=sep_color, width=1
                 )
 
-    # Save PNG
+    # Save PNG - blend alpha with background to produce RGB (faster for animation)
     print(f"  Saving PNG...")
-    img.save(output_path, optimize=True)
+    if img.mode == 'RGBA':
+        # Alpha composite onto solid background
+        bg_img = Image.new('RGB', img.size, bg_color[:3])
+        bg_img.paste(img, mask=img.split()[3])  # Use alpha channel as mask
+        bg_img.save(output_path, optimize=True)
+    else:
+        img.save(output_path, optimize=True)
     file_size = os.path.getsize(output_path)
     print(f"Saved PNG: {output_path}")
     print(f"  Dimensions: {image_width} x {image_height} pixels")
@@ -364,6 +398,11 @@ def parse_args():
         "--orient-telomere-top",
         action="store_true",
         help="Reorient reads so telomere features are always at the top",
+    )
+    parser.add_argument(
+        "--orient-chromosome-top",
+        action="store_true",
+        help="Reorient reads so chromosome-specific features are always at the top",
     )
     parser.add_argument(
         "--batch-size",
@@ -554,6 +593,19 @@ def sort_reads(reads, sample_order):
 # Telomere features used for orientation detection
 TELOMERE_FEATURES = {'canonical_telomere', 'noncanonical_telomere'}
 
+# Chromosome features used for orientation detection
+CHROMOSOME_FEATURES = {
+    'chr1', 'chr2', 'chr3', 'chr4', 'chr5', 'chr6', 'chr7', 'chr8', 'chr9',
+    'chr10', 'chr11', 'chr12', 'chr13', 'chr14', 'chr15', 'chr16', 'chr17',
+    'chr18', 'chr19', 'chr20', 'chr21', 'chr22', 'chrX', 'chrY',
+    'chr1_specific', 'chr2_specific', 'chr3_specific', 'chr4_specific',
+    'chr5_specific', 'chr6_specific', 'chr7_specific', 'chr8_specific',
+    'chr9_specific', 'chr10_specific', 'chr11_specific', 'chr12_specific',
+    'chr13_specific', 'chr14_specific', 'chr15_specific', 'chr16_specific',
+    'chr17_specific', 'chr18_specific', 'chr19_specific', 'chr20_specific',
+    'chr21_specific', 'chr22_specific', 'chrX_specific', 'chrY_specific',
+}
+
 
 def orient_telomere_top(reads):
     """Reorient reads so telomere features are at the top (position 0).
@@ -600,6 +652,54 @@ def orient_telomere_top(reads):
             oriented_reads.append((sample, read_id, read_length, features))
 
     print(f"  Reoriented {flipped_count} of {len(reads)} reads (telomere now at top)")
+    return oriented_reads
+
+
+def orient_chromosome_top(reads):
+    """Reorient reads so chromosome features are at the top (position 0).
+
+    For each read, checks if chromosome-specific features are closer to start or end.
+    If closer to end, flips the read coordinates.
+
+    Args:
+        reads: List of (sample, read_id, read_length, features) tuples
+
+    Returns:
+        List of reoriented reads
+    """
+    oriented_reads = []
+    flipped_count = 0
+
+    for sample, read_id, read_length, features in reads:
+        # Find chromosome feature positions
+        chromosome_positions = []
+        for start, end, feature in features:
+            if feature in CHROMOSOME_FEATURES:
+                chromosome_positions.extend([start, end])
+
+        if chromosome_positions:
+            # Calculate average chromosome position
+            avg_chromosome_pos = sum(chromosome_positions) / len(chromosome_positions)
+            midpoint = read_length / 2
+
+            # If chromosome is in second half, flip the read
+            if avg_chromosome_pos > midpoint:
+                # Flip coordinates: new_start = length - old_end, new_end = length - old_start
+                flipped_features = [
+                    (read_length - end, read_length - start, feature)
+                    for start, end, feature in features
+                ]
+                # Sort by start position
+                flipped_features.sort(key=lambda x: x[0])
+                oriented_reads.append((sample, read_id, read_length, flipped_features))
+                flipped_count += 1
+            else:
+                oriented_reads.append((sample, read_id, read_length, features))
+        else:
+            # No chromosome features, keep as-is
+            oriented_reads.append((sample, read_id, read_length, features))
+
+    print(f"  Reoriented {flipped_count} of {len(reads)} reads (chromosome now at top)")
     return oriented_reads
 
 
@@ -925,6 +1025,11 @@ def main():
     if args.orient_telomere_top:
         print(f"\nOrienting reads (telomere at top)...")
         reads = orient_telomere_top(reads)
+
+    # Orient reads so chromosome is at top (if requested)
+    if args.orient_chromosome_top:
+        print(f"\nOrienting reads (chromosome at top)...")
+        reads = orient_chromosome_top(reads)
 
     # Sort reads
     print(f"\nSorting reads by sample order, then by length (descending)")
