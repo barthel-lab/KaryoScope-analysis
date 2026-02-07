@@ -35,3 +35,4 @@ PJ_specific	#FFFF00
 rDNA_specific	#964B00
 SST1_specific	#00FF00
 PHR_specific	#0000FF
+non_acrocentric	#808080

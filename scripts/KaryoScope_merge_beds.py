@@ -59,10 +59,18 @@ parser.add_argument("--chromosome-acrocentric-merge", dest="chromosome_acrocentr
                          "Requires exactly 2 BED files: BED1=chromosome, BED2=acrocentric.\n"
                          "Acrocentric features (DJ, PHR, rDNA, SST1, PJ, array_multigroup1, acrocentric_multigroup1)\n"
                          "take priority; remaining positions filled with chromosome labels.")
+parser.add_argument("--collapse-non-acrocentric", dest="collapse_non_acrocentric",
+                    action="store_true",
+                    help="Collapse specific non-acrocentric chromosome labels (chr1-12, chr16-20, chrX, chrY)\n"
+                         "to 'non_acrocentric' in the first layer of colon-separated features.\n"
+                         "Ambiguous labels (autosome_multigroup1, categorized, etc.) are preserved.\n"
+                         "E.g., chr7:rDNA -> non_acrocentric:rDNA, but chr14:rDNA preserved (acrocentric).\n"
+                         "Applied as post-processing after merge, before output.\n"
+                         "Can be used with a single BED file (passthrough + collapse).")
 
 args = parser.parse_args()
 
-if len(args.bed) < 2:
+if len(args.bed) < 2 and not args.collapse_non_acrocentric:
     print("Error: At least 2 BED files required for merging", file=sys.stderr)
     sys.exit(1)
 
@@ -140,6 +148,43 @@ ACROCENTRIC_PRIORITY_FEATURES = {
     'DJ', 'PHR', 'rDNA', 'SST1', 'PJ',
     'array_multigroup1', 'acrocentric_multigroup1'
 }
+
+# Specific non-acrocentric chromosomes to collapse (strict mode)
+STRICT_NON_ACROCENTRIC_CHROMOSOMES = {
+    'chr1', 'chr2', 'chr3', 'chr4', 'chr5', 'chr6', 'chr7', 'chr8', 'chr9',
+    'chr10', 'chr11', 'chr12', 'chr16', 'chr17', 'chr18', 'chr19', 'chr20',
+    'chrX', 'chrY'
+}
+
+
+def collapse_non_acrocentric_features(df, separator=':'):
+    """
+    Collapse specific non-acrocentric chromosome labels to 'non_acrocentric'
+    in the first layer of colon-separated features.
+    Only collapses specific chromosomes (chr1-12, chr16-20, chrX, chrY).
+    Ambiguous labels (autosome_multigroup1, categorized, etc.) are preserved.
+    """
+    def remap(feature):
+        if separator not in feature:
+            return feature
+        parts = feature.split(separator, 1)
+        if parts[0] in STRICT_NON_ACROCENTRIC_CHROMOSOMES:
+            return f'non_acrocentric{separator}{parts[1]}'
+        return feature
+
+    df = df.copy()
+    original_features = set(df['feature'].unique())
+    df['feature'] = df['feature'].apply(remap)
+    new_features = set(df['feature'].unique())
+
+    collapsed = original_features - new_features
+    if collapsed:
+        print(f"\n  --- Non-acrocentric collapse (strict) ---")
+        print(f"  Features before: {len(original_features)}")
+        print(f"  Features after:  {len(new_features)}")
+        print(f"  Collapsed {len(collapsed)} chromosome-specific features")
+
+    return df
 
 
 def apply_conditional_region_repeat_rules(region_feature, repeat_feature):
@@ -749,6 +794,32 @@ print(f"\nMerging {len(args.bed)} BED files...")
 for i, bed_file in enumerate(args.bed, 1):
     print(f"  BED{i}: {bed_file}")
 
+# Handle single-file collapse mode
+if len(args.bed) == 1 and args.collapse_non_acrocentric:
+    print("\n--- Single-file collapse mode ---")
+    merged_df = load_bed_file(args.bed[0])
+    print(f"  Input intervals: {len(merged_df):,}")
+
+    merged_df = collapse_non_acrocentric_features(merged_df, args.separator)
+
+    feature_counts = merged_df['feature'].value_counts()
+    print(f"  Unique features: {len(feature_counts):,}")
+    print("\n  Top 10 features:")
+    for feat, count in feature_counts.head(10).items():
+        pct = count / len(merged_df) * 100
+        print(f"    {feat}: {count:,} ({pct:.1f}%)")
+
+    merged_df = merged_df.sort_values(['read', 'start'])
+
+    print(f"\nWriting to: {args.output}")
+    if args.output.endswith('.gz'):
+        merged_df.to_csv(args.output, sep='\t', index=False, header=False, compression='gzip')
+    else:
+        merged_df.to_csv(args.output, sep='\t', index=False, header=False)
+
+    print("Done!")
+    sys.exit(0)
+
 # Handle telomere-satellite merge mode
 if args.telomere_satellite_merge:
     if len(args.bed) != 2:
@@ -772,6 +843,9 @@ if args.telomere_satellite_merge:
         sys.exit(1)
 
     # Skip to output (no feature reduction in this mode)
+    if args.collapse_non_acrocentric:
+        merged_df = collapse_non_acrocentric_features(merged_df, args.separator)
+
     merged_df = merged_df.sort_values(['read', 'start'])
 
     print(f"\nWriting to: {args.output}")
@@ -815,6 +889,9 @@ if args.priority_merge:
         print("Error: Merge resulted in no intervals", file=sys.stderr)
         sys.exit(1)
 
+    if args.collapse_non_acrocentric:
+        merged_df = collapse_non_acrocentric_features(merged_df, args.separator)
+
     # Count unique features
     feature_counts = merged_df['feature'].value_counts()
     print(f"  Unique features: {len(feature_counts):,}")
@@ -855,6 +932,9 @@ if args.chromosome_acrocentric_merge:
     if merged_df.empty:
         print("Error: Merge resulted in no intervals", file=sys.stderr)
         sys.exit(1)
+
+    if args.collapse_non_acrocentric:
+        merged_df = collapse_non_acrocentric_features(merged_df, args.separator)
 
     # Count unique features
     feature_counts = merged_df['feature'].value_counts()
@@ -910,6 +990,9 @@ for i, bed_file in enumerate(args.bed[1:], 2):
         break
 
 print(f"\nFinal merged intervals: {len(merged_df):,}")
+
+if args.collapse_non_acrocentric:
+    merged_df = collapse_non_acrocentric_features(merged_df, args.separator)
 
 # Count unique features
 feature_counts = merged_df['feature'].value_counts()
