@@ -951,8 +951,8 @@ def parse_args():
                     help="Height crop ratio, fixed zoom only (default: 0.5)")
     zm.add_argument("--max-zoom", type=float, default=None,
                     help="Max zoom factor, adaptive only (default: auto from scale-bar-max-bp)")
-    zm.add_argument("--scale-bar-max-bp", type=int, default=10000,
-                    help="Target bp for scale bar at max zoom (default: 10000 = 10kb)")
+    zm.add_argument("--scale-bar-max-bp", type=int, default=20000,
+                    help="Target bp for scale bar at max zoom (default: 20000 = 20kb)")
     zm.add_argument("--scale-bar-fraction", type=float, default=0.1,
                     help="Fraction of viewport height for scale bar at max zoom (default: 0.1 = 10%%)")
     zm.add_argument("--top-bias", type=float, default=0.0,
