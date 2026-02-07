@@ -504,8 +504,9 @@ def create_adaptive_horizontal_panning(
 
         # Apply vertical zoom boost at start (allows truncating reads to see top detail)
         # Boost only affects vertical, not horizontal panning
+        # top_bias=1 gives 100% boost at start (2x zoom), top_bias=2 gives 200% (3x), etc.
         if top_bias > 0:
-            zoom_boost = (1 - t) * top_bias * 0.5  # Scale boost by bias
+            zoom_boost = (1 - t) * top_bias  # Full bias applied at start
             v_zoom = min(v_zoom * (1 + zoom_boost), max_zoom)
 
         # Calculate crop dimensions based on zoom mode
