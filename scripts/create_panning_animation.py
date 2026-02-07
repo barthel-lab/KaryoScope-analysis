@@ -360,6 +360,7 @@ def create_adaptive_horizontal_panning(
     scale_bar_width=100,
     zoom_smoothing=200,
     uniform_zoom=True,
+    top_bias=0.0,
 ):
     """Horizontal panning with adaptive zoom.
 
@@ -498,10 +499,19 @@ def create_adaptive_horizontal_panning(
         available_height = viewport_height - reads_top_y
         v_zoom = min(available_height / (ch + content_padding), max_zoom)
 
+        # Base horizontal zoom (for uniform zoom mode)
+        h_zoom = v_zoom
+
+        # Apply vertical zoom boost at start (allows truncating reads to see top detail)
+        # Boost only affects vertical, not horizontal panning
+        if top_bias > 0:
+            zoom_boost = (1 - t) * top_bias * 0.5  # Scale boost by bias
+            v_zoom = min(v_zoom * (1 + zoom_boost), max_zoom)
+
         # Calculate crop dimensions based on zoom mode
         if uniform_zoom:
-            # Uniform zoom: both dimensions zoom together
-            crop_w = int(panning_width / v_zoom)
+            # Uniform zoom for horizontal, but vertical can be boosted
+            crop_w = int(panning_width / h_zoom)
             crop_h = int(available_height / v_zoom)
         else:
             # Vertical-only zoom (legacy): horizontal stays 1:1
@@ -583,13 +593,14 @@ def create_adaptive_horizontal_panning(
                 bbox = txt_draw.textbbox((0, 0), label, font=scale_bar_font)
                 txt_w = bbox[2] - bbox[0]
                 txt_h = bbox[3] - bbox[1]
-                txt_draw.text(((200 - txt_w) // 2, (50 - txt_h) // 2), label, fill=text_color + (255,), font=scale_bar_font)
+                # Right-align text so right edge becomes top after 90° rotation
+                txt_draw.text((200 - txt_w, (50 - txt_h) // 2), label, fill=text_color + (255,), font=scale_bar_font)
                 rotated_label_cache[label] = txt_img.rotate(90, expand=True)
             txt_rotated = rotated_label_cache[label]
 
-            # Position: bottom of rotated label aligns with top of scale bar, moved further left
-            label_x = bar_x - 70  # Further left from scale bar
-            label_y = bar_y - txt_rotated.height  # Bottom of label at top of scale bar
+            # Position: label right-aligned (top after rotation) to top of scale bar
+            label_x = bar_x - 60  # Left of scale bar
+            label_y = bar_y  # Align with top of scale bar
             frame.paste(txt_rotated, (label_x, label_y), txt_rotated)
 
         # Assemble output frame (panning + legend)
@@ -944,6 +955,9 @@ def parse_args():
                     help="Target bp for scale bar at max zoom (default: 10000 = 10kb)")
     zm.add_argument("--scale-bar-fraction", type=float, default=0.1,
                     help="Fraction of viewport height for scale bar at max zoom (default: 0.1 = 10%%)")
+    zm.add_argument("--top-bias", type=float, default=0.0,
+                    help="Non-linear bias toward top of reads (0=linear, 1=sqrt, 2=more biased). "
+                         "Higher values spend more time zoomed in at the top.")
     zm.add_argument("--top-margin", type=int, default=80,
                     help="Source image top margin px (default: 80, from plot_reads)")
     zm.add_argument("--left-margin", type=int, default=60,
@@ -1065,6 +1079,7 @@ def main():
                 scale_bar_width=args.scale_bar_width,
                 zoom_smoothing=args.zoom_smoothing,
                 uniform_zoom=uniform_zoom,
+                top_bias=args.top_bias,
             )
         elif args.direction == "horizontal":
             viewport_width = args.viewport_width or 1920
