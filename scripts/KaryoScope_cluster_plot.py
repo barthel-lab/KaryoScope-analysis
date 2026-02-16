@@ -118,6 +118,10 @@ def parse_args():
                         help="Spacing between clusters (default: 30)")
     parser.add_argument("--ratio", type=float, default=1/300,
                         help="Ratio for scaling bp to pixels (default: 1/300)")
+    parser.add_argument("--oversample", type=int, default=1,
+                        help="Internal oversampling factor for feature rasterization. "
+                             "Higher values resolve smaller features without changing image size. "
+                             "(default: 1)")
     parser.add_argument("--smoothness", default="smoothed",
                         help="Smoothness level (default: smoothed)")
 
@@ -208,11 +212,12 @@ def load_sample_metadata(metadata_file):
     """Load sample metadata from TSV file.
 
     Returns:
-        tuple: (sample_to_group, sample_colors, group_colors)
+        tuple: (sample_to_group, sample_colors, group_colors, sample_display_names)
     """
     sample_to_group = {}
     sample_colors = {}
     group_colors = {}
+    sample_display_names = {}
 
     if metadata_file and os.path.exists(metadata_file):
         try:
@@ -226,11 +231,13 @@ def load_sample_metadata(metadata_file):
                     # Also store as group color
                     if group not in group_colors:
                         group_colors[group] = row['color']
+                if 'display_name' in meta_df.columns and pd.notna(row.get('display_name')):
+                    sample_display_names[sample] = row['display_name']
             print(f"  Loaded sample metadata: {len(meta_df)} samples")
         except Exception as e:
             print(f"  Warning: Could not load sample metadata: {e}")
 
-    return sample_to_group, sample_colors, group_colors
+    return sample_to_group, sample_colors, group_colors, sample_display_names
 
 
 def load_cluster_labels(labels_file, label_column="curated_annotation"):
@@ -715,6 +722,8 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
     """
     print(f"\nLoading read assignments from: {reps_file}")
     reps_df = pd.read_csv(reps_file, sep='\t')
+    if 'read' in reps_df.columns and 'sequence' not in reps_df.columns:
+        reps_df = reps_df.rename(columns={'read': 'sequence'})
     print(f"  Total reads: {len(reps_df)}")
 
     # Load rank info from curated_reps_file or infer from reads_file
@@ -731,7 +740,9 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
     if rank_source:
         try:
             rank_df = pd.read_csv(rank_source, sep='\t')
-            if 'read' in rank_df.columns and 'rank' in rank_df.columns:
+            if 'read' in rank_df.columns and 'sequence' not in rank_df.columns:
+                rank_df = rank_df.rename(columns={'read': 'sequence'})
+            if 'sequence' in rank_df.columns and 'rank' in rank_df.columns:
                 for _, row in rank_df.iterrows():
                     read_ranks[row['sequence']] = row['rank']
         except Exception:
@@ -2059,6 +2070,98 @@ def draw_cluster_dendrogram_vertical(d, cluster_dendro_data, cluster_y_start, cl
     print(f"  Drew vertical dendrogram for {n_clusters} clusters")
 
 
+def smooth_features_to_pixels(colored_features, bar_length, ratio, oversample=1):
+    """Downsample bp-level features to pixel-level via windowed majority vote.
+
+    Each pixel represents a window of ~1/ratio base pairs. For each window,
+    the color with the most bp coverage wins. Contiguous same-color pixels
+    are run-length encoded into single rectangles.
+
+    When oversample > 1, rasterization happens at oversample× resolution
+    internally, then coordinates are divided by oversample before output.
+    This lets features smaller than 1/ratio bp survive the majority vote
+    and appear as fractional-pixel SVG rects.
+
+    Args:
+        colored_features: list of (bp_start, bp_stop, color, fill_opacity)
+                          Coordinates are relative to scaffold_min_start.
+        bar_length: total number of pixels for this read's bar
+        ratio: pixels per base pair
+        oversample: internal oversampling factor (default: 1)
+
+    Returns:
+        list of {scaled_start, scaled_stop, color, fill_opacity} dicts,
+        one per contiguous same-color pixel run.
+    """
+    if not colored_features or bar_length <= 0:
+        return []
+
+    effective_ratio = ratio * oversample
+    effective_bar_length = bar_length * oversample
+
+    sorted_feats = sorted(colored_features)
+    n_feats = len(sorted_feats)
+    feat_idx = 0  # monotonically advancing pointer
+
+    result = []
+    current_color = None
+    current_opacity = 1.0
+    run_start = 0
+
+    for px in range(effective_bar_length):
+        # BP window for this sub-pixel
+        win_start = px / effective_ratio
+        win_end = (px + 1) / effective_ratio
+
+        # Advance pointer past features that end before this window
+        while feat_idx < n_feats and sorted_feats[feat_idx][1] <= win_start:
+            feat_idx += 1
+
+        # Tally bp coverage per color within this sub-pixel's window
+        color_coverage = {}
+        color_opacity = {}
+        for i in range(feat_idx, n_feats):
+            f_start, f_stop, f_color, f_opacity = sorted_feats[i]
+            if f_start >= win_end:
+                break
+            overlap = min(f_stop, win_end) - max(f_start, win_start)
+            if overlap > 0:
+                color_coverage[f_color] = color_coverage.get(f_color, 0) + overlap
+                color_opacity[f_color] = f_opacity
+
+        # Plurality winner
+        if color_coverage:
+            px_color = max(color_coverage, key=color_coverage.get)
+            px_opacity = color_opacity[px_color]
+        else:
+            px_color = None
+            px_opacity = 1.0
+
+        # Run-length encoding
+        if px_color != current_color:
+            if current_color is not None:
+                result.append({
+                    'scaled_start': run_start / oversample,
+                    'scaled_stop': px / oversample,
+                    'color': current_color,
+                    'fill_opacity': current_opacity
+                })
+            current_color = px_color
+            current_opacity = px_opacity
+            run_start = px
+
+    # Flush last run
+    if current_color is not None:
+        result.append({
+            'scaled_start': run_start / oversample,
+            'scaled_stop': bar_length,
+            'color': current_color,
+            'fill_opacity': current_opacity
+        })
+
+    return result
+
+
 def draw_feature_bars_vertical(d, drawing_data, featuresets, bar_width, read_positions,
                                num_featuresets, bar_spacing=2, background_color='black'):
     """Draw feature bars VERTICALLY (top to bottom) for vertical mode.
@@ -2081,7 +2184,7 @@ def draw_feature_bars_vertical(d, drawing_data, featuresets, bar_width, read_pos
 
             for feat in drawing_data[read].get(fs, []):
                 x = x_start + feat['scaled_start']
-                width = max(2, feat['scaled_stop'] - feat['scaled_start'])  # Minimum 2px width
+                width = feat['scaled_stop'] - feat['scaled_start']
 
                 d.append(draw.Rectangle(
                     x, y_start + y_offset,
@@ -2236,7 +2339,7 @@ def draw_feature_bars_column_mode(d, drawing_data, featuresets, bar_width, read_
 
 def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_metadata,
                        read_assignments_file, x_start, cell_width, cell_height, text_color,
-                       background_color='black'):
+                       background_color='black', sample_display_names=None):
     """Draw sample × cluster read count matrix for vertical mode.
 
     Uses FULL cluster read counts from read_assignments file, not just representatives.
@@ -2259,6 +2362,8 @@ def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_me
     """
     # Load full read assignments to get complete cluster counts
     full_df = pd.read_csv(read_assignments_file, sep='\t')
+    if 'read' in full_df.columns and 'sequence' not in full_df.columns:
+        full_df = full_df.rename(columns={'read': 'sequence'})
 
     # Get all samples from metadata, ordered by group
     if sample_metadata is not None and 'group' in sample_metadata.columns:
@@ -2408,8 +2513,9 @@ def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_me
         x = x_start + sample_x_positions[sample] + cell_width / 2
 
         # Sample name, rotated 90 degrees
+        label = sample_display_names.get(sample, sample) if sample_display_names else sample
         d.append(draw.Text(
-            sample, font_size=7, x=x, y=header_y,
+            label, font_size=7, x=x, y=header_y,
             fill=text_color, font_family='sans-serif',
             transform=f"rotate(-90 {x} {header_y})",
             text_anchor='start'
@@ -2524,7 +2630,7 @@ def draw_matrix_legend(d, x_start, y_start, max_count, text_color='white', backg
     # Title
     d.append(draw.Text(
         "Read Count (log scale)",
-        font_size=9, x=x_start, y=y_start,
+        font_size=8, x=x_start, y=y_start,
         fill=text_color, font_family='sans-serif', font_weight='bold'
     ))
 
@@ -2858,7 +2964,8 @@ def draw_sample_dendrogram(d, matrix_data, x_start, y_bottom, dendro_height, lin
 
 
 def draw_cluster_labels_vertical(d, cluster_y_start, cluster_y_end, x_start, text_color,
-                                  cluster_labels=None, enrichment_colors=None, cluster_enrichments=None):
+                                  cluster_labels=None, enrichment_colors=None, cluster_enrichments=None,
+                                  enrichment_display_names=None):
     """Draw cluster labels on the RIGHT side for vertical mode (names only, no brackets).
 
     Args:
@@ -3014,8 +3121,8 @@ def draw_enrichment_bubbles(d, cluster_y_start, cluster_y_end, x_center, cluster
         else:
             neg_log_q = 10  # Very significant
         neg_log_q = min(10, max(0, neg_log_q))
-        # Map to alpha: 0.3 (q=1) to 1.0 (q<=1e-10)
-        alpha = 0.3 + 0.7 * (neg_log_q / 10)
+        # Map to alpha: 0.0 (q=1, NS) to 1.0 (q<=1e-10)
+        alpha = neg_log_q / 10
 
         # Draw the bubble
         d.append(draw.Circle(
@@ -3045,38 +3152,36 @@ def _compute_bubble_style(pct, pval, odds, base_color, bubble_radius, max_log2_o
     size_scale = min(1.0, pct / 100.0) if pct > 0 else 0.1
     radius = bubble_radius * max(0.3, size_scale)
 
-    # Calculate log2(odds ratio) for color intensity
+    # Calculate log2(odds ratio) for diverging color
     if odds > 0 and odds != 1.0:
         log2_or = math.log2(odds)
         log2_or_clamped = max(-max_log2_or, min(max_log2_or, log2_or))
-        intensity = log2_or_clamped / max_log2_or if log2_or > 0 else 0
+        t = log2_or_clamped / max_log2_or  # [-1, 1]
     else:
-        intensity = 0
+        t = 0
 
-    # Alpha based on significance
+    # Alpha based on significance (NS = fully transparent / hidden)
     if pval > 0 and pval < 1:
         neg_log_p = -math.log10(pval)
         neg_log_p = min(10, max(0, neg_log_p))
-        alpha = 0.3 + 0.7 * (neg_log_p / 10)
+        alpha = neg_log_p / 10
     else:
-        alpha = 0.3 if pval >= 1 else 1.0
+        alpha = 0.0 if pval >= 1 else 1.0
 
     # For samples with low percentage, use gray
     if pct < 5:
         color = '#444444'
-        alpha = 0.3
+        alpha = 0.0
     else:
-        try:
-            r = int(base_color[1:3], 16)
-            g = int(base_color[3:5], 16)
-            b = int(base_color[5:7], 16)
-            blend = 1 - intensity * 0.5
-            r = int(r + (255 - r) * blend * 0.3)
-            g = int(g + (255 - g) * blend * 0.3)
-            b = int(b + (255 - b) * blend * 0.3)
-            color = f'rgb({min(255, r)},{min(255, g)},{min(255, b)})'
-        except (ValueError, IndexError):
-            color = base_color
+        # Diverging colormap: blue (depleted) <- white (neutral) -> red (enriched)
+        if t > 0:
+            r, g, b = 255, int(255 * (1 - t)), int(255 * (1 - t))   # white -> red
+        elif t < 0:
+            s = -t
+            r, g, b = int(255 * (1 - s)), int(255 * (1 - s)), 255   # white -> blue
+        else:
+            r, g, b = 255, 255, 255  # neutral = white
+        color = f'rgb({r},{g},{b})'
 
     return color, radius, alpha
 
@@ -3175,7 +3280,8 @@ def draw_enrichment_grid(d, cluster_pos_start, cluster_pos_end, grid_start, clus
 
 
 def draw_enrichment_grid_header(d, x_start, y_pos, sample_order, sample_colors,
-                                  bubble_radius=6, bubble_spacing=2, text_color='white'):
+                                  bubble_radius=6, bubble_spacing=2, text_color='white',
+                                  sample_display_names=None):
     """Draw column headers for the enrichment grid.
 
     Args:
@@ -3187,18 +3293,20 @@ def draw_enrichment_grid_header(d, x_start, y_pos, sample_order, sample_colors,
         bubble_radius: Radius of bubbles (for spacing)
         bubble_spacing: Spacing between bubbles
         text_color: Color for header text
+        sample_display_names: Optional dict of sample -> display name
     """
     for i, sample in enumerate(sample_order):
         x_center = x_start + bubble_radius + i * (bubble_radius * 2 + bubble_spacing)
         color = sample_colors.get(sample, text_color)
 
         # Draw rotated sample name
+        label = sample_display_names.get(sample, sample) if sample_display_names else sample
         d.append(draw.Text(
-            sample,
+            label,
             font_size=8, x=x_center, y=y_pos,
             fill=color, font_family='sans-serif',
             text_anchor='start',
-            transform=f'rotate(-45, {x_center}, {y_pos})'
+            transform=f'rotate(-90, {x_center}, {y_pos})'
         ))
 
 
@@ -3251,7 +3359,7 @@ def draw_grid_legend(d, x_start, y_start, sample_order, sample_colors, text_colo
     ))
     legend_y += 14
 
-    alphas = [(0.3, "NS"), (0.65, "p<0.01"), (1.0, "p<1e⁻¹⁰")]
+    alphas = [(0.0, "NS"), (0.5, "p<0.01"), (1.0, "p<1e⁻¹⁰")]
     for i, (alpha, label) in enumerate(alphas):
         cx = x_start + 10 + i * 55
         d.append(draw.Circle(cx, legend_y + 5, bubble_radius * 0.7, fill='#888888',
@@ -3260,25 +3368,39 @@ def draw_grid_legend(d, x_start, y_start, sample_order, sample_colors, text_colo
                           fill=text_color, font_family='sans-serif', text_anchor='start'))
     legend_y += 25
 
-    # Sample color legend
+    # log2(OR) color legend
     d.append(draw.Text(
-        "Color: sample",
+        "Color: log\u2082(OR)",
         font_size=font_size, x=x_start, y=legend_y,
         fill=text_color, font_family='sans-serif'
     ))
     legend_y += 14
 
-    # Show sample colors (up to 6 per row)
-    samples_per_row = 6
-    for i, sample in enumerate(sample_order[:12]):  # Show up to 12 samples
-        row = i // samples_per_row
-        col = i % samples_per_row
-        cx = x_start + 10 + col * 60
-        cy = legend_y + row * 18
-        color = sample_colors.get(sample, '#888888')
-        d.append(draw.Circle(cx, cy + 5, bubble_radius * 0.7, fill=color, stroke='white', stroke_width=0.3))
-        d.append(draw.Text(sample, font_size=7, x=cx + bubble_radius + 5, y=cy + 8,
-                          fill=color, font_family='sans-serif', text_anchor='start'))
+    # Draw diverging gradient bar: blue -> white -> red
+    bar_width = 120
+    bar_height = 10
+    bar_x = x_start + 10
+    bar_y = legend_y
+    n_steps = 60
+    step_w = bar_width / n_steps
+    for i in range(n_steps):
+        t = (i / (n_steps - 1)) * 2 - 1  # -1 to 1
+        if t > 0:
+            r, g, b = 255, int(255 * (1 - t)), int(255 * (1 - t))
+        elif t < 0:
+            s = -t
+            r, g, b = int(255 * (1 - s)), int(255 * (1 - s)), 255
+        else:
+            r, g, b = 255, 255, 255
+        d.append(draw.Rectangle(
+            bar_x + i * step_w, bar_y, step_w + 0.5, bar_height,
+            fill=f'rgb({r},{g},{b})', stroke='none'
+        ))
+    # Tick labels
+    for val, xfrac in [("-4", 0.0), ("0", 0.5), ("+4", 1.0)]:
+        tx = bar_x + xfrac * bar_width
+        d.append(draw.Text(val, font_size=7, x=tx, y=bar_y + bar_height + 9,
+                          fill=text_color, font_family='sans-serif', text_anchor='middle'))
 
 
 def draw_bubble_legend(d, x_start, y_start, cluster_stats, text_color='white', max_radius=8, min_radius=2):
@@ -3411,7 +3533,7 @@ def draw_bubble_legend(d, x_start, y_start, cluster_stats, text_color='white', m
     alpha_y += 16
 
     # Draw example bubbles for alpha
-    for i, (alpha, label) in enumerate([(0.3, "1"), (0.65, "0.01"), (1.0, "<1e-10")]):
+    for i, (alpha, label) in enumerate([(0.0, "1"), (0.5, "0.01"), (1.0, "<1e-10")]):
         cx = alpha_x + i * 40
         d.append(draw.Circle(cx + 5, alpha_y + 5, 5,
                              fill='white', fill_opacity=alpha, stroke='gray', stroke_width=0.5))
@@ -3461,6 +3583,139 @@ def draw_enrichment_text_legend(d, x_start, y_start, enrichment_colors, text_col
             fill=text_color, font_family='sans-serif'
         ))
         x_offset += entry_spacing
+
+
+def draw_grid_legend_vertical(d, x_start, y_start, sample_order, sample_colors,
+                              text_color='white', bubble_radius=6, sample_display_names=None):
+    """Draw grid legend as a vertical column on the right side.
+
+    Returns:
+        float: Y position after the legend (for stacking more legends below).
+    """
+    swatch_size = 8
+    item_height = 11
+    section_gap = 14
+    current_y = y_start
+
+    # Title
+    d.append(draw.Text(
+        "Enrichment Grid", font_size=8, x=x_start, y=current_y,
+        fill=text_color, font_family='sans-serif', font_weight='bold'
+    ))
+    current_y += 4
+
+    # --- Size section ---
+    current_y += section_gap
+    d.append(draw.Text(
+        "Size: % of cluster", font_size=7, x=x_start + 3, y=current_y,
+        fill=text_color, font_family='sans-serif', font_style='italic'
+    ))
+
+    sizes = [(0.3, "< 5%"), (0.6, "~50%"), (1.0, "100%")]
+    for scale, label in sizes:
+        current_y += item_height
+        r = bubble_radius * scale
+        cx = x_start + 3 + swatch_size / 2
+        d.append(draw.Circle(cx, current_y - swatch_size / 2, r,
+                             fill='#888888', stroke='white', stroke_width=0.3))
+        d.append(draw.Text(label, font_size=7, x=x_start + swatch_size + 6,
+                           y=current_y - swatch_size / 2 + 1,
+                           fill=text_color, font_family='sans-serif',
+                           text_anchor='start', dominant_baseline='middle'))
+
+    # --- Opacity section ---
+    current_y += section_gap
+    d.append(draw.Text(
+        "Opacity: -log\u2081\u2080(p)", font_size=7, x=x_start + 3, y=current_y,
+        fill=text_color, font_family='sans-serif', font_style='italic'
+    ))
+
+    alphas = [(0.0, "NS"), (0.5, "p<0.01"), (1.0, "p<1e\u207b\u00b9\u2070")]
+    for alpha, label in alphas:
+        current_y += item_height
+        cx = x_start + 3 + swatch_size / 2
+        d.append(draw.Circle(cx, current_y - swatch_size / 2, bubble_radius * 0.7,
+                             fill='#888888', fill_opacity=alpha,
+                             stroke='white', stroke_width=0.3))
+        d.append(draw.Text(label, font_size=7, x=x_start + swatch_size + 6,
+                           y=current_y - swatch_size / 2 + 1,
+                           fill=text_color, font_family='sans-serif',
+                           text_anchor='start', dominant_baseline='middle'))
+
+    # --- log2(OR) color section ---
+    current_y += section_gap
+    d.append(draw.Text(
+        "Color: log\u2082(OR)", font_size=7, x=x_start + 3, y=current_y,
+        fill=text_color, font_family='sans-serif', font_style='italic'
+    ))
+
+    # Draw vertical diverging gradient bar: blue (top) -> white -> red (bottom)
+    current_y += 4
+    bar_width = swatch_size + 4
+    bar_height = 50
+    bar_x = x_start + 3
+    bar_y = current_y
+    n_steps = 50
+    step_h = bar_height / n_steps
+    for i in range(n_steps):
+        t = (i / (n_steps - 1)) * 2 - 1  # -1 (blue/top) to 1 (red/bottom)
+        if t > 0:
+            r, g, b = 255, int(255 * (1 - t)), int(255 * (1 - t))
+        elif t < 0:
+            s = -t
+            r, g, b = int(255 * (1 - s)), int(255 * (1 - s)), 255
+        else:
+            r, g, b = 255, 255, 255
+        d.append(draw.Rectangle(
+            bar_x, bar_y + i * step_h, bar_width, step_h + 0.5,
+            fill=f'rgb({r},{g},{b})', stroke='none'
+        ))
+    # Tick labels on the right side
+    label_x = bar_x + bar_width + 4
+    for val, yfrac in [("-4", 0.0), ("0", 0.5), ("+4", 1.0)]:
+        ty = bar_y + yfrac * bar_height + 1
+        d.append(draw.Text(val, font_size=7, x=label_x, y=ty,
+                           fill=text_color, font_family='sans-serif',
+                           text_anchor='start', dominant_baseline='middle'))
+    current_y += bar_height
+
+    return current_y + 14
+
+
+def draw_enrichment_text_legend_vertical(d, x_start, y_start, enrichment_colors, text_color='white',
+                                          enrichment_display_names=None):
+    """Draw cluster label color legend as a vertical column on the right side.
+
+    Returns:
+        float: Y position after the legend.
+    """
+    if not enrichment_colors:
+        return y_start
+
+    swatch_size = 8
+    item_height = 11
+    current_y = y_start
+
+    # Title
+    d.append(draw.Text(
+        "Cluster Labels", font_size=8, x=x_start, y=current_y,
+        fill=text_color, font_family='sans-serif', font_weight='bold'
+    ))
+    current_y += 4
+
+    for enrichment, color in sorted(enrichment_colors.items()):
+        current_y += item_height
+        d.append(draw.Rectangle(
+            x_start + 3, current_y - swatch_size, swatch_size, swatch_size,
+            fill=color
+        ))
+        label = enrichment_display_names.get(enrichment, enrichment) if enrichment_display_names else enrichment
+        d.append(draw.Text(label, font_size=7, x=x_start + swatch_size + 6,
+                           y=current_y - swatch_size / 2 + 1,
+                           fill=text_color, font_family='sans-serif',
+                           text_anchor='start', dominant_baseline='middle'))
+
+    return current_y + 14
 
 
 def draw_cluster_brackets_vertical(d, cluster_reads, cluster_y_start, cluster_y_end,
@@ -4119,7 +4374,7 @@ def draw_color_legends_vertical(d, featuresets, featureset_colors, featureset_co
     """
     swatch_size = 8
     item_height = 11
-    section_gap = 15
+    section_gap = 18
 
     legend_items = _build_legend_items(featuresets, featureset_colors, featureset_color_order, displayed_features)
 
@@ -4140,7 +4395,7 @@ def draw_color_legends_vertical(d, featuresets, featureset_colors, featureset_co
         # Section header
         display_name = fs_display_names.get(fs, fs.title())
         d.append(draw.Text(
-            display_name, font_size=7, x=legend_x, y=current_y,
+            display_name, font_size=8, x=legend_x, y=current_y,
             fill=text_color, font_family='sans-serif',
             text_anchor='start', font_weight='bold'
         ))
@@ -4158,7 +4413,7 @@ def draw_color_legends_vertical(d, featuresets, featureset_colors, featureset_co
 
             # Label
             d.append(draw.Text(
-                feature_label, font_size=6, x=legend_x + swatch_size + 6,
+                feature_label, font_size=7, x=legend_x + swatch_size + 6,
                 y=current_y - swatch_size/2 + 1,
                 fill=text_color, font_family='sans-serif',
                 text_anchor='start', dominant_baseline='middle'
@@ -4761,7 +5016,8 @@ def main():
         "fiberseq_LINKER": "Linker",
         "fiberseq_FIRE_LINKER": "FIRE/Linker",
         "density_line": "m6A/5mC",
-        "rect_plot": "FIRE/Linker"
+        "rect_plot": "FIRE/Linker",
+        "telomere_region": "Telomere Region"
     }
 
     max_reps = args.max_reps
@@ -4771,7 +5027,7 @@ def main():
 
     # --- Load data ---
     # Load sample metadata
-    sample_to_group, sample_colors, group_colors = load_sample_metadata(sample_metadata_file)
+    sample_to_group, sample_colors, group_colors, sample_display_names = load_sample_metadata(sample_metadata_file)
 
     # Load cluster analysis to get enrichment info, cluster priority order, stats for bubbles, and full df for features
     cluster_enrichments, cluster_order, cluster_stats, cluster_analysis_df = load_cluster_analysis(
@@ -4833,10 +5089,19 @@ def main():
     # --- Generate colors ---
     # Get all unique samples
     all_samples = sorted(set(sample for data in cluster_reads.values() for _, sample in data['reads']))
+    max_sample_label_len = max(len(sample_display_names.get(s, s)) for s in all_samples) if all_samples else 0
+    estimated_label_height = max_sample_label_len * 4.5  # px per char at font_size=7
     sample_colors = generate_sample_colors(all_samples, sample_colors)
 
     # Generate enrichment colors from group/sample colors
     enrichment_colors = get_enrichment_colors(group_colors, unique_enrichments, sample_colors)
+
+    # Build enrichment display names from sample display names
+    enrichment_display_names = {}
+    for enrich in enrichment_colors:
+        name = enrich.replace('-enriched', '')
+        display = sample_display_names.get(name, name) if sample_display_names else name
+        enrichment_display_names[enrich] = f"{display}-enriched" if enrich.endswith('-enriched') else display
 
     # --- Compute cluster-level dendrogram order if feature matrix provided ---
     cluster_dendro_data = None
@@ -4882,7 +5147,7 @@ def main():
         dendrogram_width = 100 if cluster_dendro_data is not None else 0
         bubble_radius = 8
         dendrogram_to_bubble_gap = 1  # Gap from dendrogram tip to bubble left edge
-        bubble_to_bars_gap = 12  # Gap from bubble right edge to feature bars
+        bubble_to_bars_gap = 5  # Gap from bubble right edge to feature bars
 
         # Check if enrichment grid mode should be used
         # Get sample names from cluster_stats for grid layout
@@ -4903,14 +5168,14 @@ def main():
         if use_enrichment_grid and grid_sample_names:
             num_samples = len(grid_sample_names)
             grid_width = num_samples * (grid_bubble_radius * 2 + grid_bubble_spacing) - grid_bubble_spacing
-            bubble_space = dendrogram_to_bubble_gap + grid_width + bubble_to_bars_gap + 5
+            bubble_space = dendrogram_to_bubble_gap + grid_width + bubble_to_bars_gap + 2
             print(f"  Enrichment grid mode: {num_samples} samples, grid width = {grid_width}px")
         else:
             bubble_space = dendrogram_to_bubble_gap + bubble_radius * 2 + bubble_to_bars_gap
 
         left_margin = 50 + dendrogram_width + bubble_space
         sample_dendro_height = 40 if args.show_matrix else 0  # Space for sample dendrogram
-        top_margin = 80 + sample_dendro_height  # More space for rotated sample headers + dendrogram
+        top_margin = max(80, estimated_label_height + 15) + sample_dendro_height
         bar_width = args.bar_width
         num_fs = len(featuresets)
         column_spacing = 10  # Space between columns in column mode
@@ -5006,20 +5271,18 @@ def main():
             if read not in read_y_positions:
                 continue
 
-            base_y = read_y_positions[read]
             scaffold_min_start = scaffold_min_starts.get(read, 0)
+            read_length = scaffold_lengths.get(read, 0) - scaffold_min_start
+            bar_length = floor(read_length * ratio)
 
             for fs in featuresets:
                 features = read_data[read].get(fs, [])
 
+                # Pre-color features and track displayed names
+                colored_feats = []
                 for feat in features:
-                    final_start = feat['start'] - scaffold_min_start
-                    final_stop = feat['stop'] - scaffold_min_start
-                    scaled_start = floor(final_start * ratio)
-                    scaled_stop = floor(final_stop * ratio)
-
                     feature_name = feat.get('feature', 'unknown')
-                    displayed_features[fs].add(feature_name)  # Track displayed feature
+                    displayed_features[fs].add(feature_name)
                     color_info = featureset_colors.get(fs, {}).get(feature_name)
                     if color_info is None:
                         color = '#444444'
@@ -5027,13 +5290,14 @@ def main():
                         uncolored_features[fs].add(feature_name)
                     else:
                         color, fill_opacity = color_info
+                    colored_feats.append((
+                        feat['start'] - scaffold_min_start,
+                        feat['stop'] - scaffold_min_start,
+                        color, fill_opacity
+                    ))
 
-                    drawing_data_vertical[read][fs].append({
-                        'scaled_start': scaled_start,
-                        'scaled_stop': scaled_stop,
-                        'color': color,
-                        'fill_opacity': fill_opacity
-                    })
+                drawing_data_vertical[read][fs] = smooth_features_to_pixels(
+                    colored_feats, bar_length, ratio, oversample=args.oversample)
 
         # Calculate read positions dict for vertical drawing: (x_start, y_start, bar_length)
         read_positions_vertical = {}
@@ -5072,12 +5336,21 @@ def main():
             label_width = 120  # Smaller space for read labels
             bubble_legend_height = 30  # Minimal bottom margin
         else:
-            label_width = 200  # Space for cluster labels
-            bubble_legend_height = 150  # Space for bubble legend + enrichment text legend at bottom
-        right_legend_width = 120  # Space for vertical color legend on right
+            # Compute label_width from longest cluster label text
+            max_label_len = 0
+            for cluster_id in cluster_y_start:
+                if cluster_labels and cluster_id in cluster_labels and cluster_labels[cluster_id]:
+                    text = f"{cluster_labels[cluster_id]} ({cluster_id})"
+                else:
+                    text = f"Cluster {cluster_id}"
+                max_label_len = max(max_label_len, len(text))
+            label_width = max(80, max_label_len * 5.5 + 20)  # 5.5px/char at font_size=9 + padding
+            bubble_legend_height = 30  # Minimal bottom margin (legends moved to right side)
+        right_legend_width = 170  # Space for vertical color legend on right
+        right_legend_gap = 15  # Gap between cluster labels and right legend
         bar_plot_height = 100 if args.show_matrix else 0  # Space for bar plot below matrix
         row_bar_width = 60 if args.show_matrix else 0  # Space for row barplot to right of matrix
-        image_width = left_margin + feature_bars_width + 20 + matrix_width + row_bar_width + label_width + right_legend_width
+        image_width = left_margin + feature_bars_width + 20 + matrix_width + row_bar_width + label_width + right_legend_gap + right_legend_width
         image_height = current_y + 50 + bar_plot_height + bubble_legend_height
 
         if args.column_tracks:
@@ -5160,13 +5433,14 @@ def main():
             cluster_ids = list(cluster_y_start.keys())
             matrix_data = draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, meta_df,
                               representatives_file, matrix_x_start, cell_width, cell_height,
-                              text_color, background_color)
+                              text_color, background_color,
+                              sample_display_names=sample_display_names)
 
             # Draw sample dendrogram just above sample labels (only if > 2 samples)
             n_samples = len(matrix_data.get('all_samples', []))
             if n_samples > 2:
                 header_y = min(cluster_y_start.values()) - 5
-                dendro_bottom = header_y - 30  # Above sample name labels with spacing
+                dendro_bottom = header_y - max(estimated_label_height + 5, 30)
                 draw_sample_dendrogram(d, matrix_data, matrix_x_start, dendro_bottom, sample_dendro_height,
                                        line_color=text_color)
 
@@ -5195,7 +5469,7 @@ def main():
                 header_y = min(cluster_y_start.values()) - 10
                 draw_enrichment_grid_header(d, grid_x_start, header_y, grid_sample_names, sample_colors,
                                             bubble_radius=grid_bubble_radius, bubble_spacing=grid_bubble_spacing,
-                                            text_color=text_color)
+                                            text_color=text_color, sample_display_names=sample_display_names)
 
                 # Draw faint gray connecting lines from dendrogram tips to grid start
                 connector_color = '#555555'
@@ -5243,37 +5517,34 @@ def main():
                 draw_cluster_labels_vertical(d, cluster_y_start, cluster_y_end, label_x, text_color,
                                              cluster_labels=cluster_labels,
                                              enrichment_colors=enrichment_colors,
-                                             cluster_enrichments=cluster_enrichments_dict)
+                                             cluster_enrichments=cluster_enrichments_dict,
+                                             enrichment_display_names=enrichment_display_names)
 
-            # Draw bubble/grid legend at bottom
-            legend_y = max(cluster_y_end.values()) + bar_plot_height + 30
-            if use_enrichment_grid and grid_sample_names:
-                draw_grid_legend(d, left_margin, legend_y, grid_sample_names, sample_colors,
-                                text_color=text_color, bubble_radius=grid_bubble_radius)
-                enrichment_legend_y = legend_y + 160  # Grid legend is taller - increased spacing
-            else:
-                draw_bubble_legend(d, left_margin, legend_y, cluster_stats, text_color,
-                                  max_radius=bubble_radius, min_radius=2)
-                enrichment_legend_y = legend_y + 100  # Below bubble legend - increased spacing
-            draw_enrichment_text_legend(d, left_margin, enrichment_legend_y, enrichment_colors, text_color)
-
-        # Draw featureset color legends vertically on the right side
+        # Draw all legends vertically stacked on the right side
         color_legend_x = image_width - right_legend_width + 10
         color_legend_y_start = top_margin
-        draw_color_legends_vertical(d, featuresets, featureset_colors, featureset_color_order,
+        legend_height = draw_color_legends_vertical(d, featuresets, featureset_colors, featureset_color_order,
                                     fs_display_names, color_legend_x, color_legend_y_start, text_color,
                                     displayed_features=displayed_features)
+        right_legend_current_y = color_legend_y_start + legend_height + 18
 
-        # Draw matrix color legend if matrix is enabled (between cluster colors and grid legend)
+        # Matrix legend directly below color legend
         if args.show_matrix and matrix_data:
-            # Position matrix legend on right side, between color legends and grid legend
-            # Estimate color legend height (roughly 20px per feature + header)
-            n_features = sum(len(featureset_color_order.get(fs, [])) for fs in featuresets)
-            color_legend_end_y = color_legend_y_start + min(n_features * 12 + 30, 300)
-            # Calculate midpoint between color legend end and grid legend start
-            matrix_legend_y = (color_legend_end_y + legend_y) // 2
-            draw_matrix_legend(d, color_legend_x, matrix_legend_y, matrix_data['max_count'],
+            draw_matrix_legend(d, color_legend_x, right_legend_current_y, matrix_data['max_count'],
                               text_color, background_color)
+            right_legend_current_y += 45
+
+        # Grid/bubble legend below matrix legend
+        if use_enrichment_grid and grid_sample_names:
+            right_legend_current_y = draw_grid_legend_vertical(
+                d, color_legend_x, right_legend_current_y, grid_sample_names, sample_colors,
+                text_color=text_color, bubble_radius=grid_bubble_radius,
+                sample_display_names=sample_display_names)
+
+        # Enrichment text legend at bottom of right column
+        draw_enrichment_text_legend_vertical(d, color_legend_x, right_legend_current_y,
+                                            enrichment_colors, text_color,
+                                            enrichment_display_names=enrichment_display_names)
 
         # Save vertical plot
         d.save_svg(args.output)
@@ -5566,26 +5837,28 @@ def main():
                     density_features, args.density_bin_size, read_length, base_feature
                 )
 
+            # Rasterize features to pixel runs
+            colored_feats = []
             for feat in features:
                 final_start = feat['start'] - scaffold_min_start
                 final_stop = feat['stop'] - scaffold_min_start
 
-                # Feature bars start after annotation bars (annot at +22, height ~25, so start at +50)
-                start_y = top_margin + 50 + floor(final_start * ratio)
-                stop_y = top_margin + 50 + floor(final_stop * ratio)
-
                 feature_name = feat['feature']
-                displayed_features[fs].add(feature_name)  # Track displayed feature
+                displayed_features[fs].add(feature_name)
                 color, fill_opacity = featureset_colors[fs].get(feature_name, ("#ffffff", 1.0))
                 if feature_name not in featureset_colors[fs]:
                     uncolored_features[fs].add(feature_name)
 
+                colored_feats.append((final_start, final_stop, color, fill_opacity))
+
+            bar_length = floor((read_length - scaffold_min_start) * ratio)
+            for run in smooth_features_to_pixels(colored_feats, bar_length, ratio, oversample=args.oversample):
                 drawing_data[read][fs].append({
                     "x": base_x + x_offset,
-                    "y": start_y,
-                    "height": stop_y - start_y,
-                    "fill": color,
-                    "fill_opacity": fill_opacity
+                    "y": top_margin + 50 + run['scaled_start'],
+                    "height": run['scaled_stop'] - run['scaled_start'],
+                    "fill": run['color'],
+                    "fill_opacity": run['fill_opacity']
                 })
 
     # --- Calculate image dimensions and read heights for borders ---
