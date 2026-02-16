@@ -56,7 +56,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Select representative reads for cluster visualization")
     parser.add_argument("--cluster-analysis", required=True, help="Path to cluster_analysis.tsv")
     parser.add_argument("--read-assignments", required=True, help="Path to sequence_assignments.tsv")
-    parser.add_argument("--cluster-labels", required=True, help="Path to cluster labels file with _top columns (TSV or Excel)")
+    parser.add_argument("--cluster-labels", default=None, help="Path to cluster labels file with _top columns (TSV or Excel)")
+    parser.add_argument("--feature-groups", nargs='+', default=None,
+                        help="Named feature groups for scoring, e.g. 'telomeric=canonical_telomere,noncanonical_telomere'")
     parser.add_argument("--bed-prefix", required=True, help="Base directory for BED files")
     parser.add_argument("--database", default="KS_human_CHM13", help="Database name")
     parser.add_argument("--smoothness", default="smoothed", help="Smoothness level")
@@ -145,10 +147,34 @@ def check_read_features_cached(read_id, sample, cluster_features, feature_cache)
     return has_top, matches
 
 
+def score_multi_feature_groups(read_features, feature_groups):
+    """Score a read by total bp in each feature group.
+
+    Args:
+        read_features: {featureset: {feature: bp}} for one read
+        feature_groups: {'telomeric': [features], 'satellite': [features]}
+
+    Returns:
+        (n_groups_present, per_group_bp_dict)
+    """
+    n_groups = 0
+    group_bp = {}
+    for group_name, features in feature_groups.items():
+        bp = 0
+        for fs_features in read_features.values():
+            for feat in features:
+                bp += fs_features.get(feat, 0)
+        group_bp[group_name] = bp
+        if bp > 0:
+            n_groups += 1
+    return n_groups, group_bp
+
+
 def select_representatives(cluster_data, cluster_features, n_reps, feature_cache,
                            preferred_min_length=DEFAULT_PREFERRED_MIN,
                            preferred_max_length=DEFAULT_PREFERRED_MAX,
-                           length_column='read_span'):
+                           length_column='read_span',
+                           feature_groups=None):
     """Select best representative reads for a cluster.
 
     Priority: reads in preferred length range that have the defining features.
@@ -157,12 +183,13 @@ def select_representatives(cluster_data, cluster_features, n_reps, feature_cache
 
     Args:
         cluster_data: DataFrame with cluster reads
-        cluster_features: List of (feature, pct, featureset) tuples
+        cluster_features: List of (feature, pct, featureset) tuples (used when feature_groups is None)
         n_reps: Number of representatives to select
         feature_cache: Pre-loaded feature cache
         preferred_min_length: Minimum preferred read length (default: 20000)
         preferred_max_length: Maximum preferred read length (default: 30000)
         length_column: Column to use for length filtering (default: 'read_span')
+        feature_groups: dict of {group_name: [features]} for multi-group scoring (optional)
     """
     # Fall back to read_length if read_span not available
     if length_column not in cluster_data.columns:
@@ -170,30 +197,60 @@ def select_representatives(cluster_data, cluster_features, n_reps, feature_cache
 
     preferred_mid = (preferred_min_length + preferred_max_length) / 2
 
-    # For preferred range: sort by closeness to midpoint
+    # Build length-tiered candidate lists
     in_range = cluster_data[(cluster_data[length_column] >= preferred_min_length) &
                             (cluster_data[length_column] <= preferred_max_length)].copy()
     in_range['_dist'] = abs(in_range[length_column] - preferred_mid)
     in_range = in_range.sort_values('_dist').drop(columns=['_dist'])
 
-    # For below range: sort by closeness to min (prefer longer)
     below_range = cluster_data[(cluster_data[length_column] >= MIN_READ_LENGTH) &
                                (cluster_data[length_column] < preferred_min_length)].copy()
     below_range['_dist'] = preferred_min_length - below_range[length_column]
     below_range = below_range.sort_values('_dist').drop(columns=['_dist'])
 
-    # For above range: sort by closeness to max (prefer shorter)
     above_range = cluster_data[cluster_data[length_column] > preferred_max_length].copy()
     above_range['_dist'] = above_range[length_column] - preferred_max_length
     above_range = above_range.sort_values('_dist').drop(columns=['_dist'])
 
-    # Very short reads last
     very_short = cluster_data[cluster_data[length_column] < MIN_READ_LENGTH].copy()
     very_short = very_short.sort_values(length_column, ascending=False)
 
-    # Tier order: preferred range, then closest to range boundaries
     tiers = [in_range, below_range, above_range, very_short]
 
+    # --- Feature-group scoring mode ---
+    if feature_groups:
+        # Score all candidates, then sort by feature group richness
+        scored = []
+        for tier_df in tiers:
+            for _, row in tier_df.iterrows():
+                read_features = feature_cache.get((row['sequence'], row['sample']), {})
+                n_groups, group_bp = score_multi_feature_groups(read_features, feature_groups)
+                total_bp = sum(group_bp.values())
+                dist = abs(row[length_column] - preferred_mid)
+                scored.append((row, n_groups, total_bp, dist, group_bp))
+
+        # Sort: most groups present, most total bp, closest to midpoint
+        scored.sort(key=lambda x: (-x[1], -x[2], x[3]))
+
+        selected = []
+        for row, n_groups, total_bp, dist, group_bp in scored:
+            if len(selected) >= n_reps:
+                break
+            rep = {
+                'sequence': row['sequence'],
+                'sample': row['sample'],
+                'read_length': _get_length(row, 'read_length', length_column),
+                'read_span': _get_length(row, 'read_span', length_column),
+                'centroid_distance': row['centroid_distance'],
+                'n_feature_groups': n_groups,
+            }
+            for gname, gbp in group_bp.items():
+                rep[f'{gname}_bp'] = gbp
+            selected.append(rep)
+
+        return selected
+
+    # --- Original cluster-features scoring mode ---
     selected = []
 
     for tier_df in tiers:
@@ -212,7 +269,6 @@ def select_representatives(cluster_data, cluster_features, n_reps, feature_cache
 
     # If not enough found, fall back to reads closest to preferred range
     if len(selected) < n_reps:
-        # Combine all tiers and try without feature requirement
         all_reads = pd.concat(tiers, ignore_index=True)
         for _, row in all_reads.iterrows():
             if len(selected) >= n_reps:
@@ -270,28 +326,56 @@ def normalize_by_rank(cluster_reps, n_per_cluster):
     return normalized
 
 
+def parse_feature_groups(group_strings):
+    """Parse feature group strings like 'telomeric=feat1,feat2' into dict."""
+    groups = {}
+    for gs in group_strings:
+        if '=' not in gs:
+            print(f"  WARNING: Ignoring malformed feature group (no '='): {gs}")
+            continue
+        name, features_str = gs.split('=', 1)
+        groups[name.strip()] = [f.strip() for f in features_str.split(',') if f.strip()]
+    return groups
+
+
 def main():
     args = parse_args()
 
     print("Loading data...")
 
+    # Parse feature groups if provided
+    feature_groups = None
+    if args.feature_groups:
+        feature_groups = parse_feature_groups(args.feature_groups)
+        print(f"  Feature groups: {list(feature_groups.keys())}")
+        for gname, feats in feature_groups.items():
+            print(f"    {gname}: {feats}")
+
+    # Validate: need either --cluster-labels or --feature-groups
+    if not args.cluster_labels and not feature_groups:
+        print("  ERROR: Must provide either --cluster-labels or --feature-groups")
+        return
+
     # Load read assignments
     reads_df = pd.read_csv(args.read_assignments, sep='\t')
     print(f"  Loaded {len(reads_df)} reads from {args.read_assignments}")
 
-    # Load cluster labels (for feature info)
-    if args.cluster_labels.endswith('.xlsx') or args.cluster_labels.endswith('.xls'):
-        labels_df = pd.read_excel(args.cluster_labels)
-    else:
-        labels_df = pd.read_csv(args.cluster_labels, sep='\t')
-    print(f"  Loaded {len(labels_df)} clusters from {args.cluster_labels}")
+    # Load cluster labels if provided (for _top feature mode)
+    labels_df = None
+    if args.cluster_labels:
+        if args.cluster_labels.endswith('.xlsx') or args.cluster_labels.endswith('.xls'):
+            labels_df = pd.read_excel(args.cluster_labels)
+        else:
+            labels_df = pd.read_csv(args.cluster_labels, sep='\t')
+        print(f"  Loaded {len(labels_df)} clusters from {args.cluster_labels}")
 
-    # Check for _top columns
-    top_cols = [c for c in labels_df.columns if c.endswith('_top')]
-    if not top_cols:
-        print("  ERROR: No _top columns found in cluster_labels file")
-        return
-    print(f"  Found {len(top_cols)} feature columns: {top_cols}")
+        # Check for _top columns (only required in non-feature-groups mode)
+        if not feature_groups:
+            top_cols = [c for c in labels_df.columns if c.endswith('_top')]
+            if not top_cols:
+                print("  ERROR: No _top columns found in cluster_labels file")
+                return
+            print(f"  Found {len(top_cols)} feature columns: {top_cols}")
 
     # Determine clusters to process
     if args.clusters:
@@ -324,17 +408,18 @@ def main():
         if cluster_data.empty:
             continue
 
-        # Get cluster features
-        cluster_row = labels_df[labels_df['cluster_id'] == cluster_id]
-        if cluster_row.empty:
-            cluster_features = []
-        else:
-            cluster_features = parse_top_features(cluster_row.iloc[0].to_dict(), args.feature_min_pct)
+        # Get cluster features (original _top mode)
+        cluster_features = []
+        if labels_df is not None and not feature_groups:
+            cluster_row = labels_df[labels_df['cluster_id'] == cluster_id]
+            if not cluster_row.empty:
+                cluster_features = parse_top_features(cluster_row.iloc[0].to_dict(), args.feature_min_pct)
 
         reps = select_representatives(
             cluster_data, cluster_features, args.n_per_cluster, feature_cache,
             preferred_min_length=args.preferred_min_length,
-            preferred_max_length=args.preferred_max_length
+            preferred_max_length=args.preferred_max_length,
+            feature_groups=feature_groups
         )
 
         cluster_reps[cluster_id] = reps
@@ -354,7 +439,7 @@ def main():
         if cluster_id not in normalized_reps:
             continue
         for rank, rep in enumerate(normalized_reps[cluster_id], 1):
-            rows.append({
+            row_dict = {
                 'cluster_id': cluster_id,
                 'rank': rank,
                 'sequence': rep['sequence'],
@@ -362,9 +447,15 @@ def main():
                 'read_length': rep.get('read_length', 0),
                 'read_span': rep.get('read_span', rep.get('read_length', 0)),
                 'centroid_distance': rep['centroid_distance'],
-                'has_top_feature': rep['has_top_feature'],
-                'n_feature_matches': rep['n_feature_matches']
-            })
+            }
+            if feature_groups:
+                row_dict['n_feature_groups'] = rep.get('n_feature_groups', 0)
+                for gname in feature_groups:
+                    row_dict[f'{gname}_bp'] = rep.get(f'{gname}_bp', 0)
+            else:
+                row_dict['has_top_feature'] = rep['has_top_feature']
+                row_dict['n_feature_matches'] = rep['n_feature_matches']
+            rows.append(row_dict)
 
     out_df = pd.DataFrame(rows)
     out_df.to_csv(args.output, sep='\t', index=False)
@@ -383,10 +474,18 @@ def main():
     print(f"  Total reads: {len(rows)}")
 
     if rows:
-        has_features = sum(1 for r in rows if r['has_top_feature'])
-        print(f"  Reads with top feature: {has_features} ({has_features/len(rows)*100:.1f}%)")
+        if feature_groups:
+            n_both = sum(1 for r in rows if r.get('n_feature_groups', 0) == len(feature_groups))
+            print(f"  Reads with all {len(feature_groups)} groups: {n_both} ({n_both/len(rows)*100:.1f}%)")
+            for gname in feature_groups:
+                col = f'{gname}_bp'
+                nonzero = sum(1 for r in rows if r.get(col, 0) > 0)
+                total_bp = sum(r.get(col, 0) for r in rows)
+                print(f"  {gname}: {nonzero} reads with signal, {total_bp:,} total bp")
+        else:
+            has_features = sum(1 for r in rows if r['has_top_feature'])
+            print(f"  Reads with top feature: {has_features} ({has_features/len(rows)*100:.1f}%)")
 
-        # Use read_span for length statistics (actual read length)
         spans = [r['read_span'] for r in rows]
         print(f"  Read span range: {min(spans):,} - {max(spans):,} bp")
     else:

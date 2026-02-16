@@ -70,6 +70,7 @@ def find_featureset_beds(bed_dir, samples, featuresets, database="KS_human_CHM13
             patterns = [
                 f"{base_path}/{sample}.telogator.1.{database}.{fs}.{smoothness}.KaryoScope.bed",
                 f"{base_path}/{sample}.telogator.1.{database}.{fs}.{smoothness}.bed",
+                f"{base_path}/{sample}.telogator.1.{database}.{fs}.{smoothness}.features.bed",
             ]
 
             for pattern in patterns:
@@ -158,17 +159,24 @@ def main():
 
     # Derive file paths from prefix
     read_assignments_file = f"{args.prefix}.read_assignments.tsv"
+    if not os.path.exists(read_assignments_file):
+        read_assignments_file = f"{args.prefix}.sequence_assignments.tsv"
     cluster_analysis_file = f"{args.prefix}.cluster_analysis.tsv"
 
     print(f"\nPrefix: {args.prefix}")
 
     # Load read assignments
     if not os.path.exists(read_assignments_file):
-        print(f"ERROR: Read assignments file not found: {read_assignments_file}")
+        print(f"ERROR: No read/sequence assignments file found for prefix: {args.prefix}")
         sys.exit(1)
 
     print(f"\nLoading read assignments: {read_assignments_file}")
     assignments = pd.read_csv(read_assignments_file, sep='\t')
+
+    # Column compatibility: normalize to 'sequence'
+    if 'sequence' not in assignments.columns and 'read' in assignments.columns:
+        assignments.rename(columns={'read': 'sequence'}, inplace=True)
+
     print(f"  Total reads: {len(assignments)}")
     print(f"  Total clusters: {assignments['cluster'].nunique()}")
 
@@ -245,7 +253,7 @@ def main():
     results = []
 
     for cluster_id in clusters:
-        cluster_reads = set(assignments[assignments['cluster'] == cluster_id]['read'].tolist())
+        cluster_reads = set(assignments[assignments['cluster'] == cluster_id]['sequence'].tolist())
 
         if len(cluster_reads) < args.min_size:
             continue
