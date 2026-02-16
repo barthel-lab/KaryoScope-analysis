@@ -46,6 +46,9 @@ from math import floor
 # Capture original command line for logging
 _original_command = ' '.join(sys.argv)
 
+# Cache argparse defaults (before parse_args modifies them)
+_argparse_defaults = None
+
 import drawsvg as draw
 import matplotlib
 import matplotlib.colors as mcolors
@@ -124,6 +127,12 @@ def parse_args():
                              "(default: 1)")
     parser.add_argument("--smoothness", default="smoothed",
                         help="Smoothness level (default: smoothed)")
+    parser.add_argument("--feature-mode", dest="feature_mode", default="transition",
+                        choices=["smooth", "transition"],
+                        help="'transition' (default): direct scaling, preserves all features. "
+                             "'smooth': windowed majority vote.")
+    parser.add_argument("--min-feature-width", dest="min_feature_width", type=float, default=1.0,
+                        help="Minimum pixel width per feature in transition mode (default: 1.0)")
 
     # Read selection (filtering is done by KaryoScope_select_representatives.py)
     parser.add_argument("--reads-file", dest="reads_file", default=None,
@@ -201,7 +210,92 @@ def parse_args():
     parser.add_argument("--font-family", dest="font_family", default="sans-serif",
                         help="Font family for text labels (default: sans-serif)")
 
+    global _argparse_defaults
+    _argparse_defaults = {}
+    for action in parser._actions:
+        if action.dest != 'help' and action.default is not None:
+            _argparse_defaults[action.dest] = action.default
     return parser.parse_args()
+
+
+def _print_params_and_command(args, database, featuresets, background_color):
+    """Print comprehensive parameters table and command, matching clustering log format."""
+    defaults = _argparse_defaults or {}
+
+    def _fmt(value, attr_name):
+        """Format a value, appending (default) if it matches the argparse default."""
+        if value is None:
+            s = "None"
+        elif isinstance(value, bool):
+            s = str(value)
+        else:
+            s = str(value)
+        default_val = defaults.get(attr_name)
+        if default_val is not None and value == default_val:
+            s += " (default)"
+        elif value is None and attr_name not in defaults:
+            s += " (default)"
+        return s
+
+    params = [
+        ("cluster-analysis-prefix", str(args.cluster_prefix), None),
+        ("output", str(args.output), None),
+        ("bed", f"{len(args.bed_files)} file(s)" if args.bed_files else "auto-discovered", None),
+        ("input-bed-prefix", str(args.input_bed_prefix) if args.input_bed_prefix else "N/A", None),
+        ("database", str(database), None),
+        ("colors", str(args.colors_dir), None),
+        ("featuresets", ','.join(featuresets), "featuresets"),
+        ("smoothness", _fmt(args.smoothness, "smoothness"), None),
+        ("background", _fmt(background_color, "background_color"), None),
+        ("bar-width", _fmt(args.bar_width, "bar_width"), None),
+        ("bar-spacing", _fmt(args.bar_spacing, "bar_spacing"), None),
+        ("read-spacing", _fmt(args.read_spacing, "read_spacing"), None),
+        ("cluster-spacing", _fmt(args.cluster_spacing, "cluster_spacing"), None),
+        ("ratio", _fmt(args.ratio, "ratio"), None),
+        ("oversample", _fmt(args.oversample, "oversample"), None),
+        ("feature-mode", _fmt(args.feature_mode, "feature_mode"), None),
+        ("min-feature-width", _fmt(args.min_feature_width, "min_feature_width"), None),
+        ("reads-file", _fmt(args.reads_file, "reads_file"), None),
+        ("curated-reps", _fmt(args.curated_reps, "curated_reps"), None),
+        ("n-per-cluster", _fmt(args.max_reps, "max_reps"), None),
+        ("max-qvalue", _fmt(args.max_qvalue, "max_qvalue"), None),
+        ("vertical", _fmt(args.vertical, "vertical"), None),
+        ("show-matrix", _fmt(args.show_matrix, "show_matrix"), None),
+        ("column-tracks", _fmt(args.column_tracks, "column_tracks"), None),
+        ("show-read-indices", _fmt(args.show_read_indices, "show_read_indices"), None),
+        ("show-dendrogram", _fmt(args.show_dendrogram, "show_dendrogram"), None),
+        ("hide-brackets", _fmt(args.hide_brackets, "hide_brackets"), None),
+        ("hide-dendrogram", _fmt(args.hide_dendrogram, "hide_dendrogram"), None),
+        ("full-dendrogram", _fmt(args.full_dendrogram, "full_dendrogram"), None),
+        ("no-reorder", _fmt(args.no_reorder, "no_reorder"), None),
+        ("target-width", _fmt(args.target_width, "target_width"), None),
+        ("target-height", _fmt(args.target_height, "target_height"), None),
+        ("orient-telomere-top", _fmt(args.orient_telomere_top, "orient_telomere_top"), None),
+        ("cluster-labels", _fmt(args.cluster_labels, "cluster_labels"), None),
+        ("label-column", _fmt(args.label_column, "label_column"), None),
+        ("enrichment-grid", _fmt(args.enrichment_grid, "enrichment_grid"), None),
+        ("show-clade-id", _fmt(args.show_clade_id, "show_clade_id"), None),
+        ("show-clade-count", _fmt(args.show_clade_count, "show_clade_count"), None),
+        ("show-cluster-numbers", _fmt(args.show_cluster_numbers, "show_cluster_numbers"), None),
+        ("hide-read-labels", _fmt(args.hide_read_labels, "hide_read_labels"), None),
+        ("structural-threshold", _fmt(args.structural_threshold, "structural_threshold"), None),
+        ("priority-samples", _fmt(args.priority_samples, "priority_samples"), None),
+        ("font-family", _fmt(args.font_family, "font_family"), None),
+        ("log-file", _fmt(args.log_file, "log_file"), None),
+    ]
+
+    print("\n" + "=" * 60)
+    print("Parameters")
+    print("=" * 60)
+    print(f"{'Parameter':<25} {'Value':<35}")
+    print(f"{'-' * 25} {'-' * 35}")
+    for param, value, _ in params:
+        print(f"{param:<25} {str(value):<35}")
+
+    print("\n" + "=" * 60)
+    print("Command")
+    print("=" * 60)
+    print(_original_command)
 
 
 # =============================================================================
@@ -2160,6 +2254,101 @@ def smooth_features_to_pixels(colored_features, bar_length, ratio, oversample=1)
         })
 
     return result
+
+
+def features_to_pixels_direct(colored_features, bar_length, ratio, min_width=0.5):
+    """Direct-scale bp features to pixel coordinates, preserving every transition.
+
+    Unlike smooth_features_to_pixels (windowed majority vote), this maps each
+    feature's bp coordinates directly to pixel space and enforces a minimum
+    pixel width so sub-pixel features remain visible.
+
+    Args:
+        colored_features: list of (bp_start, bp_stop, color, fill_opacity)
+        bar_length: total pixel length for the bar
+        ratio: pixels per base pair
+        min_width: minimum pixel width per feature (default: 0.5)
+
+    Returns:
+        list of {scaled_start, scaled_stop, color, fill_opacity} dicts,
+        one per contiguous same-color run.
+    """
+    if not colored_features or bar_length <= 0:
+        return []
+
+    sorted_feats = sorted(colored_features, key=lambda f: (f[0], f[1]))
+
+    # Scale each feature to pixel space, enforcing minimum width
+    scaled = []
+    for bp_start, bp_stop, color, opacity in sorted_feats:
+        px_start = bp_start * ratio
+        px_stop = bp_stop * ratio
+
+        # Clamp to bar bounds
+        px_start = max(0.0, min(px_start, bar_length))
+        px_stop = max(0.0, min(px_stop, bar_length))
+
+        # Enforce minimum width
+        if px_stop - px_start < min_width:
+            px_stop = px_start + min_width
+            if px_stop > bar_length:
+                px_stop = bar_length
+                px_start = max(0.0, px_stop - min_width)
+
+        if px_stop > px_start:
+            scaled.append((px_start, px_stop, color, opacity))
+
+    if not scaled:
+        return []
+
+    # Run-length encode adjacent same-color features
+    result = []
+    run_start, run_stop, run_color, run_opacity = scaled[0]
+
+    for px_start, px_stop, color, opacity in scaled[1:]:
+        if color == run_color and opacity == run_opacity and abs(px_start - run_stop) < 0.01:
+            run_stop = px_stop
+        else:
+            result.append({
+                'scaled_start': run_start,
+                'scaled_stop': run_stop,
+                'color': run_color,
+                'fill_opacity': run_opacity
+            })
+            run_start, run_stop, run_color, run_opacity = px_start, px_stop, color, opacity
+
+    # Flush last run
+    result.append({
+        'scaled_start': run_start,
+        'scaled_stop': run_stop,
+        'color': run_color,
+        'fill_opacity': run_opacity
+    })
+
+    return result
+
+
+def rasterize_features(colored_features, bar_length, ratio, feature_mode="transition",
+                       oversample=1, min_feature_width=0.5):
+    """Dispatch feature rasterization based on mode.
+
+    Args:
+        colored_features: list of (bp_start, bp_stop, color, fill_opacity)
+        bar_length: total pixel length for the bar
+        ratio: pixels per base pair
+        feature_mode: 'transition' for direct scaling, 'smooth' for windowed vote
+        oversample: oversampling factor (smooth mode only)
+        min_feature_width: minimum pixel width (transition mode only)
+
+    Returns:
+        list of {scaled_start, scaled_stop, color, fill_opacity} dicts
+    """
+    if feature_mode == "transition":
+        return features_to_pixels_direct(colored_features, bar_length, ratio,
+                                         min_width=min_feature_width)
+    else:
+        return smooth_features_to_pixels(colored_features, bar_length, ratio,
+                                         oversample=oversample)
 
 
 def draw_feature_bars_vertical(d, drawing_data, featuresets, bar_width, read_positions,
@@ -5296,8 +5485,11 @@ def main():
                         color, fill_opacity
                     ))
 
-                drawing_data_vertical[read][fs] = smooth_features_to_pixels(
-                    colored_feats, bar_length, ratio, oversample=args.oversample)
+                drawing_data_vertical[read][fs] = rasterize_features(
+                    colored_feats, bar_length, ratio,
+                    feature_mode=args.feature_mode,
+                    oversample=args.oversample,
+                    min_feature_width=args.min_feature_width)
 
         # Calculate read positions dict for vertical drawing: (x_start, y_start, bar_length)
         read_positions_vertical = {}
@@ -5563,31 +5755,7 @@ def main():
         print(f"Total reads plotted: {total_reads}")
         print(f"\n✅ Saved to {args.output}")
 
-        # Print parameters
-        params = [
-            ("cluster-analysis-prefix", args.cluster_prefix),
-            ("output", args.output),
-            ("featuresets", ','.join(featuresets)),
-            ("smoothness", args.smoothness),
-            ("background", background_color),
-            ("reads-file", args.reads_file if args.reads_file else "None"),
-            ("curated-reps", args.curated_reps if args.curated_reps else "None"),
-            ("show-read-indices", args.show_read_indices),
-            ("hide-brackets", args.hide_brackets),
-            ("hide-dendrogram", args.hide_dendrogram),
-            ("cluster-labels", args.cluster_labels if args.cluster_labels else "None"),
-            ("vertical", args.vertical),
-            ("show-matrix", args.show_matrix),
-            ("column-tracks", args.column_tracks),
-            ("n-per-cluster", args.max_reps if args.max_reps else "None"),
-        ]
-        print(f"\n{'='*60}")
-        print("Parameters")
-        print(f"{'='*60}")
-        print(f"{'Parameter':<25} {'Value':<35}")
-        print(f"{'-'*25} {'-'*35}")
-        for param, value in params:
-            print(f"{param:<25} {str(value):<35}")
+        _print_params_and_command(args, database, featuresets, background_color)
 
         return  # Exit main after vertical mode
 
@@ -5852,7 +6020,10 @@ def main():
                 colored_feats.append((final_start, final_stop, color, fill_opacity))
 
             bar_length = floor((read_length - scaffold_min_start) * ratio)
-            for run in smooth_features_to_pixels(colored_feats, bar_length, ratio, oversample=args.oversample):
+            for run in rasterize_features(colored_feats, bar_length, ratio,
+                                         feature_mode=args.feature_mode,
+                                         oversample=args.oversample,
+                                         min_feature_width=args.min_feature_width):
                 drawing_data[read][fs].append({
                     "x": base_x + x_offset,
                     "y": top_margin + 50 + run['scaled_start'],
@@ -6028,44 +6199,7 @@ def main():
     print(f"Total reads plotted: {total_reads}")
     print(f"\n✅ Saved to {args.output}")
 
-    # --- Print parameters table ---
-    print("\n" + "=" * 60)
-    print("Parameters")
-    print("=" * 60)
-    params = [
-        ("cluster-analysis-prefix", args.cluster_prefix),
-        ("output", args.output),
-        ("bed", f"{len(args.bed_files)} file(s)" if args.bed_files else "auto-discovered"),
-        ("input-bed-prefix", args.input_bed_prefix if args.input_bed_prefix else "N/A"),
-        ("database", database),
-        ("colors", args.colors_dir),
-        ("featuresets", args.featuresets),
-        ("background", args.background_color),
-        ("bar-width", args.bar_width),
-        ("bar-spacing", args.bar_spacing),
-        ("read-spacing", args.read_spacing),
-        ("cluster-spacing", args.cluster_spacing),
-        ("ratio", args.ratio),
-        ("smoothness", args.smoothness),
-        ("reads-file", args.reads_file if args.reads_file else "None"),
-        ("hide-brackets", args.hide_brackets),
-        ("hide-dendrogram", args.hide_dendrogram),
-        ("no-reorder", args.no_reorder),
-        ("cluster-labels", args.cluster_labels if args.cluster_labels else "None"),
-        ("vertical", args.vertical),
-        ("n-per-cluster", args.max_reps if args.max_reps else "None"),
-        ("log-file", args.log_file),
-    ]
-    print(f"{'Parameter':<25} {'Value':<35}")
-    print(f"{'-' * 25} {'-' * 35}")
-    for param, value in params:
-        print(f"{param:<25} {str(value):<35}")
-
-    # --- Print command ---
-    print("\n" + "=" * 60)
-    print("Command")
-    print("=" * 60)
-    print(_original_command)
+    _print_params_and_command(args, database, featuresets, background_color)
 
 
 if __name__ == "__main__":
