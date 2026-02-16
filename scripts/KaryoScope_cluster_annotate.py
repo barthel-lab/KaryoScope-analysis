@@ -30,6 +30,9 @@ import math
 import os
 import sys
 
+# Capture original command line for logging
+_original_command = ' '.join(sys.argv)
+
 import pandas as pd
 
 
@@ -73,12 +76,14 @@ def find_featureset_beds(bed_dirs, samples, featuresets, database="KS_human_CHM1
                     f"{base_path}/{sample}.telogator.1.{database}.{fs}.{smoothness}.KaryoScope.bed",
                     f"{base_path}/{sample}.telogator.1.{database}.{fs}.{smoothness}.bed",
                     f"{base_path}/{sample}.telogator.1.{database}.{fs}.{smoothness}.features.bed",
+                    f"{base_path}/{sample}.telogator.1.{database}.{fs}.{smoothness}.merged.bed",
                 ]
                 # Also try flat directory (files directly in bed_dir)
                 patterns += [
                     f"{bed_dir}/{sample}.telogator.1.{database}.{fs}.{smoothness}.KaryoScope.bed",
                     f"{bed_dir}/{sample}.telogator.1.{database}.{fs}.{smoothness}.bed",
                     f"{bed_dir}/{sample}.telogator.1.{database}.{fs}.{smoothness}.features.bed",
+                    f"{bed_dir}/{sample}.telogator.1.{database}.{fs}.{smoothness}.merged.bed",
                 ]
 
                 for pattern in patterns:
@@ -176,6 +181,80 @@ def score_cluster_features(cluster_reads, fractions, thresholds):
     return scores
 
 
+class TeeLogger:
+    """Write to both stdout and a log file."""
+    def __init__(self, log_path):
+        self.terminal = sys.stdout
+        self.log = open(log_path, 'w')
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        self.log.flush()
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+
+    def close(self):
+        self.log.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
+
+# Cache argparse defaults (before parse_args modifies them)
+_argparse_defaults = None
+
+
+def _print_params_and_command(args):
+    """Print comprehensive parameters table and original command."""
+    defaults = _argparse_defaults or {}
+
+    def _fmt(value, attr_name):
+        if value is None:
+            s = "None"
+        else:
+            s = str(value)
+        default_val = defaults.get(attr_name)
+        if default_val is not None and value == default_val:
+            s += " (default)"
+        elif value is None and attr_name not in defaults:
+            s += " (default)"
+        return s
+
+    params = [
+        ("prefix", str(args.prefix), None),
+        ("output", str(args.output), None),
+        ("bed-dir", str(args.bed_dir), None),
+        ("featuresets", _fmt(args.featuresets, "featuresets"), None),
+        ("database", _fmt(args.database, "database"), None),
+        ("smoothness", _fmt(args.smoothness, "smoothness"), None),
+        ("top-n", _fmt(args.top_n, "top_n"), None),
+        ("clusters", _fmt(args.clusters, "clusters"), None),
+        ("min-size", _fmt(args.min_size, "min_size"), None),
+        ("exclude-features", _fmt(args.exclude_features, "exclude_features"), None),
+        ("log-file", _fmt(args.log_file, "log_file"), None),
+    ]
+
+    print("\n" + "=" * 60)
+    print("Parameters")
+    print("=" * 60)
+    print(f"{'Parameter':<25} {'Value':<35}")
+    print(f"{'-' * 25} {'-' * 35}")
+    for param, value, _ in params:
+        print(f"{param:<25} {str(value):<35}")
+
+    print("\n" + "=" * 60)
+    print("Command")
+    print("=" * 60)
+    print(_original_command)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Annotate clusters with dominant features per featureset",
@@ -204,12 +283,31 @@ def main():
     parser.add_argument("--exclude-features", dest="exclude_features",
                         default="*multigroup*,*_arm,nonsubtelomeric,nonacrocentric,nonrepeat,categorized,canonical_telomere*",
                         help="Comma-separated features to exclude, supports wildcards (default: '*multigroup*,*_arm,nonsubtelomeric,nonacrocentric,nonrepeat,categorized,canonical_telomere*')")
+    parser.add_argument("--log-file", dest="log_file",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help="Save console output to {output}.log (default: True)")
+
+    global _argparse_defaults
+    _argparse_defaults = {}
+    for action in parser._actions:
+        if action.dest != 'help' and action.default is not None:
+            _argparse_defaults[action.dest] = action.default
 
     args = parser.parse_args()
+
+    # --- Set up logging ---
+    if args.log_file:
+        if args.output.endswith('.tsv'):
+            log_path = args.output[:-4] + '.log'
+        else:
+            log_path = args.output + '.log'
+        sys.stdout = TeeLogger(log_path)
 
     print("=" * 60)
     print("KaryoScope Cluster Annotation")
     print("=" * 60)
+
+    _print_params_and_command(args)
 
     # Derive file paths from prefix
     read_assignments_file = f"{args.prefix}.read_assignments.tsv"
@@ -267,6 +365,16 @@ def main():
         if entity_columns:
             print(f"  Detected entities: {seen_entities}")
             print(f"  Entity stat columns: {len(entity_columns)}")
+
+        # Determine which entities were statistically tested (have _pval columns)
+        tested_entities = set(e for e, s, _ in entity_columns if s == '_pval')
+        if tested_entities:
+            # Per-sample mode: keep only tested entities, drop group summaries
+            before = len(entity_columns)
+            entity_columns = [(e, s, c) for e, s, c in entity_columns if e in tested_entities]
+            seen_entities = [e for e in seen_entities if e in tested_entities]
+            if len(entity_columns) < before:
+                print(f"  Filtered to tested entities: {seen_entities} ({len(entity_columns)} columns, dropped {before - len(entity_columns)} summary columns)")
 
         # Check if odds_ratio has any non-empty values
         if 'odds_ratio' in ca.columns:
