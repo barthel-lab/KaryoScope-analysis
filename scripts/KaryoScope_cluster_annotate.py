@@ -58,27 +58,39 @@ def load_bed_file(filepath):
     return pd.DataFrame(records)
 
 
-def find_featureset_beds(bed_dir, samples, featuresets, database="KS_human_CHM13", smoothness="smoothed"):
-    """Find BED files for each featureset for each sample."""
+def find_featureset_beds(bed_dirs, samples, featuresets, database="KS_human_CHM13", smoothness="smoothed"):
+    """Find BED files for each featureset for each sample, searching multiple directories."""
     beds_by_featureset = {fs: [] for fs in featuresets}
 
     for sample in samples:
-        base_path = f"{bed_dir}/{sample}/telogator/1/KaryoScope/{database}"
-
         for fs in featuresets:
-            # Try different naming patterns
-            patterns = [
-                f"{base_path}/{sample}.telogator.1.{database}.{fs}.{smoothness}.KaryoScope.bed",
-                f"{base_path}/{sample}.telogator.1.{database}.{fs}.{smoothness}.bed",
-                f"{base_path}/{sample}.telogator.1.{database}.{fs}.{smoothness}.features.bed",
-            ]
+            found = False
+            for bed_dir in bed_dirs:
+                base_path = f"{bed_dir}/{sample}/telogator/1/KaryoScope/{database}"
 
-            for pattern in patterns:
-                if os.path.exists(pattern):
-                    beds_by_featureset[fs].append(pattern)
-                    break
-                elif os.path.exists(pattern + '.gz'):
-                    beds_by_featureset[fs].append(pattern + '.gz')
+                # Try different naming patterns (nested directory structure)
+                patterns = [
+                    f"{base_path}/{sample}.telogator.1.{database}.{fs}.{smoothness}.KaryoScope.bed",
+                    f"{base_path}/{sample}.telogator.1.{database}.{fs}.{smoothness}.bed",
+                    f"{base_path}/{sample}.telogator.1.{database}.{fs}.{smoothness}.features.bed",
+                ]
+                # Also try flat directory (files directly in bed_dir)
+                patterns += [
+                    f"{bed_dir}/{sample}.telogator.1.{database}.{fs}.{smoothness}.KaryoScope.bed",
+                    f"{bed_dir}/{sample}.telogator.1.{database}.{fs}.{smoothness}.bed",
+                    f"{bed_dir}/{sample}.telogator.1.{database}.{fs}.{smoothness}.features.bed",
+                ]
+
+                for pattern in patterns:
+                    if os.path.exists(pattern):
+                        beds_by_featureset[fs].append(pattern)
+                        found = True
+                        break
+                    elif os.path.exists(pattern + '.gz'):
+                        beds_by_featureset[fs].append(pattern + '.gz')
+                        found = True
+                        break
+                if found:
                     break
 
     return beds_by_featureset
@@ -122,6 +134,48 @@ def summarize_featureset(cluster_reads, bed_df, top_n=3, exclude_patterns=None):
     return top_str
 
 
+def compute_read_feature_fractions(bed_df):
+    """Compute per-read feature coverage fractions.
+
+    Returns a DataFrame: read × feature matrix of coverage fractions.
+    """
+    # Total bp per read
+    read_totals = bed_df.groupby('read')['length'].sum()
+    # Per read × feature bp
+    read_feature_bp = bed_df.groupby(['read', 'feature'])['length'].sum().unstack(fill_value=0)
+    # Divide by total
+    fractions = read_feature_bp.div(read_totals, axis=0)
+    return fractions
+
+
+def compute_adaptive_thresholds(fractions, min_thresh=0.001, max_thresh=0.05):
+    """Compute adaptive significance thresholds per feature.
+
+    For each feature: threshold = clamp(median_nonzero / 3, min_thresh, max_thresh)
+    """
+    thresholds = {}
+    for feature in fractions.columns:
+        nonzero = fractions[feature][fractions[feature] > 0]
+        if len(nonzero) == 0:
+            thresholds[feature] = min_thresh
+        else:
+            med = nonzero.median()
+            thresholds[feature] = max(min_thresh, min(max_thresh, med / 3))
+    return thresholds
+
+
+def score_cluster_features(cluster_reads, fractions, thresholds):
+    """For each feature, compute % of cluster reads exceeding the adaptive threshold."""
+    cluster_frac = fractions.reindex(cluster_reads).fillna(0)
+    n_reads = len(cluster_reads)
+    scores = {}
+    for feature, thresh in thresholds.items():
+        if feature in cluster_frac.columns:
+            n_sig = (cluster_frac[feature] > thresh).sum()
+            scores[feature] = round(100 * n_sig / n_reads, 1) if n_reads > 0 else 0
+    return scores
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Annotate clusters with dominant features per featureset",
@@ -131,7 +185,7 @@ def main():
     parser.add_argument("--prefix", required=True,
                         help="Analysis prefix (auto-finds {prefix}.read_assignments.tsv, {prefix}.cluster_analysis.tsv)")
     parser.add_argument("--bed-dir", dest="bed_dir", required=True,
-                        help="Base directory containing sample BED files")
+                        help="Comma-separated base directories containing sample BED files")
     parser.add_argument("--featuresets", default="region,subtelomeric,chromosome,acrocentric,repeat,gene",
                         help="Comma-separated featuresets to annotate (default: region,subtelomeric,chromosome,acrocentric,repeat,gene)")
     parser.add_argument("--database", default="KS_human_CHM13",
@@ -186,20 +240,53 @@ def main():
 
     # Load cluster analysis
     cluster_info = {}
+    entity_columns = []  # list of (entity_name, suffix, column_name)
+    has_odds_ratio = False
     if os.path.exists(cluster_analysis_file):
         print(f"\nLoading cluster analysis: {cluster_analysis_file}")
         ca = pd.read_csv(cluster_analysis_file, sep='\t')
+
+        # Auto-detect entity stat columns (samples or groups)
+        core_columns = {
+            'cluster_id', 'size', 'odds_ratio', 'p_value', 'enrichment',
+            'centroid_read', 'centroid_sample', 'centroid_group',
+            'q_value', 'enrichment_raw',
+        }
+        stat_suffixes = ['_count', '_pct', '_pval', '_odds']
+        seen_entities = []
+        for col in ca.columns:
+            for suffix in stat_suffixes:
+                if col.endswith(suffix):
+                    entity = col[:-len(suffix)]
+                    if col not in core_columns:
+                        entity_columns.append((entity, suffix, col))
+                        if entity not in seen_entities:
+                            seen_entities.append(entity)
+                        break
+
+        if entity_columns:
+            print(f"  Detected entities: {seen_entities}")
+            print(f"  Entity stat columns: {len(entity_columns)}")
+
+        # Check if odds_ratio has any non-empty values
+        if 'odds_ratio' in ca.columns:
+            has_odds_ratio = ca['odds_ratio'].notna().any()
+
         for _, row in ca.iterrows():
-            cluster_info[row['cluster_id']] = {
+            info = {
                 'enrichment': row.get('enrichment', 'unknown'),
                 'p_value': row.get('p_value', None),
                 'q_value': row.get('q_value', None),
                 'odds_ratio': row.get('odds_ratio', None),
-                'Tumor_count': row.get('Tumor_count', None),
-                'Tumor_pct': row.get('Tumor_pct', None),
-                'Normal_count': row.get('Normal_count', None),
-                'Normal_pct': row.get('Normal_pct', None),
             }
+            # Store all detected entity columns
+            for _entity, _suffix, col in entity_columns:
+                val = row.get(col, None)
+                if pd.notna(val):
+                    info[col] = val
+                else:
+                    info[col] = None
+            cluster_info[row['cluster_id']] = info
     else:
         print(f"\nWARNING: Cluster analysis file not found: {cluster_analysis_file}")
 
@@ -213,10 +300,13 @@ def main():
     featuresets = [fs.strip() for fs in args.featuresets.split(',')]
     print(f"\nFeaturesets to annotate: {featuresets}")
 
+    # Parse bed directories (comma-separated)
+    bed_dirs = [d.strip() for d in args.bed_dir.split(',')]
+
     # Find BED files for each featureset
-    print(f"\nFinding BED files in: {args.bed_dir}")
+    print(f"\nFinding BED files in: {bed_dirs}")
     beds_by_featureset = find_featureset_beds(
-        args.bed_dir, samples, featuresets, args.database, args.smoothness
+        bed_dirs, samples, featuresets, args.database, args.smoothness
     )
 
     # Load BED data for each featureset
@@ -239,6 +329,26 @@ def main():
     if not bed_data:
         print("ERROR: No BED data loaded")
         sys.exit(1)
+
+    # Compute per-read feature fractions and adaptive thresholds
+    feature_fractions = {}
+    feature_thresholds = {}
+    feature_names = {}  # sorted feature names per featureset
+    for fs in featuresets:
+        if fs not in bed_data:
+            continue
+        fractions = compute_read_feature_fractions(bed_data[fs])
+        thresholds = compute_adaptive_thresholds(fractions)
+        feature_fractions[fs] = fractions
+        feature_thresholds[fs] = thresholds
+        feature_names[fs] = sorted(thresholds.keys())
+
+        # Print threshold summary
+        print(f"\n  Feature thresholds for {fs}:")
+        for feat in feature_names[fs]:
+            nonzero = fractions[feat][fractions[feat] > 0]
+            med = nonzero.median() if len(nonzero) > 0 else 0
+            print(f"    {feat}: {thresholds[feat]*100:.2f}% (median {med*100:.1f}%)")
 
     # Determine clusters to analyze
     clusters = sorted(assignments['cluster'].unique())
@@ -264,32 +374,51 @@ def main():
             'size': len(cluster_reads),
         }
 
+        # Curation columns (empty for user to fill in)
+        row['cluster_name'] = ''
+        row['curated_rep_i'] = ''
+
         # Add info from cluster analysis
         if cluster_id in cluster_info:
             info = cluster_info[cluster_id]
             row['enrichment'] = info.get('enrichment', 'unknown')
-            row['Tumor_count'] = info.get('Tumor_count')
-            row['Tumor_pct'] = round(info.get('Tumor_pct'), 1) if info.get('Tumor_pct') is not None else None
-            row['Normal_count'] = info.get('Normal_count')
-            row['Normal_pct'] = round(info.get('Normal_pct'), 1) if info.get('Normal_pct') is not None else None
             q = info.get('q_value')
             row['q_value'] = f"{q:.4e}" if q is not None else None
-            odds = info.get('odds_ratio')
-            row['log2_fc'] = round(math.log2(odds), 2) if odds is not None and odds > 0 else None
+
+            # log2_fc only when odds_ratio is available
+            if has_odds_ratio:
+                odds = info.get('odds_ratio')
+                row['log2_fc'] = round(math.log2(odds), 2) if odds is not None and odds > 0 else None
+
+            # Dynamic entity stat columns
+            for _entity, suffix, col in entity_columns:
+                val = info.get(col)
+                if suffix == '_pct' and val is not None:
+                    row[col] = round(val, 1)
+                elif suffix == '_pval' and val is not None:
+                    row[col] = f"{val:.4e}"
+                elif suffix == '_odds' and val is not None:
+                    row[col] = round(val, 2)
+                else:
+                    row[col] = val
 
         # Annotate each featureset
         for fs in featuresets:
             if fs in bed_data:
                 row[f'{fs}_top'] = summarize_featureset(cluster_reads, bed_data[fs], args.top_n, exclude_patterns)
+            # Per-feature read-level columns
+            if fs in feature_fractions:
+                scores = score_cluster_features(cluster_reads, feature_fractions[fs], feature_thresholds[fs])
+                for feat in feature_names[fs]:
+                    row[f'{fs}__{feat}'] = scores.get(feat, 0)
 
         results.append(row)
 
     # Create output DataFrame
     result_df = pd.DataFrame(results)
 
-    # Sort by tumor percentage (descending)
-    if 'Tumor_pct' in result_df.columns:
-        result_df = result_df.sort_values('Tumor_pct', ascending=False)
+    # Sort by cluster_id (ascending)
+    result_df = result_df.sort_values('cluster_id', ascending=True)
 
     # Save output
     result_df.to_csv(args.output, sep='\t', index=False)
@@ -307,9 +436,12 @@ def main():
             count = (result_df['enrichment'] == enrich).sum()
             print(f"  {enrich}: {count}")
 
-    if 'Tumor_pct' in result_df.columns:
-        n_100pct = (result_df['Tumor_pct'] == 100).sum()
-        print(f"\n100% Tumor clusters: {n_100pct}")
+    if entity_columns:
+        seen = []
+        for entity, _suffix, _col in entity_columns:
+            if entity not in seen:
+                seen.append(entity)
+        print(f"\nEntity stat columns included for: {', '.join(seen)}")
 
 
 
