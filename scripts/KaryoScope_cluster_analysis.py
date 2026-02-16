@@ -85,8 +85,8 @@ parser.add_argument("--max-sequence-length", dest="max_sequence_length", type=in
                     help="Maximum sequence length in bp to include (default: 50000)")
 parser.add_argument("--sequence-list", dest="sequence_list", default=None,
                     help="File with sequence names to include (one per line). Filters BED to only these sequences.")
-parser.add_argument("--exclude-features", dest="exclude_features", default="novel,unknown,canonical_telomere*",
-                    help="Comma-separated list of features to exclude, supports wildcards (* and ?) (default: 'novel,unknown,canonical_telomere*')")
+parser.add_argument("--exclude-features", dest="exclude_features", default="novel,canonical_telomere*",
+                    help="Comma-separated list of features to exclude, supports wildcards (* and ?) (default: 'novel,canonical_telomere*')")
 parser.add_argument("--linkage-method", dest="linkage_method", default="ward",
                     help="Linkage method for hierarchical clustering (default: ward)")
 parser.add_argument("--matrix-type", dest="matrix_type", default="length_weighted",
@@ -752,7 +752,7 @@ def calculate_enrichment_per_sample(cluster_samples, sample_totals):
         other_in = total_in - in_cluster
         other_out = sum(sample_totals.values()) - sample_totals[sample] - other_in
 
-        odds, p_val = fisher_exact([[in_cluster, other_in], [out_cluster, other_out]])
+        odds, p_val = fisher_exact([[in_cluster, other_in], [out_cluster, other_out]], alternative='greater')
         p_values[sample] = p_val
         odds_ratios[sample] = odds
 
@@ -836,8 +836,27 @@ seq_span_dict = in_data.groupby('sequence').apply(
     lambda x: x['end'].max() - x['start'].min()
 ).to_dict()
 
-# --- Filter excluded features BEFORE read length filtering ---
-# This ensures read length is calculated on remaining annotated sequence
+# --- Filter sequences by read span ---
+# Use the full coordinate range (read span) BEFORE excluding features,
+# so reads with large excluded regions aren't incorrectly dropped
+if args.min_sequence_length > 0 or args.max_sequence_length is not None:
+    print(f"\n--- Filtering sequences by read span ---")
+    sequences_before = in_data['sequence'].nunique()
+
+    # Apply min and max filters using read span
+    valid_sequences = set(r for r, l in seq_span_dict.items()
+                     if l >= args.min_sequence_length and l <= args.max_sequence_length)
+    print(f"  Length range: {args.min_sequence_length:,} - {args.max_sequence_length:,} bp")
+
+    in_data = in_data[in_data['sequence'].isin(valid_sequences)]
+    seq_to_sample = {r: s for r, s in seq_to_sample.items() if r in valid_sequences}
+    seq_span_dict = {r: l for r, l in seq_span_dict.items() if r in valid_sequences}
+    sequences_after = in_data['sequence'].nunique()
+    print(f"  Sequences before filter: {sequences_before:,}")
+    print(f"  Sequences after filter: {sequences_after:,}")
+    print(f"  Sequences removed: {sequences_before - sequences_after:,}")
+
+# --- Filter excluded features AFTER read span filtering ---
 if args.exclude_features:
     exclude_patterns = [f.strip() for f in args.exclude_features.split(',')]
     print(f"\n--- Filtering excluded features ---")
@@ -860,6 +879,7 @@ if args.exclude_features:
     # Remove reads that have no remaining features after exclusion
     sequences_with_features = set(in_data['sequence'].unique())
     seq_to_sample = {r: s for r, s in seq_to_sample.items() if r in sequences_with_features}
+    seq_span_dict = {r: l for r, l in seq_span_dict.items() if r in sequences_with_features}
 
     print(f"  Records before filter: {before_count:,}")
     print(f"  Records after filter: {len(in_data):,}")
@@ -870,24 +890,6 @@ if args.exclude_features:
 # This is the total annotated sequence, not the span from start to end
 seq_lengths = in_data.groupby('sequence')['length'].sum()
 seq_length_dict = seq_lengths.to_dict()
-
-# --- Filter by annotated length ---
-if args.min_sequence_length > 0 or args.max_sequence_length is not None:
-    print(f"\n--- Filtering sequences by annotated length ---")
-    sequences_before = in_data['sequence'].nunique()
-
-    # Apply min and max filters
-    valid_sequences = set(r for r, l in seq_length_dict.items()
-                     if l >= args.min_sequence_length and l <= args.max_sequence_length)
-    print(f"  Length range: {args.min_sequence_length:,} - {args.max_sequence_length:,} bp")
-
-    in_data = in_data[in_data['sequence'].isin(valid_sequences)]
-    seq_to_sample = {r: s for r, s in seq_to_sample.items() if r in valid_sequences}
-    seq_length_dict = {r: l for r, l in seq_length_dict.items() if r in valid_sequences}
-    sequences_after = in_data['sequence'].nunique()
-    print(f"  Sequences before filter: {sequences_before:,}")
-    print(f"  Sequences after filter: {sequences_after:,}")
-    print(f"  Sequences removed: {sequences_before - sequences_after:,}")
 
 # --- Branching Point ---
 if args.analysis_mode == 'structure':
@@ -1255,6 +1257,52 @@ if args.reduce_dims and args.reduce_dims > 0:
         print(f"  Top {top_k} variance %: {', '.join(f'{v:.1f}%' for v in top_var)}")
 
         print(f"  Reduced matrix shape: {adj_matrix.shape}")
+
+        # Generate SVD scree plot
+        var_ratio = svd.explained_variance_ratio_
+        cumvar_full = np.cumsum(var_ratio)
+        n_plot = len(var_ratio)
+
+        for bg_mode, suffix in get_backgrounds_to_generate():
+            style = apply_plot_style(bg_mode)
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+            fig.patch.set_facecolor(style['bg_color'])
+            ax1.set_facecolor(style['bg_color'])
+            ax2.set_facecolor(style['bg_color'])
+
+            # Left: individual explained variance (log scale for visibility)
+            ax1.bar(range(1, n_plot + 1), var_ratio * 100, color='#60A5FA', alpha=0.7, width=1.0)
+            ax1.set_xlabel('Component')
+            ax1.set_ylabel('Explained Variance (%)')
+            ax1.set_title('Explained Variance per Component')
+            ax1.set_xlim(0, min(n_plot + 1, 100))  # Zoom to first 100
+            if n_plot > 100:
+                ax1.annotate(f'({n_plot} total components)', xy=(0.95, 0.95),
+                           xycoords='axes fraction', ha='right', va='top',
+                           color=style['text_color'], fontsize=9)
+
+            # Right: cumulative variance with threshold lines
+            ax2.plot(range(1, n_plot + 1), cumvar_full * 100, color='#40D392', linewidth=2)
+            for thresh, label_text in [(50, '50%'), (90, '90%'), (95, '95%'), (99, '99%')]:
+                idx = np.searchsorted(cumvar_full, thresh / 100)
+                if idx < n_plot:
+                    k_val = idx + 1
+                    ax2.axhline(y=thresh, color=style['grid_color'], linestyle='--', alpha=0.5)
+                    ax2.axvline(x=k_val, color='#F07167', linestyle='--', alpha=0.4)
+                    ax2.annotate(f'{label_text} at k={k_val}', xy=(k_val, thresh),
+                               xytext=(10, -5), textcoords='offset points',
+                               color=style['text_color'], fontsize=8)
+            ax2.set_xlabel('Number of Components')
+            ax2.set_ylabel('Cumulative Explained Variance (%)')
+            ax2.set_title('Cumulative Explained Variance')
+            ax2.set_ylim(0, 105)
+            ax2.set_xlim(0, min(n_plot + 1, 100))
+
+            plt.tight_layout()
+            scree_file = f"{args.output_prefix}{suffix}.svd_scree.pdf"
+            plt.savefig(scree_file, dpi=150, bbox_inches='tight', facecolor=style['bg_color'])
+            plt.close()
+            print(f"  Saved SVD scree plot to: {scree_file}")
     else:
         print(f"\n--- Skipping dimensionality reduction (already at {n_features} dims) ---")
 

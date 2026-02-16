@@ -217,6 +217,22 @@ def select_representatives(cluster_data, cluster_features, n_reps, feature_cache
 
     tiers = [in_range, below_range, above_range, very_short]
 
+    # --- Simple length-only mode (no features) ---
+    if not feature_groups and not cluster_features:
+        all_reads = pd.concat(tiers, ignore_index=True)
+        selected = []
+        for _, row in all_reads.iterrows():
+            if len(selected) >= n_reps:
+                break
+            selected.append({
+                'sequence': row['sequence'],
+                'sample': row['sample'],
+                'read_length': _get_length(row, 'read_length', length_column),
+                'read_span': _get_length(row, 'read_span', length_column),
+                'centroid_distance': row['centroid_distance'],
+            })
+        return selected
+
     # --- Feature-group scoring mode ---
     if feature_groups:
         # Score all candidates, then sort by feature group richness
@@ -351,13 +367,13 @@ def main():
         for gname, feats in feature_groups.items():
             print(f"    {gname}: {feats}")
 
-    # Validate: need either --cluster-labels or --feature-groups
-    if not args.cluster_labels and not feature_groups:
-        print("  ERROR: Must provide either --cluster-labels or --feature-groups")
-        return
+    # Note: if neither --cluster-labels nor --feature-groups is provided,
+    # we select by length preference only (no feature scoring)
 
     # Load read assignments
     reads_df = pd.read_csv(args.read_assignments, sep='\t')
+    if 'read' in reads_df.columns and 'sequence' not in reads_df.columns:
+        reads_df = reads_df.rename(columns={'read': 'sequence'})
     print(f"  Loaded {len(reads_df)} reads from {args.read_assignments}")
 
     # Load cluster labels if provided (for _top feature mode)
@@ -388,16 +404,20 @@ def main():
     cluster_reads_df = reads_df[reads_df['cluster'].isin(cluster_ids)]
     print(f"  Total reads in selected clusters: {len(cluster_reads_df)}")
 
-    # Pre-load all features into memory (fast approach)
-    print("\nPre-loading feature data...")
-    samples = cluster_reads_df['sample'].unique()
-    read_ids = cluster_reads_df['sequence'].unique()
-    featuresets = ['region', 'subtelomeric', 'repeat']
+    # Pre-load all features into memory (only when feature scoring is needed)
+    if args.cluster_labels or feature_groups:
+        print("\nPre-loading feature data...")
+        samples = cluster_reads_df['sample'].unique()
+        read_ids = cluster_reads_df['sequence'].unique()
+        featuresets = ['region', 'subtelomeric', 'repeat']
 
-    feature_cache = load_all_features(
-        samples, read_ids, args.bed_prefix, featuresets,
-        args.smoothness, args.database
-    )
+        feature_cache = load_all_features(
+            samples, read_ids, args.bed_prefix, featuresets,
+            args.smoothness, args.database
+        )
+    else:
+        print("\nNo feature weighting requested — selecting by length preference only")
+        feature_cache = {}
 
     # Select representatives for each cluster
     print("\nSelecting representatives...")
@@ -452,9 +472,10 @@ def main():
                 row_dict['n_feature_groups'] = rep.get('n_feature_groups', 0)
                 for gname in feature_groups:
                     row_dict[f'{gname}_bp'] = rep.get(f'{gname}_bp', 0)
-            else:
-                row_dict['has_top_feature'] = rep['has_top_feature']
-                row_dict['n_feature_matches'] = rep['n_feature_matches']
+            elif labels_df is not None:
+                row_dict['has_top_feature'] = rep.get('has_top_feature', False)
+                row_dict['n_feature_matches'] = rep.get('n_feature_matches', 0)
+            # else: no feature columns (length-only mode)
             rows.append(row_dict)
 
     out_df = pd.DataFrame(rows)
@@ -482,9 +503,11 @@ def main():
                 nonzero = sum(1 for r in rows if r.get(col, 0) > 0)
                 total_bp = sum(r.get(col, 0) for r in rows)
                 print(f"  {gname}: {nonzero} reads with signal, {total_bp:,} total bp")
-        else:
-            has_features = sum(1 for r in rows if r['has_top_feature'])
+        elif labels_df is not None:
+            has_features = sum(1 for r in rows if r.get('has_top_feature', False))
             print(f"  Reads with top feature: {has_features} ({has_features/len(rows)*100:.1f}%)")
+        else:
+            print("  Mode: length preference only (no feature scoring)")
 
         spans = [r['read_span'] for r in rows]
         print(f"  Read span range: {min(spans):,} - {max(spans):,} bp")
