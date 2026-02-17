@@ -181,6 +181,143 @@ def score_cluster_features(cluster_reads, fractions, thresholds):
     return scores
 
 
+def compute_cluster_bp_scores(cluster_reads, bed_df):
+    """Compute bp-weighted feature proportions for a cluster.
+
+    Returns dict of {feature: bp_pct} where bp_pct = 100 * feature_bp / total_bp.
+    """
+    cluster_bed = bed_df[bed_df['read'].isin(cluster_reads)]
+    if len(cluster_bed) == 0:
+        return {}
+    total_bp = cluster_bed['length'].sum()
+    if total_bp == 0:
+        return {}
+    feature_bp = cluster_bed.groupby('feature')['length'].sum()
+    return {feat: round(100 * bp / total_bp, 2) for feat, bp in feature_bp.items()}
+
+
+# --- Feature classification constants for interspersion metrics ---
+_SATELLITE_LAYER1 = frozenset({
+    'hsat3', 'hsat1A', 'hsat2', 'hsat1B', 'active', 'censat', 'bsat',
+    'monomeric', 'gsat', 'hor_multigroup1', 'hsat_multigroup1',
+    'hsat1_multigroup1', 'asat_multigroup1',
+})
+_LAYER2_CANONICAL = frozenset({'canonical_telomere'})
+_LAYER2_NONCANONICAL = frozenset({'noncanonical_telomere'})
+_LAYER2_ITS_TAR1 = frozenset({'ITS', 'TAR1'})
+_CT_LAYER1 = frozenset({'ct'})
+_ARM_LAYER1 = frozenset({'p_arm', 'q_arm', 'arm_multigroup1'})
+
+
+def classify_bed_feature(feature):
+    """Classify a BED feature (single-layer or 2-layer) into a category.
+
+    Handles both formats:
+      - Single-layer: 'canonical_telomere', 'ct', 'active'
+      - Two-layer:    'ct:nonsubtelomeric', 'arm_multigroup1:canonical_telomere'
+
+    Priority:
+    1. Satellite layer-1 always wins
+    2. Layer-2 matches override ct/arm layer-1
+    3. Layer-1 matches for canonical/noncanonical/ITS_TAR1 (single-layer BEDs)
+    4. ct/arm layer-1 only when no layer-2 match
+    5. Everything else -> other
+    """
+    parts = feature.split(':', 1)
+    layer1 = parts[0]
+    layer2 = parts[1] if len(parts) > 1 else ''
+
+    if layer1 in _SATELLITE_LAYER1:
+        return 'satellite'
+    if layer2 in _LAYER2_CANONICAL:
+        return 'canonical'
+    if layer2 in _LAYER2_NONCANONICAL:
+        return 'noncanonical'
+    if layer2 in _LAYER2_ITS_TAR1:
+        return 'ITS_TAR1'
+    # Single-layer: check layer-1 against telomere-type sets
+    if layer1 in _LAYER2_CANONICAL:
+        return 'canonical'
+    if layer1 in _LAYER2_NONCANONICAL:
+        return 'noncanonical'
+    if layer1 in _LAYER2_ITS_TAR1:
+        return 'ITS_TAR1'
+    if layer1 in _CT_LAYER1:
+        return 'ct'
+    if layer1 in _ARM_LAYER1:
+        return 'arm'
+    return 'other'
+
+
+def compute_cluster_ct_bp_pct(cluster_reads, bed_df):
+    """Compute bp-weighted ct (centric transition) proportion for a cluster."""
+    cluster_bed = bed_df[bed_df['read'].isin(cluster_reads)]
+    if len(cluster_bed) == 0:
+        return 0.0
+    total_bp = cluster_bed['length'].sum()
+    if total_bp == 0:
+        return 0.0
+    ct_bp = cluster_bed.loc[
+        cluster_bed['feature'].str.split(':', n=1).str[0] == 'ct', 'length'
+    ].sum()
+    return round(100 * ct_bp / total_bp, 2)
+
+
+def compute_cluster_interspersion(cluster_reads, bed_df):
+    """Compute typed interspersion rates (transitions per kb) for a cluster.
+
+    Returns dict with median rates across all reads:
+      total, can_ncan, tel_sat, arm_tel
+    """
+    cluster_bed = bed_df[bed_df['read'].isin(cluster_reads)]
+    if len(cluster_bed) == 0:
+        return {'total': 0.0, 'can_ncan': 0.0, 'tel_sat': 0.0, 'arm_tel': 0.0}
+
+    read_rates = {'total': [], 'can_ncan': [], 'tel_sat': [], 'arm_tel': []}
+
+    for _read_id, read_records in cluster_bed.groupby('read'):
+        records = read_records.sort_values('start')
+        span_kb = (records['end'].max() - records['start'].min()) / 1000
+        if span_kb <= 0:
+            for key in read_rates:
+                read_rates[key].append(0.0)
+            continue
+
+        categories = [classify_bed_feature(f) for f in records['feature']]
+
+        # Total transitions: all category changes
+        total = sum(
+            1 for i in range(1, len(categories))
+            if categories[i] != categories[i - 1]
+        )
+
+        # Typed transitions: filter out 'other' (noise features like
+        # telomere_like_multigroup1, novel) so they don't break adjacency
+        # between meaningful categories
+        filtered = [c for c in categories if c != 'other']
+        can_ncan = tel_sat = arm_tel = 0
+        for i in range(1, len(filtered)):
+            if filtered[i] == filtered[i - 1]:
+                continue
+            pair = frozenset({filtered[i - 1], filtered[i]})
+            if pair == frozenset({'canonical', 'noncanonical'}):
+                can_ncan += 1
+            if 'satellite' in pair and pair & {'canonical', 'noncanonical'}:
+                tel_sat += 1
+            if 'arm' in pair and pair & {'canonical', 'noncanonical', 'ITS_TAR1'}:
+                arm_tel += 1
+
+        read_rates['total'].append(total / span_kb)
+        read_rates['can_ncan'].append(can_ncan / span_kb)
+        read_rates['tel_sat'].append(tel_sat / span_kb)
+        read_rates['arm_tel'].append(arm_tel / span_kb)
+
+    result = {}
+    for key, values in read_rates.items():
+        result[key] = round(pd.Series(values).median(), 2) if values else 0.0
+    return result
+
+
 class TeeLogger:
     """Write to both stdout and a log file."""
     def __init__(self, log_path):
@@ -239,6 +376,7 @@ def _print_params_and_command(args):
         ("min-size", _fmt(args.min_size, "min_size"), None),
         ("exclude-features", _fmt(args.exclude_features, "exclude_features"), None),
         ("log-file", _fmt(args.log_file, "log_file"), None),
+        ("auto-label", _fmt(args.auto_label, "auto_label"), None),
     ]
 
     print("\n" + "=" * 60)
@@ -253,6 +391,109 @@ def _print_params_and_command(args):
     print("Command")
     print("=" * 60)
     print(_original_command)
+
+
+def auto_label_cluster(row, featureset_prefix):
+    """Auto-label a cluster using a decision tree based on feature scores and interspersion metrics.
+
+    Args:
+        row: dict with all annotation columns for one cluster
+        featureset_prefix: e.g. 'telomere_region' or 'region'
+
+    Returns:
+        Label string, or '' for unlabeled clusters
+    """
+    pfx = featureset_prefix
+
+    sat_features = {
+        'active':    row.get(f'{pfx}__active', 0),
+        'monomeric': row.get(f'{pfx}__monomeric', 0),
+        'bsat':      row.get(f'{pfx}__bsat', 0),
+        'censat':    row.get(f'{pfx}__censat', 0),
+        'hsat1A':    row.get(f'{pfx}__hsat1A', 0),
+        'hsat2':     row.get(f'{pfx}__hsat2', 0),
+        'hsat3':     row.get(f'{pfx}__hsat3', 0),
+        'gsat':      row.get(f'{pfx}__gsat', 0),
+    }
+    max_sat_name = max(sat_features, key=sat_features.get)
+    max_sat_score = sat_features[max_sat_name]
+
+    ncan = row.get(f'{pfx}__noncanonical_telomere', 0)
+    can  = row.get(f'{pfx}__canonical_telomere', 0)
+    its  = row.get(f'{pfx}__ITS', 0)
+    tar1 = row.get(f'{pfx}__TAR1', 0)
+    ct   = row.get('ct_bp_pct', 0)
+    icnc = row.get('interspersion_can_ncan', 0)
+    rdna = row.get('acrocentric__rDNA', 0)
+    acro = row.get('chromosome__acrocentric_multigroup1', 0)
+
+    sat_label_map = {
+        'active': 'active aSat', 'monomeric': 'monomeric aSat',
+        'bsat': 'bSat', 'censat': 'CenSat', 'hsat1A': 'HSat1A',
+        'hsat2': 'HSat2', 'hsat3': 'HSat3', 'gsat': 'GSat',
+    }
+
+    # 1. Satellite-dominant
+    if max_sat_score >= 80:
+        return sat_label_map[max_sat_name]
+
+    # 2. ECTR (tightened with subtelomeric gate)
+    if ct >= 25 and (ncan >= 50 or can >= 50) and tar1 < 50 and its < 50:
+        return "ECTR"
+
+    # 3. Type I ALT telomere (tightened: require low TAR1)
+    if icnc >= 0.5 and ncan >= 80 and ct < 15 and tar1 < 50:
+        return "Type I ALT telomere"
+
+    # 4. ECTR (variant-rich) (tightened: require low subtelomeric signal)
+    if icnc >= 0.5 and ncan >= 80 and ct >= 15 and tar1 < 50 and its < 50:
+        return "ECTR (variant-rich)"
+
+    # 5. Interspersed telomere
+    if icnc >= 0.5 and (ncan >= 50 or can >= 50):
+        return "Interspersed telomere"
+
+    # 6. rDNA (tightened: require acrocentric chromosomes)
+    if rdna >= 50 and acro >= 50:
+        return "rDNA"
+
+    # 6b. Interstitial TAR1/ITS (rDNA-associated on non-acrocentric chromosomes)
+    if rdna >= 50 and acro < 50:
+        if tar1 >= 50 or its >= 50:
+            if tar1 >= its:
+                return "Interstitial TAR1"
+            else:
+                return "Interstitial ITS"
+
+    # 7. Type II ALT telomere
+    if can >= 95 and ncan < 50 and ct < 2 and max_sat_score < 10 and icnc < 0.2:
+        return "Type II ALT telomere"
+
+    # 8. Normal telomere
+    if can >= 80 and ncan < 50 and ct < 10:
+        return "Normal telomere"
+
+    # 9. Subtelomeric (moved up from #11)
+    if tar1 >= 50 or its >= 50:
+        if tar1 >= its:
+            return "Subtelomeric (TAR1-rich)"
+        else:
+            return "Subtelomeric (ITS-rich)"
+
+    # 10. Normal telomere (ct-rich) (moved down from #10)
+    if can >= 50 and ct >= 10:
+        return "Normal telomere (ct-rich)"
+
+    # 11. Pericentromeric
+    if ct >= 25 and max_sat_score < 30:
+        return "Pericentromeric"
+
+    # 12. Telomeric
+    if ncan >= 50 or can >= 50:
+        return "Telomeric"
+
+    # 13. Fallback
+    return ""
 
 
 def main():
@@ -286,6 +527,9 @@ def main():
     parser.add_argument("--log-file", dest="log_file",
                         action=argparse.BooleanOptionalAction, default=True,
                         help="Save console output to {output}.log (default: True)")
+    parser.add_argument("--auto-label", dest="auto_label",
+                        action="store_true", default=False,
+                        help="Auto-label clusters using a decision tree based on feature scores and interspersion metrics")
 
     global _argparse_defaults
     _argparse_defaults = {}
@@ -510,15 +754,36 @@ def main():
                 else:
                     row[col] = val
 
+        # Interspersion metrics (telomere_region featureset)
+        if 'telomere_region' in bed_data:
+            interspersion = compute_cluster_interspersion(cluster_reads, bed_data['telomere_region'])
+            row['interspersion_total'] = interspersion['total']
+            row['interspersion_can_ncan'] = interspersion['can_ncan']
+            row['interspersion_tel_sat'] = interspersion['tel_sat']
+            row['interspersion_arm_tel'] = interspersion['arm_tel']
+
         # Annotate each featureset
         for fs in featuresets:
             if fs in bed_data:
                 row[f'{fs}_top'] = summarize_featureset(cluster_reads, bed_data[fs], args.top_n, exclude_patterns)
-            # Per-feature read-level columns
+            # Per-feature columns: read-presence then bp-level, interleaved per feature
+            scores = {}
+            bp_scores = {}
             if fs in feature_fractions:
                 scores = score_cluster_features(cluster_reads, feature_fractions[fs], feature_thresholds[fs])
-                for feat in feature_names[fs]:
-                    row[f'{fs}__{feat}'] = scores.get(feat, 0)
+            if fs in bed_data:
+                bp_scores = compute_cluster_bp_scores(cluster_reads, bed_data[fs])
+            for feat in feature_names.get(fs, []):
+                row[f'{fs}__{feat}'] = scores.get(feat, 0)
+                row[f'{fs}_bp__{feat}'] = bp_scores.get(feat, 0)
+
+        # ct_bp_pct from generalized bp scores (backward compat with auto_label)
+        if 'telomere_region' in bed_data:
+            row['ct_bp_pct'] = row.get('telomere_region_bp__ct', 0)
+
+        if args.auto_label:
+            pfx = 'telomere_region' if 'telomere_region' in bed_data else 'region'
+            row['cluster_name'] = auto_label_cluster(row, pfx)
 
         results.append(row)
 
@@ -543,6 +808,13 @@ def main():
         for enrich in result_df['enrichment'].unique():
             count = (result_df['enrichment'] == enrich).sum()
             print(f"  {enrich}: {count}")
+
+    if args.auto_label and 'cluster_name' in result_df.columns:
+        print("\nBy auto-label:")
+        for label in sorted(result_df['cluster_name'].unique()):
+            count = (result_df['cluster_name'] == label).sum()
+            display = label if label else '(unlabeled)'
+            print(f"  {display}: {count}")
 
     if entity_columns:
         seen = []
