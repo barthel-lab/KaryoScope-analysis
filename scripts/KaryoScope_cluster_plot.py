@@ -36,6 +36,7 @@ Usage with auto-discovery (all reads):
 """
 
 import argparse
+import fnmatch
 import glob
 import gzip
 import os
@@ -131,8 +132,12 @@ def parse_args():
                         choices=["smooth", "transition"],
                         help="'transition' (default): direct scaling, preserves all features. "
                              "'smooth': windowed majority vote.")
-    parser.add_argument("--min-feature-width", dest="min_feature_width", type=float, default=1.0,
+    parser.add_argument("--min-feature-width", dest="min_feature_width", type=float, default=0.5,
                         help="Minimum pixel width per feature in transition mode (default: 1.0)")
+    parser.add_argument("--min-width-exclude", dest="min_width_exclude", nargs='*', default=['novel', '*arm*', 'ct*'],
+                        help="Glob patterns for feature names to exclude from min-feature-width "
+                             "enforcement (default: novel *arm* ct*). "
+                             "Use --min-width-exclude with no args to clear.")
 
     # Read selection (filtering is done by KaryoScope_select_representatives.py)
     parser.add_argument("--reads-file", dest="reads_file", default=None,
@@ -255,6 +260,7 @@ def _print_params_and_command(args, database, featuresets, background_color):
         ("oversample", _fmt(args.oversample, "oversample"), None),
         ("feature-mode", _fmt(args.feature_mode, "feature_mode"), None),
         ("min-feature-width", _fmt(args.min_feature_width, "min_feature_width"), None),
+        ("min-width-exclude", _fmt(args.min_width_exclude, "min_width_exclude"), None),
         ("reads-file", _fmt(args.reads_file, "reads_file"), None),
         ("curated-reps", _fmt(args.curated_reps, "curated_reps"), None),
         ("n-per-cluster", _fmt(args.max_reps, "max_reps"), None),
@@ -2215,7 +2221,7 @@ def smooth_features_to_pixels(colored_features, bar_length, ratio, oversample=1)
         color_coverage = {}
         color_opacity = {}
         for i in range(feat_idx, n_feats):
-            f_start, f_stop, f_color, f_opacity = sorted_feats[i]
+            f_start, f_stop, f_color, f_opacity = sorted_feats[i][:4]
             if f_start >= win_end:
                 break
             overlap = min(f_stop, win_end) - max(f_start, win_start)
@@ -2259,9 +2265,10 @@ def smooth_features_to_pixels(colored_features, bar_length, ratio, oversample=1)
 def features_to_pixels_direct(colored_features, bar_length, ratio, min_width=0.5):
     """Direct-scale bp features to pixel coordinates, preserving every transition.
 
-    Unlike smooth_features_to_pixels (windowed majority vote), this maps each
-    feature's bp coordinates directly to pixel space and enforces a minimum
-    pixel width so sub-pixel features remain visible.
+    Uses contiguous redistribution so that small interspersed features are
+    guaranteed at least ``min_width`` pixels of visibility.  Features are
+    placed end-to-end (no overlaps, no gaps) and large features absorb the
+    cost proportionally when the total exceeds ``bar_length``.
 
     Args:
         colored_features: list of (bp_start, bp_stop, color, fill_opacity)
@@ -2278,30 +2285,43 @@ def features_to_pixels_direct(colored_features, bar_length, ratio, min_width=0.5
 
     sorted_feats = sorted(colored_features, key=lambda f: (f[0], f[1]))
 
-    # Scale each feature to pixel space, enforcing minimum width
+    # Step 1: Scale to pixels, enforce min_width (respecting per-feature skip flag)
+    segments = []
+    for feat in sorted_feats:
+        bp_start, bp_stop, color, opacity = feat[:4]
+        skip_min = feat[4] if len(feat) > 4 else False
+        effective_min = 0 if skip_min else min_width
+        natural_width = (bp_stop - bp_start) * ratio
+        width = max(natural_width, effective_min)
+        segments.append((width, natural_width, color, opacity, effective_min))
+
+    # Step 2: If total exceeds bar_length, shrink features proportionally
+    # (only shrink the portion above each feature's floor)
+    total = sum(w for w, _, _, _, _ in segments)
+    if total > bar_length:
+        excess = total - bar_length
+        shrinkable = sum(max(0, w - em) for w, _, _, _, em in segments)
+        if shrinkable > 0:
+            factor = max(0, 1 - excess / shrinkable)
+            segments = [
+                (em + (w - em) * factor if w > em else w,
+                 nw, c, o, em)
+                for w, nw, c, o, em in segments
+            ]
+
+    # Step 3: Place contiguously
     scaled = []
-    for bp_start, bp_stop, color, opacity in sorted_feats:
-        px_start = bp_start * ratio
-        px_stop = bp_stop * ratio
-
-        # Clamp to bar bounds
-        px_start = max(0.0, min(px_start, bar_length))
-        px_stop = max(0.0, min(px_stop, bar_length))
-
-        # Enforce minimum width
-        if px_stop - px_start < min_width:
-            px_stop = px_start + min_width
-            if px_stop > bar_length:
-                px_stop = bar_length
-                px_start = max(0.0, px_stop - min_width)
-
-        if px_stop > px_start:
-            scaled.append((px_start, px_stop, color, opacity))
+    pos = 0.0
+    for width, _, color, opacity, _ in segments:
+        end = min(pos + width, bar_length)
+        if end > pos:
+            scaled.append((pos, end, color, opacity))
+        pos = end
 
     if not scaled:
         return []
 
-    # Run-length encode adjacent same-color features
+    # Step 4: Run-length encode adjacent same-color features
     result = []
     run_start, run_stop, run_color, run_opacity = scaled[0]
 
@@ -5469,6 +5489,7 @@ def main():
 
                 # Pre-color features and track displayed names
                 colored_feats = []
+                exclude_patterns = args.min_width_exclude
                 for feat in features:
                     feature_name = feat.get('feature', 'unknown')
                     displayed_features[fs].add(feature_name)
@@ -5482,7 +5503,8 @@ def main():
                     colored_feats.append((
                         feat['start'] - scaffold_min_start,
                         feat['stop'] - scaffold_min_start,
-                        color, fill_opacity
+                        color, fill_opacity,
+                        any(fnmatch.fnmatch(feature_name, pat) for pat in exclude_patterns)
                     ))
 
                 drawing_data_vertical[read][fs] = rasterize_features(
@@ -6007,6 +6029,7 @@ def main():
 
             # Rasterize features to pixel runs
             colored_feats = []
+            exclude_patterns = args.min_width_exclude
             for feat in features:
                 final_start = feat['start'] - scaffold_min_start
                 final_stop = feat['stop'] - scaffold_min_start
@@ -6017,7 +6040,8 @@ def main():
                 if feature_name not in featureset_colors[fs]:
                     uncolored_features[fs].add(feature_name)
 
-                colored_feats.append((final_start, final_stop, color, fill_opacity))
+                colored_feats.append((final_start, final_stop, color, fill_opacity,
+                                      any(fnmatch.fnmatch(feature_name, pat) for pat in exclude_patterns)))
 
             bar_length = floor((read_length - scaffold_min_start) * ratio)
             for run in rasterize_features(colored_feats, bar_length, ratio,
