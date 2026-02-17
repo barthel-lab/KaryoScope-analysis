@@ -453,11 +453,11 @@ def auto_label_cluster(row, featureset_prefix):
     if icnc >= 0.5 and (ncan >= 50 or can >= 50):
         return "Interspersed telomere"
 
-    # 6. rDNA (tightened: require acrocentric chromosomes)
-    if rdna >= 50 and acro >= 50:
+    # 6. rDNA (require high rDNA + acrocentric chromosomes)
+    if rdna >= 90 and acro >= 50:
         return "rDNA"
 
-    # 6b. Interstitial TAR1/ITS (rDNA-associated on non-acrocentric chromosomes)
+    # 6b. Interstitial TAR1/ITS (rDNA-associated clusters)
     if rdna >= 50 and acro < 50:
         if tar1 >= 50 or its >= 50:
             if tar1 >= its:
