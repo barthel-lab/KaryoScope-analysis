@@ -5,6 +5,17 @@ KaryoScope Cluster Annotation
 Summarizes the dominant features for each cluster based on BED file annotations.
 Annotates each featureset layer separately (e.g., region, subtelomeric, chromosome).
 
+Per-feature columns (for featureset 'fs' and feature 'feat'):
+  {fs}_readpct__{feat}   % of cluster reads where feature > adaptive threshold
+  {fs}_bppct__{feat}     Feature bp / total bp across cluster (0-100)
+  {fs}_dmax__{feat}      Max density in any 1kb window (median across reads, 0-100)
+  {fs}_dmin__{feat}      Min density in any 1kb window (median across reads, 0-100)
+  {fs}_dmedian__{feat}   Median density across all 1kb windows (median across reads, 0-100)
+  {fs}_dfirst__{feat}    Density in first 1kb of read (median across reads, 0-100)
+  {fs}_dlast__{feat}     Density in last 1kb of read (median across reads, 0-100)
+
+Reads shorter than 1kb use overall coverage fraction for all density stats.
+
 Usage:
   python KaryoScope_cluster_annotate.py \
     --prefix analysis_output_prefix \
@@ -196,13 +207,16 @@ def compute_cluster_bp_scores(cluster_reads, bed_df):
     return {feat: round(100 * bp / total_bp, 2) for feat, bp in feature_bp.items()}
 
 
-def compute_cluster_max_density(cluster_reads, bed_df, window_size=1000):
-    """Compute median max feature density per kb window for a cluster.
+def compute_cluster_window_densities(cluster_reads, bed_df, window_size=1000):
+    """Compute per-1kb window density statistics for each feature across a cluster.
 
-    For each read, finds the maximum fraction of any 1kb window covered by
-    each feature. Returns median of these per-read max values across the cluster.
+    For each read, computes a binary coverage array and derives sliding-window
+    density statistics (max, min, median, first-1kb, last-1kb).  Returns the
+    median of each per-read statistic across the cluster, scaled 0-100.
 
-    Returns dict of {feature: median_max_pct}.
+    Short reads (<1kb) use overall coverage fraction for all five stats.
+
+    Returns dict of {feature: {'max': v, 'min': v, 'median': v, 'first': v, 'last': v}}.
     """
     import numpy as np
 
@@ -211,26 +225,32 @@ def compute_cluster_max_density(cluster_reads, bed_df, window_size=1000):
         return {}
 
     all_features = cluster_bed['feature'].unique()
-    feature_maxes = {f: [] for f in all_features}
+    # Per-read stats collected for aggregation
+    feature_stats = {f: {'max': [], 'min': [], 'median': [], 'first': [], 'last': [],
+                          'terminal': [], 'terminal_min': []}
+                     for f in all_features}
 
+    n_skipped = 0
     for _read_id, read_records in cluster_bed.groupby('read'):
         read_start = read_records['start'].min()
         read_end = read_records['end'].max()
         span = read_end - read_start
 
         if span <= 0:
+            n_skipped += 1
             continue
 
         if span < window_size:
-            # Short read: overall fraction per feature
+            # Short read: overall fraction per feature — same value for all 5 stats
             for feat, group in read_records.groupby('feature'):
                 events = np.zeros(span + 1, dtype=np.int32)
                 starts = group['start'].values - read_start
                 ends = np.minimum(group['end'].values - read_start, span)
                 np.add.at(events, starts, 1)
                 np.add.at(events, ends, -1)
-                coverage = (np.cumsum(events[:span]) > 0).sum()
-                feature_maxes[feat].append(coverage / span)
+                frac = (np.cumsum(events[:span]) > 0).sum() / span
+                for key in ('max', 'min', 'median', 'first', 'last', 'terminal', 'terminal_min'):
+                    feature_stats[feat][key].append(frac)
             continue
 
         for feat, group in read_records.groupby('feature'):
@@ -242,17 +262,38 @@ def compute_cluster_max_density(cluster_reads, bed_df, window_size=1000):
             np.add.at(events, ends, -1)
             coverage = (np.cumsum(events[:span]) > 0).astype(np.int32)
 
-            # Max window sum via cumulative sum
+            # Sliding-window sums via cumulative sum
             cumsum = np.empty(len(coverage) + 1, dtype=np.int64)
             cumsum[0] = 0
             np.cumsum(coverage, out=cumsum[1:])
             window_sums = cumsum[window_size:] - cumsum[:-window_size]
-            feature_maxes[feat].append(window_sums.max() / window_size)
 
-    return {
-        feat: round(100 * pd.Series(vals).median(), 2) if vals else 0
-        for feat, vals in feature_maxes.items()
-    }
+            feature_stats[feat]['max'].append(window_sums.max() / window_size)
+            feature_stats[feat]['min'].append(window_sums.min() / window_size)
+            feature_stats[feat]['median'].append(np.median(window_sums) / window_size)
+            first_val = coverage[:window_size].sum() / window_size
+            last_val = coverage[-window_size:].sum() / window_size
+            feature_stats[feat]['first'].append(first_val)
+            feature_stats[feat]['last'].append(last_val)
+            feature_stats[feat]['terminal'].append(max(first_val, last_val))
+            feature_stats[feat]['terminal_min'].append(min(first_val, last_val))
+
+    # Pad with zeros for reads missing a feature (or absent from cluster_bed entirely)
+    n_valid = len(cluster_reads) - n_skipped
+    for feat in all_features:
+        for key in ('max', 'min', 'median', 'first', 'last', 'terminal', 'terminal_min'):
+            n_pad = n_valid - len(feature_stats[feat][key])
+            if n_pad > 0:
+                feature_stats[feat][key].extend([0] * n_pad)
+
+    result = {}
+    for feat, stats in feature_stats.items():
+        feat_result = {}
+        for key in ('max', 'min', 'median', 'first', 'last', 'terminal', 'terminal_min'):
+            vals = stats[key]
+            feat_result[key] = round(100 * pd.Series(vals).median(), 2) if vals else 0
+        result[feat] = feat_result
+    return result
 
 
 # --- Feature classification constants for interspersion metrics ---
@@ -453,7 +494,11 @@ def _print_params_and_command(args):
 
 
 def auto_label_cluster(row, featureset_prefix):
-    """Auto-label a cluster using a decision tree based on feature scores and interspersion metrics.
+    """Auto-label a cluster using a structural decision tree based on terminal telomere density.
+
+    Primary classifier: terminal telomere density (dfirst/dlast) determines whether reads
+    have telomere at both ends (ECTR-like), one end (Subtelomere-like), or only internally
+    (Interstitial). Enrichment qualifiers (satellite, TAR1/ITS, rDNA, SegDup) are appended.
 
     Args:
         row: dict with all annotation columns for one cluster
@@ -464,95 +509,494 @@ def auto_label_cluster(row, featureset_prefix):
     """
     pfx = featureset_prefix
 
-    sat_features = {
-        'active':    row.get(f'{pfx}__active', 0),
-        'monomeric': row.get(f'{pfx}__monomeric', 0),
-        'bsat':      row.get(f'{pfx}__bsat', 0),
-        'censat':    row.get(f'{pfx}__censat', 0),
-        'hsat1A':    row.get(f'{pfx}__hsat1A', 0),
-        'hsat2':     row.get(f'{pfx}__hsat2', 0),
-        'hsat3':     row.get(f'{pfx}__hsat3', 0),
-        'gsat':      row.get(f'{pfx}__gsat', 0),
+    # --- Thresholds ---
+    CAN_ECTR = 90         # canonical terminal density for ECTR (each end)
+    NCAN_ECTR = 10        # noncanonical terminal density for ECTR (each end)
+    CAN_SUB = 15          # canonical terminal density for Subtelomere (one end)
+    NCAN_SUB = 5          # noncanonical terminal density for Subtelomere (one end)
+    DMAX_HIGH = 50        # dmax to count as "feature present in reads"
+    ENRICH_DMAX = 50      # dmax for enrichment qualifiers (satellite, TAR1, ITS, rDNA)
+    SAT_DOMINANT = 80     # readpct for satellite-dominant (rule 5)
+    CT_ENRICH = 20        # ct_bp_pct for SegDup enrichment
+
+    # --- Terminal telomere metrics (orientation-independent) ---
+    can_dterm      = row.get(f'{pfx}_dterminal__canonical_telomere', 0)
+    ncan_dterm     = row.get(f'{pfx}_dterminal__noncanonical_telomere', 0)
+    can_dterm_min  = row.get(f'{pfx}_dterminal_min__canonical_telomere', 0)
+    ncan_dterm_min = row.get(f'{pfx}_dterminal_min__noncanonical_telomere', 0)
+    can_dmax       = row.get(f'{pfx}_dmax__canonical_telomere', 0)
+    ncan_dmax      = row.get(f'{pfx}_dmax__noncanonical_telomere', 0)
+    tel_dmax       = max(can_dmax, ncan_dmax)
+
+    # End-check helper: is this end telomeric?
+    def _end_is_tel(can_d, ncan_d, can_thresh, ncan_thresh):
+        return can_d >= can_thresh or ncan_d >= ncan_thresh
+
+    # ECTR: both ends telomeric → use terminal_min (weaker end must pass)
+    ectr = _end_is_tel(can_dterm_min, ncan_dterm_min, CAN_ECTR, NCAN_ECTR)
+    # Subtelomere: at least one end telomeric → use terminal (stronger end must pass)
+    sub = _end_is_tel(can_dterm, ncan_dterm, CAN_SUB, NCAN_SUB)
+
+    # --- Feature metrics ---
+    its_dmax  = row.get(f'{pfx}_dmax__ITS', 0)
+    tar1_dmax = row.get(f'{pfx}_dmax__TAR1', 0)
+    rdna_dmax = row.get('acrocentric_dmax__rDNA', 0)
+    ct        = row.get('ct_bp_pct', 0)
+
+    its_readpct  = row.get(f'{pfx}_readpct__ITS', 0)
+    tar1_readpct = row.get(f'{pfx}_readpct__TAR1', 0)
+
+    # Satellite: dmax for enrichment, readpct for dominance (rule 5)
+    sat_dmax = {
+        'active aSat':    row.get(f'{pfx}_dmax__active', 0),
+        'monomeric aSat': row.get(f'{pfx}_dmax__monomeric', 0),
+        'bSat':           row.get(f'{pfx}_dmax__bsat', 0),
+        'CenSat':         row.get(f'{pfx}_dmax__censat', 0),
+        'HSat1A':         row.get(f'{pfx}_dmax__hsat1A', 0),
+        'HSat2':          row.get(f'{pfx}_dmax__hsat2', 0),
+        'HSat3':          row.get(f'{pfx}_dmax__hsat3', 0),
+        'GSat':           row.get(f'{pfx}_dmax__gsat', 0),
     }
-    max_sat_name = max(sat_features, key=sat_features.get)
-    max_sat_score = sat_features[max_sat_name]
+    max_sat_dmax_name  = max(sat_dmax, key=sat_dmax.get)
+    max_sat_dmax_score = sat_dmax[max_sat_dmax_name]
 
-    ncan = row.get(f'{pfx}__noncanonical_telomere', 0)
-    can  = row.get(f'{pfx}__canonical_telomere', 0)
-    its  = row.get(f'{pfx}__ITS', 0)
-    tar1 = row.get(f'{pfx}__TAR1', 0)
-    ct   = row.get('ct_bp_pct', 0)
-    icnc = row.get('interspersion_can_ncan', 0)
-    rdna = row.get('acrocentric__rDNA', 0)
-    acro = row.get('chromosome__acrocentric_multigroup1', 0)
-
-    sat_label_map = {
-        'active': 'active aSat', 'monomeric': 'monomeric aSat',
-        'bsat': 'bSat', 'censat': 'CenSat', 'hsat1A': 'HSat1A',
-        'hsat2': 'HSat2', 'hsat3': 'HSat3', 'gsat': 'GSat',
+    sat_readpct = {
+        'active aSat':    row.get(f'{pfx}_readpct__active', 0),
+        'monomeric aSat': row.get(f'{pfx}_readpct__monomeric', 0),
+        'bSat':           row.get(f'{pfx}_readpct__bsat', 0),
+        'CenSat':         row.get(f'{pfx}_readpct__censat', 0),
+        'HSat1A':         row.get(f'{pfx}_readpct__hsat1A', 0),
+        'HSat2':          row.get(f'{pfx}_readpct__hsat2', 0),
+        'HSat3':          row.get(f'{pfx}_readpct__hsat3', 0),
+        'GSat':           row.get(f'{pfx}_readpct__gsat', 0),
     }
+    max_sat_readpct_name  = max(sat_readpct, key=sat_readpct.get)
+    max_sat_readpct_score = sat_readpct[max_sat_readpct_name]
 
-    # 1. Satellite-dominant
-    if max_sat_score >= 80:
-        return sat_label_map[max_sat_name]
+    # --- Enrichment qualifier builder (uses dmax) ---
+    def _enrichment_qualifiers():
+        quals = []
+        if max_sat_dmax_score >= ENRICH_DMAX:
+            quals.append(max_sat_dmax_name)
+        if tar1_dmax >= ENRICH_DMAX and its_dmax >= ENRICH_DMAX:
+            quals.append('TAR1/ITS')
+        elif tar1_dmax >= ENRICH_DMAX:
+            quals.append('TAR1')
+        elif its_dmax >= ENRICH_DMAX:
+            quals.append('ITS')
+        if rdna_dmax >= ENRICH_DMAX:
+            quals.append('rDNA')
+        if ct >= CT_ENRICH:
+            quals.append('SegDup')
+        return f" ({', '.join(quals)})" if quals else ""
 
-    # 2. ECTR (tightened with subtelomeric gate)
-    if ct >= 25 and (ncan >= 50 or can >= 50) and tar1 < 50 and its < 50:
-        return "ECTR"
+    # --- Decision tree ---
 
-    # 3. Type I ALT telomere (tightened: require low TAR1)
-    if icnc >= 0.5 and ncan >= 80 and ct < 15 and tar1 < 50:
-        return "Type I ALT telomere"
+    # 1. ECTR-like: telomere at both read ends (stricter thresholds)
+    if ectr:
+        return f"ECTR-like{_enrichment_qualifiers()}"
 
-    # 4. ECTR (variant-rich) (tightened: require low subtelomeric signal)
-    if icnc >= 0.5 and ncan >= 80 and ct >= 15 and tar1 < 50 and its < 50:
-        return "ECTR (variant-rich)"
+    # 2. Subtelomere-like: telomere at one read end (more lenient thresholds)
+    if sub:
+        return f"Subtelomere-like{_enrichment_qualifiers()}"
 
-    # 5. Interspersed telomere
-    if icnc >= 0.5 and (ncan >= 50 or can >= 50):
-        return "Interspersed telomere"
+    # 3. Interstitial telomere: telomere dmax high but not at ends
+    if tel_dmax >= DMAX_HIGH:
+        return f"Interstitial telomere{_enrichment_qualifiers()}"
 
-    # 6. rDNA (require high rDNA + acrocentric chromosomes)
-    if rdna >= 90 and acro >= 50:
-        return "rDNA"
-
-    # 6b. Interstitial TAR1/ITS (rDNA-associated clusters)
-    if rdna >= 50 and acro < 50:
-        if tar1 >= 50 or its >= 50:
-            if tar1 >= its:
-                return "Interstitial TAR1"
-            else:
-                return "Interstitial ITS"
-
-    # 7. Type II ALT telomere
-    if can >= 95 and ncan < 50 and ct < 2 and max_sat_score < 10 and icnc < 0.2:
-        return "Type II ALT telomere"
-
-    # 8. Normal telomere
-    if can >= 80 and ncan < 50 and ct < 10:
-        return "Normal telomere"
-
-    # 9. Subtelomeric (moved up from #11)
-    if tar1 >= 50 or its >= 50:
-        if tar1 >= its:
-            return "Subtelomeric (TAR1-rich)"
+    # 4. Interstitial ITS/TAR1: no telomere structure, but ITS/TAR1 enriched (dmax)
+    if tar1_dmax >= ENRICH_DMAX or its_dmax >= ENRICH_DMAX:
+        if tar1_dmax >= ENRICH_DMAX and its_dmax >= ENRICH_DMAX:
+            base = "Interstitial ITS/TAR1"
+        elif tar1_dmax >= its_dmax:
+            base = "Interstitial TAR1"
         else:
-            return "Subtelomeric (ITS-rich)"
+            base = "Interstitial ITS"
+        quals = []
+        if max_sat_dmax_score >= ENRICH_DMAX:
+            quals.append(max_sat_dmax_name)
+        if rdna_dmax >= ENRICH_DMAX:
+            quals.append('rDNA')
+        if ct >= CT_ENRICH:
+            quals.append('SegDup')
+        suffix = f" ({', '.join(quals)})" if quals else ""
+        return f"{base}{suffix}"
 
-    # 10. Normal telomere (ct-rich) (moved down from #10)
-    if can >= 50 and ct >= 10:
-        return "Normal telomere (ct-rich)"
+    # 5. Satellite dominant (uses readpct)
+    if max_sat_readpct_score >= SAT_DOMINANT:
+        return max_sat_readpct_name
 
-    # 11. Pericentromeric
-    if ct >= 25 and max_sat_score < 30:
-        return "Pericentromeric"
-
-    # 12. Telomeric
-    if ncan >= 50 or can >= 50:
-        return "Telomeric"
-
-    # 13. Fallback
+    # 6. Unlabeled
     return ""
+
+
+# --- Feature Importance Analysis ---
+
+def analyze_annotation_importance(result_df):
+    """Analysis A: Which annotation columns vary meaningfully across clusters.
+
+    Returns a DataFrame with per-column stats (CV, sparsity, mean, std, IQR)
+    and a Spearman correlation matrix for non-zero-variance columns.
+    """
+    import numpy as np
+    from scipy import stats as scipy_stats
+
+    # Extract numeric score columns: all __ columns + ct_bp_pct + interspersion_*
+    score_cols = [c for c in result_df.columns
+                  if ('__' in c or c == 'ct_bp_pct' or c.startswith('interspersion_'))]
+    if not score_cols:
+        print("  WARNING: No score columns found for annotation importance analysis")
+        return None, None
+
+    numeric_df = result_df[score_cols].apply(pd.to_numeric, errors='coerce').fillna(0)
+
+    rows = []
+    for col in numeric_df.columns:
+        vals = numeric_df[col].values
+        mean_val = np.mean(vals)
+        std_val = np.std(vals)
+        cv = std_val / mean_val if mean_val != 0 else 0
+        sparsity = np.mean(vals == 0) * 100
+        q25, q75 = np.percentile(vals, [25, 75])
+        iqr = q75 - q25
+
+        # Determine featureset from column name
+        if '__' in col:
+            featureset = col.split('__')[0]
+            # Strip score type prefix (e.g., telomere_region_bp -> telomere_region)
+            for suffix in ('_readpct', '_bppct', '_dmax', '_dmin', '_dmedian', '_dfirst', '_dlast', '_score'):
+                if featureset.endswith(suffix):
+                    featureset = featureset[:-len(suffix)]
+                    break
+        elif col == 'ct_bp_pct':
+            featureset = 'ct'
+        elif col.startswith('interspersion_'):
+            featureset = 'interspersion'
+        else:
+            featureset = 'other'
+
+        rows.append({
+            'column': col,
+            'featureset': featureset,
+            'mean': mean_val,
+            'std': std_val,
+            'cv': cv,
+            'sparsity_pct': sparsity,
+            'min': np.min(vals),
+            'q25': q25,
+            'q75': q75,
+            'max': np.max(vals),
+            'iqr': iqr,
+        })
+
+    importance_df = pd.DataFrame(rows).sort_values('cv', ascending=False).reset_index(drop=True)
+
+    # Spearman correlation on non-zero-variance columns
+    nonzero_cols = [c for c in numeric_df.columns if numeric_df[c].std() > 0]
+    if len(nonzero_cols) >= 2:
+        corr_matrix = numeric_df[nonzero_cols].corr(method='spearman')
+    else:
+        corr_matrix = None
+
+    return importance_df, corr_matrix
+
+
+def analyze_svd_loadings(npz_path):
+    """Analysis B: Which raw BED features drive the top SVD components.
+
+    Returns:
+        feature_importance_df: All features ranked by weighted SVD importance
+        layers_df: Importance aggregated by layer-1 and layer-2 components
+        top_loadings: Top features x top components submatrix for heatmap
+        top_feature_names: Names for heatmap rows
+        top_component_labels: Labels for heatmap columns
+    """
+    import numpy as np
+
+    data = np.load(npz_path, allow_pickle=True)
+
+    # Check for required SVD data
+    if 'svd_components' not in data or 'svd_feature_names' not in data:
+        return None, None, None, None, None
+
+    components = data['svd_components']          # (n_components, n_features)
+    var_ratio = data['svd_explained_variance_ratio']  # (n_components,)
+    feature_names = data['svd_feature_names']    # (n_features,)
+    if hasattr(feature_names, 'tolist'):
+        feature_names = feature_names.tolist()
+
+    # Per-feature importance = sum(|loading| * variance_ratio) across components
+    importance = np.sum(np.abs(components) * var_ratio[:, np.newaxis], axis=0)
+
+    rows = []
+    for i, fname in enumerate(feature_names):
+        ftype = fname.split(':')[0] if ':' in fname else 'unknown'
+        rows.append({
+            'feature': fname,
+            'type': ftype,
+            'importance': importance[i],
+        })
+
+    feature_importance_df = pd.DataFrame(rows).sort_values('importance', ascending=False).reset_index(drop=True)
+
+    # Decompose 2-layer features and aggregate by layer components
+    layer1_importance = {}
+    layer2_importance = {}
+    for i, fname in enumerate(feature_names):
+        imp = importance[i]
+        # Parse feature name: "edge:ct:nonsubtelomeric->p_arm:canonical_telomere" or "abundance:ct:nonsubtelomeric"
+        if fname.startswith('edge:'):
+            body = fname[5:]  # strip "edge:"
+            parts = body.split('->')
+            if len(parts) == 2:
+                left_layers = parts[0].split(':')
+                right_layers = parts[1].split(':')
+                all_l1 = []
+                all_l2 = []
+                for layers in [left_layers, right_layers]:
+                    if len(layers) >= 1:
+                        all_l1.append(layers[0])
+                    if len(layers) >= 2:
+                        all_l2.append(layers[1])
+                share = imp / max(len(all_l1), 1)
+                for l in all_l1:
+                    layer1_importance[l] = layer1_importance.get(l, 0) + share
+                share = imp / max(len(all_l2), 1)
+                for l in all_l2:
+                    layer2_importance[l] = layer2_importance.get(l, 0) + share
+        elif fname.startswith('abundance:'):
+            body = fname[10:]  # strip "abundance:"
+            layers = body.split(':')
+            if len(layers) >= 1:
+                layer1_importance[layers[0]] = layer1_importance.get(layers[0], 0) + imp
+            if len(layers) >= 2:
+                layer2_importance[layers[1]] = layer2_importance.get(layers[1], 0) + imp
+
+    layer_rows = []
+    for name, imp in sorted(layer1_importance.items(), key=lambda x: -x[1]):
+        layer_rows.append({'layer': 'layer1', 'component': name, 'importance': imp})
+    for name, imp in sorted(layer2_importance.items(), key=lambda x: -x[1]):
+        layer_rows.append({'layer': 'layer2', 'component': name, 'importance': imp})
+    layers_df = pd.DataFrame(layer_rows)
+
+    # Top-20 features x top-10 components submatrix for heatmap
+    n_top_features = min(20, len(feature_names))
+    n_top_components = min(10, components.shape[0])
+    top_idx = np.argsort(-importance)[:n_top_features]
+    top_loadings = components[:n_top_components, :][:, top_idx].T  # (n_top_features, n_top_components)
+    top_feature_names = [feature_names[i] for i in top_idx]
+    top_component_labels = [f"PC{j+1} ({var_ratio[j]*100:.1f}%)" for j in range(n_top_components)]
+
+    return feature_importance_df, layers_df, top_loadings, top_feature_names, top_component_labels
+
+
+def plot_feature_importance(annotation_importance_df, corr_matrix,
+                            svd_importance_df, svd_layers_df,
+                            top_loadings, top_feature_names, top_component_labels,
+                            output_path):
+    """Generate 6-panel feature importance PDF."""
+    import numpy as np
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import matplotlib.font_manager as fm
+    from matplotlib.backends.backend_pdf import PdfPages
+    from pathlib import Path
+
+    # Register Barthel brand fonts
+    FONT_DIR = Path.home() / "Documents" / "Barthel-Custom-Powerpoint-Theme" / "fonts"
+    if FONT_DIR.exists():
+        for font_file in FONT_DIR.glob("BasicSans-*.otf"):
+            fm.fontManager.addfont(str(font_file))
+
+    plt.rcParams.update({
+        'font.family': 'Basic Sans',
+        'pdf.fonttype': 42,
+        'font.size': 9,
+    })
+
+    # Barthel palette
+    COLORS = {
+        'green': '#40D392', 'blue': '#60A5FA', 'coral': '#F07167',
+        'yellow': '#FBBF24', 'emerald': '#10B981', 'royal': '#3B82F6',
+        'lavender': '#C4A9E8', 'gray': '#545454',
+    }
+    FEATURESET_COLORS = {
+        'telomere_region': COLORS['green'],
+        'subtelomeric': COLORS['blue'],
+        'chromosome': COLORS['coral'],
+        'acrocentric': COLORS['yellow'],
+        'repeat': COLORS['emerald'],
+        'gene': COLORS['royal'],
+        'ct': COLORS['lavender'],
+        'interspersion': COLORS['gray'],
+    }
+
+    has_svd = svd_importance_df is not None
+
+    if has_svd:
+        fig, axes = plt.subplots(3, 2, figsize=(16, 20))
+    else:
+        fig, axes = plt.subplots(2, 2, figsize=(16, 14))
+        print("  Note: SVD data not available — producing annotation-only panels (A, B, C)")
+
+    fig.patch.set_facecolor('white')
+
+    # --- Panel A: Annotation CV ranking (top-left) ---
+    ax = axes[0, 0]
+    df_a = annotation_importance_df.head(30).iloc[::-1]  # reverse for horizontal bar
+    colors_a = [FEATURESET_COLORS.get(fs, '#999999') for fs in df_a['featureset']]
+    ax.barh(range(len(df_a)), df_a['cv'].values, color=colors_a, edgecolor='none')
+    ax.set_yticks(range(len(df_a)))
+    # Truncate long labels
+    labels_a = [c[:40] + '...' if len(c) > 40 else c for c in df_a['column']]
+    ax.set_yticklabels(labels_a, fontsize=7)
+    ax.set_xlabel('Coefficient of Variation (CV)')
+    ax.set_title('A. Annotation Column Variability (top 30 by CV)', fontweight='bold', loc='left')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    # Legend for featuresets
+    from matplotlib.patches import Patch
+    legend_items = []
+    seen_fs = set()
+    for fs in annotation_importance_df['featureset'].unique():
+        if fs not in seen_fs:
+            seen_fs.add(fs)
+            legend_items.append(Patch(facecolor=FEATURESET_COLORS.get(fs, '#999999'), label=fs))
+    ax.legend(handles=legend_items, loc='lower right', fontsize=7, framealpha=0.8)
+
+    # --- Panel B: Sparsity vs CV scatter (top-right) ---
+    ax = axes[0, 1]
+    df_b = annotation_importance_df.copy()
+    colors_b = [FEATURESET_COLORS.get(fs, '#999999') for fs in df_b['featureset']]
+    ax.scatter(df_b['sparsity_pct'], df_b['cv'], c=colors_b, s=30, alpha=0.7, edgecolors='none')
+    # Label top 10 by CV
+    for _, row in df_b.head(10).iterrows():
+        label = row['column']
+        if len(label) > 30:
+            label = label[:27] + '...'
+        ax.annotate(label, (row['sparsity_pct'], row['cv']),
+                     fontsize=6, alpha=0.8, ha='left',
+                     xytext=(3, 3), textcoords='offset points')
+    ax.set_xlabel('Sparsity (%)')
+    ax.set_ylabel('Coefficient of Variation (CV)')
+    ax.set_title('B. Sparsity vs Variability', fontweight='bold', loc='left')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    # --- Panel C: Annotation correlation heatmap (mid-left) ---
+    ax = axes[1, 0]
+    if corr_matrix is not None and len(corr_matrix) >= 2:
+        from scipy.cluster.hierarchy import linkage as _linkage, leaves_list
+        from scipy.spatial.distance import squareform
+
+        # Cluster the correlation matrix
+        dist = 1 - corr_matrix.abs().values
+        np.fill_diagonal(dist, 0)
+        dist = np.clip(dist, 0, None)
+        # Make symmetric
+        dist = (dist + dist.T) / 2
+        condensed = squareform(dist, checks=False)
+        link = _linkage(condensed, method='average')
+        order = leaves_list(link)
+
+        ordered_corr = corr_matrix.iloc[order, order]
+        im = ax.imshow(ordered_corr.values, cmap='RdBu_r', vmin=-1, vmax=1, aspect='auto')
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_title('C. Annotation Correlation (clustered Spearman)', fontweight='bold', loc='left')
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label='Spearman r')
+
+        # Label a few key features along the axes
+        n_corr = len(ordered_corr)
+        if n_corr <= 40:
+            labels_c = [c[:25] if len(c) > 25 else c for c in ordered_corr.columns]
+            ax.set_xticks(range(n_corr))
+            ax.set_xticklabels(labels_c, rotation=90, fontsize=5)
+            ax.set_yticks(range(n_corr))
+            ax.set_yticklabels(labels_c, fontsize=5)
+    else:
+        ax.text(0.5, 0.5, 'Insufficient non-zero-variance\ncolumns for correlation',
+                ha='center', va='center', transform=ax.transAxes, fontsize=10)
+        ax.set_title('C. Annotation Correlation', fontweight='bold', loc='left')
+
+    if not has_svd:
+        # Panel D placeholder for annotation-only mode
+        ax = axes[1, 1]
+        ax.text(0.5, 0.5, 'SVD data not available\n(re-run clustering with --reduce-dims)',
+                ha='center', va='center', transform=ax.transAxes, fontsize=10, color='#545454')
+        ax.set_title('D. SVD Loadings (not available)', fontweight='bold', loc='left')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+    else:
+        # --- Panel D: SVD loadings heatmap (mid-right) ---
+        ax = axes[1, 1]
+        vmax = np.max(np.abs(top_loadings)) if top_loadings.size > 0 else 1
+        im = ax.imshow(top_loadings, cmap='RdBu_r', vmin=-vmax, vmax=vmax, aspect='auto')
+        ax.set_yticks(range(len(top_feature_names)))
+        labels_d = [f[:35] + '...' if len(f) > 35 else f for f in top_feature_names]
+        ax.set_yticklabels(labels_d, fontsize=6)
+        ax.set_xticks(range(len(top_component_labels)))
+        ax.set_xticklabels(top_component_labels, rotation=45, ha='right', fontsize=7)
+        ax.set_title('D. SVD Loadings (top 20 features x top 10 components)', fontweight='bold', loc='left')
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label='Loading')
+
+        # --- Panel E: SVD feature importance bar chart (bottom-left) ---
+        ax = axes[2, 0]
+        df_e = svd_importance_df.head(30).iloc[::-1]
+        colors_e = [COLORS['blue'] if t == 'edge' else COLORS['green'] for t in df_e['type']]
+        ax.barh(range(len(df_e)), df_e['importance'].values, color=colors_e, edgecolor='none')
+        ax.set_yticks(range(len(df_e)))
+        labels_e = [f[:40] + '...' if len(f) > 40 else f for f in df_e['feature']]
+        ax.set_yticklabels(labels_e, fontsize=6)
+        ax.set_xlabel('Weighted SVD Importance')
+        ax.set_title('E. Raw Feature Importance (top 30)', fontweight='bold', loc='left')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.legend(handles=[
+            Patch(facecolor=COLORS['blue'], label='edge'),
+            Patch(facecolor=COLORS['green'], label='abundance'),
+        ], loc='lower right', fontsize=7)
+
+        # --- Panel F: Layer-aggregated importance (bottom-right) ---
+        ax = axes[2, 1]
+        l1 = svd_layers_df[svd_layers_df['layer'] == 'layer1'].sort_values('importance', ascending=False)
+        l2 = svd_layers_df[svd_layers_df['layer'] == 'layer2'].sort_values('importance', ascending=False)
+
+        # Two side-by-side grouped bar sections
+        n_l1 = min(len(l1), 15)
+        n_l2 = min(len(l2), 15)
+        total = n_l1 + n_l2
+        if total > 0:
+            gap = 1.5
+            positions_l1 = list(range(n_l1))
+            positions_l2 = [n_l1 + gap + i for i in range(n_l2)]
+
+            if n_l1 > 0:
+                ax.barh(positions_l1[::-1], l1['importance'].values[:n_l1],
+                        color=COLORS['royal'], edgecolor='none', label='Layer 1 (region type)')
+            if n_l2 > 0:
+                ax.barh([p for p in reversed(positions_l2)], l2['importance'].values[:n_l2],
+                        color=COLORS['coral'], edgecolor='none', label='Layer 2 (subtype)')
+
+            all_positions = positions_l1[::-1] + list(reversed(positions_l2))
+            all_labels = list(l1['component'].values[:n_l1]) + list(l2['component'].values[:n_l2])
+            ax.set_yticks(all_positions)
+            ax.set_yticklabels(all_labels, fontsize=7)
+            ax.set_xlabel('Aggregated SVD Importance')
+            ax.legend(loc='lower right', fontsize=7)
+        else:
+            ax.text(0.5, 0.5, 'No layer data available', ha='center', va='center',
+                    transform=ax.transAxes)
+        ax.set_title('F. Layer-Aggregated Importance', fontweight='bold', loc='left')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+
+    plt.tight_layout()
+    with PdfPages(output_path) as pdf:
+        pdf.savefig(fig, dpi=150, bbox_inches='tight')
+    plt.close(fig)
 
 
 def main():
@@ -589,6 +1033,9 @@ def main():
     parser.add_argument("--auto-label", dest="auto_label",
                         action="store_true", default=False,
                         help="Auto-label clusters using a decision tree based on feature scores and interspersion metrics")
+    parser.add_argument("--feature-importance", dest="feature_importance",
+                        action="store_true", default=False,
+                        help="Analyze which annotation columns and raw BED features matter most for cluster structure")
 
     global _argparse_defaults
     _argparse_defaults = {}
@@ -825,23 +1272,30 @@ def main():
         for fs in featuresets:
             if fs in bed_data:
                 row[f'{fs}_top'] = summarize_featureset(cluster_reads, bed_data[fs], args.top_n, exclude_patterns)
-            # Per-feature columns: read-presence, bp-level, max density per kb
+            # Per-feature columns: read-presence, bp-level, window densities
             scores = {}
             bp_scores = {}
-            max_density = {}
+            window_densities = {}
             if fs in feature_fractions:
                 scores = score_cluster_features(cluster_reads, feature_fractions[fs], feature_thresholds[fs])
             if fs in bed_data:
                 bp_scores = compute_cluster_bp_scores(cluster_reads, bed_data[fs])
-                max_density = compute_cluster_max_density(cluster_reads, bed_data[fs])
+                window_densities = compute_cluster_window_densities(cluster_reads, bed_data[fs])
             for feat in feature_names.get(fs, []):
-                row[f'{fs}__{feat}'] = scores.get(feat, 0)
-                row[f'{fs}_bp__{feat}'] = bp_scores.get(feat, 0)
-                row[f'{fs}_maxkb__{feat}'] = max_density.get(feat, 0)
+                row[f'{fs}_readpct__{feat}'] = scores.get(feat, 0)
+                row[f'{fs}_bppct__{feat}'] = bp_scores.get(feat, 0)
+                feat_wd = window_densities.get(feat, {})
+                row[f'{fs}_dmax__{feat}'] = feat_wd.get('max', 0)
+                row[f'{fs}_dmin__{feat}'] = feat_wd.get('min', 0)
+                row[f'{fs}_dmedian__{feat}'] = feat_wd.get('median', 0)
+                row[f'{fs}_dfirst__{feat}'] = feat_wd.get('first', 0)
+                row[f'{fs}_dlast__{feat}'] = feat_wd.get('last', 0)
+                row[f'{fs}_dterminal__{feat}'] = feat_wd.get('terminal', 0)
+                row[f'{fs}_dterminal_min__{feat}'] = feat_wd.get('terminal_min', 0)
 
         # ct_bp_pct from generalized bp scores (backward compat with auto_label)
         if 'telomere_region' in bed_data:
-            row['ct_bp_pct'] = row.get('telomere_region_bp__ct', 0)
+            row['ct_bp_pct'] = row.get('telomere_region_bppct__ct', 0)
 
         if args.auto_label:
             pfx = 'telomere_region' if 'telomere_region' in bed_data else 'region'
@@ -885,6 +1339,68 @@ def main():
                 seen.append(entity)
         print(f"\nEntity stat columns included for: {', '.join(seen)}")
 
+    # --- Feature Importance Analysis ---
+    if args.feature_importance:
+        import numpy as np
+
+        # Derive output prefix from output path
+        out_prefix = args.output[:-4] if args.output.endswith('.tsv') else args.output
+
+        print(f"\n{'=' * 60}")
+        print("Feature Importance Analysis")
+        print("=" * 60)
+
+        # Analysis A: Annotation column importance
+        print("\n--- Analysis A: Annotation column importance ---")
+        ann_importance_df, corr_matrix = analyze_annotation_importance(result_df)
+        if ann_importance_df is not None:
+            ann_tsv = f"{out_prefix}.feature_importance_annotations.tsv"
+            ann_importance_df.to_csv(ann_tsv, sep='\t', index=False)
+            print(f"  Saved annotation importance to: {ann_tsv}")
+            print(f"  Total score columns analyzed: {len(ann_importance_df)}")
+            top5 = ann_importance_df.head(5)
+            print(f"  Top 5 by CV: {', '.join(top5['column'])}")
+
+        # Analysis B: SVD loading importance
+        npz_path = f"{args.prefix}.feature_matrix.npz"
+        svd_importance_df = None
+        svd_layers_df = None
+        top_loadings = None
+        top_feature_names_svd = None
+        top_component_labels = None
+
+        if os.path.exists(npz_path):
+            print(f"\n--- Analysis B: SVD loading importance ---")
+            svd_importance_df, svd_layers_df, top_loadings, top_feature_names_svd, top_component_labels = \
+                analyze_svd_loadings(npz_path)
+
+            if svd_importance_df is not None:
+                svd_tsv = f"{out_prefix}.feature_importance_svd.tsv"
+                svd_importance_df.to_csv(svd_tsv, sep='\t', index=False)
+                print(f"  Saved SVD feature importance to: {svd_tsv}")
+                print(f"  Total raw features: {len(svd_importance_df)}")
+                top5_svd = svd_importance_df.head(5)
+                print(f"  Top 5 by importance: {', '.join(top5_svd['feature'])}")
+
+                layers_tsv = f"{out_prefix}.feature_importance_svd_layers.tsv"
+                svd_layers_df.to_csv(layers_tsv, sep='\t', index=False)
+                print(f"  Saved layer-aggregated importance to: {layers_tsv}")
+            else:
+                print(f"  WARNING: NPZ lacks SVD data — producing annotation-only panels")
+        else:
+            print(f"\n  WARNING: NPZ not found at {npz_path} — skipping SVD analysis")
+
+        # Visualization: 6-panel (or 4-panel) PDF
+        if ann_importance_df is not None:
+            print(f"\n--- Generating feature importance visualization ---")
+            pdf_path = f"{out_prefix}.feature_importance.pdf"
+            plot_feature_importance(
+                ann_importance_df, corr_matrix,
+                svd_importance_df, svd_layers_df,
+                top_loadings, top_feature_names_svd, top_component_labels,
+                pdf_path
+            )
+            print(f"  Saved feature importance PDF to: {pdf_path}")
 
 
 if __name__ == "__main__":
