@@ -17,6 +17,7 @@ Generates:
   - {prefix}.comparison_report.txt: Text summary of comparison
   - {prefix}.comparison_plots.pdf: Visualization of clustering concordance
   - {prefix}.comparison_matrix.tsv: Cluster-to-cluster mapping matrix
+  - {prefix}.comparison_labels.tsv: Auto-label cross-tabulation
 """
 
 import argparse
@@ -39,6 +40,10 @@ def load_clustering(assignments_file, analysis_file=None):
     """Load read assignments and optionally cluster analysis for enrichment labels."""
     df = pd.read_csv(assignments_file, sep='\t')
 
+    # Normalize column name: newer files may use 'sequence' instead of 'read'
+    if 'sequence' in df.columns and 'read' not in df.columns:
+        df.rename(columns={'sequence': 'read'}, inplace=True)
+
     # Try to auto-discover cluster analysis file
     if analysis_file is None:
         analysis_file = assignments_file.replace('.sequence_assignments.tsv', '.cluster_analysis.tsv')
@@ -50,7 +55,18 @@ def load_clustering(assignments_file, analysis_file=None):
 
     df['enrichment'] = df['cluster'].map(enrichment_map).fillna('unknown')
 
-    return df, enrichment_map
+    # Try to auto-discover cluster annotations file for auto-labels
+    annotations_file = assignments_file.replace('.sequence_assignments.tsv', '.cluster_annotations.tsv')
+    cluster_name_map = {}
+    if os.path.exists(annotations_file):
+        ann = pd.read_csv(annotations_file, sep='\t')
+        if 'cluster_id' in ann.columns and 'cluster_name' in ann.columns:
+            cluster_name_map = dict(zip(ann['cluster_id'], ann['cluster_name']))
+
+    df['cluster_name'] = df['cluster'].map(cluster_name_map).fillna('(unlabeled)')
+    df.loc[df['cluster_name'] == '', 'cluster_name'] = '(unlabeled)'
+
+    return df, enrichment_map, cluster_name_map
 
 
 def compute_cluster_overlap_matrix(merged, col1, col2):
@@ -73,6 +89,48 @@ def compute_normalized_mutual_info(labels1, labels2):
     """Compute Normalized Mutual Information between two clusterings."""
     from sklearn.metrics import normalized_mutual_info_score
     return normalized_mutual_info_score(labels1, labels2)
+
+
+def compute_label_retention(merged, label_col_a, label_col_b):
+    """Forward mapping: for each label in A, what % of reads get the same label in B."""
+    rows = []
+    for label_a, grp in merged.groupby(label_col_a):
+        n_reads = len(grp)
+        n_clusters = grp[label_col_a.replace('_label', '_cluster')].nunique() if label_col_a.replace('_label', '_cluster') in merged.columns else 0
+        same = (grp[label_col_b] == label_a).sum()
+        same_pct = 100 * same / n_reads if n_reads > 0 else 0
+        # Top destinations
+        dest_counts = grp[label_col_b].value_counts()
+        top_dests = '; '.join(f"{lbl}({100*cnt/n_reads:.0f}%)" for lbl, cnt in dest_counts.head(3).items())
+        rows.append({
+            'label': label_a,
+            'n_reads': n_reads,
+            'n_clusters': n_clusters,
+            'same_label_pct': round(same_pct, 1),
+            'top_destinations': top_dests,
+        })
+    return pd.DataFrame(rows).sort_values('n_reads', ascending=False)
+
+
+def compute_label_purity(merged, label_col_a, label_col_b):
+    """Reverse mapping: for each label in B, what % came from the same label in A."""
+    rows = []
+    for label_b, grp in merged.groupby(label_col_b):
+        n_reads = len(grp)
+        n_clusters = grp[label_col_b.replace('_label', '_cluster')].nunique() if label_col_b.replace('_label', '_cluster') in merged.columns else 0
+        same = (grp[label_col_a] == label_b).sum()
+        same_pct = 100 * same / n_reads if n_reads > 0 else 0
+        # Top sources
+        src_counts = grp[label_col_a].value_counts()
+        top_srcs = '; '.join(f"{lbl}({100*cnt/n_reads:.0f}%)" for lbl, cnt in src_counts.head(3).items())
+        rows.append({
+            'label': label_b,
+            'n_reads': n_reads,
+            'n_clusters': n_clusters,
+            'same_label_pct': round(same_pct, 1),
+            'top_sources': top_srcs,
+        })
+    return pd.DataFrame(rows).sort_values('n_reads', ascending=False)
 
 
 def plot_enrichment_sankey(merged, enrich1, enrich2, label1, label2, ax, dark_mode=False):
@@ -174,7 +232,8 @@ def plot_concordance_by_cluster(merged, col1, enrich1, enrich2, label1, label2, 
     ax.legend(title=f'{label2} enrichment', bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=8)
 
 
-def generate_report(merged, df1, df2, enrich1_map, enrich2_map, label1, label2, output_file):
+def generate_report(merged, df1, df2, enrich1_map, enrich2_map, label1, label2, output_file,
+                     name1_map=None, name2_map=None):
     """Generate text report of comparison findings."""
     with open(output_file, 'w') as f:
         f.write("=" * 70 + "\n")
@@ -229,7 +288,7 @@ def generate_report(merged, df1, df2, enrich1_map, enrich2_map, label1, label2, 
         # Flow analysis
         f.write("\n--- ENRICHMENT FLOW ANALYSIS ---\n\n")
 
-        for enrich_cat in ['SW26_Post-enriched', 'SW26_Pre-enriched', 'mixed']:
+        for enrich_cat in merged[f'{label1}_enrich'].value_counts().index:
             subset = merged[merged[f'{label1}_enrich'] == enrich_cat]
             if len(subset) == 0:
                 continue
@@ -249,6 +308,34 @@ def generate_report(merged, df1, df2, enrich1_map, enrich2_map, label1, label2, 
             e1 = enrich1_map.get(row[f'{label1}_cluster'], 'unknown')
             e2 = enrich2_map.get(row[f'{label2}_cluster'], 'unknown')
             f.write(f"{row[f'{label1}_cluster']:>10} {e1:>15} {row[f'{label2}_cluster']:>10} {e2:>15} {row['count']:>8}\n")
+
+        # Auto-label analysis (if labels available)
+        label1_col = f'{label1}_label'
+        label2_col = f'{label2}_label'
+        if label1_col in merged.columns and label2_col in merged.columns:
+            has_labels_1 = (merged[label1_col] != '(unlabeled)').any()
+            has_labels_2 = (merged[label2_col] != '(unlabeled)').any()
+
+            if has_labels_1 or has_labels_2:
+                f.write("\n--- AUTO-LABEL RETENTION (forward: {l1} → {l2}) ---\n\n".format(l1=label1, l2=label2))
+                f.write("For each {l1} label, what % of reads receive the same label in {l2}?\n\n".format(l1=label1, l2=label2))
+                retention = compute_label_retention(merged, label1_col, label2_col)
+                f.write(f"{'Label':<35} {'Reads':>7} {'Clust':>6} {'Same%':>7}  Top destinations\n")
+                f.write("-" * 100 + "\n")
+                for _, row in retention.iterrows():
+                    f.write(f"{row['label']:<35} {row['n_reads']:>7} {row['n_clusters']:>6} {row['same_label_pct']:>6.1f}%  {row['top_destinations']}\n")
+
+                f.write("\n--- AUTO-LABEL PURITY (reverse: {l1} ← {l2}) ---\n\n".format(l1=label1, l2=label2))
+                f.write("For each {l2} label, what % of reads came from the same label in {l1}?\n\n".format(l1=label1, l2=label2))
+                purity = compute_label_purity(merged, label1_col, label2_col)
+                f.write(f"{'Label':<35} {'Reads':>7} {'Clust':>6} {'Same%':>7}  Top sources\n")
+                f.write("-" * 100 + "\n")
+                for _, row in purity.iterrows():
+                    f.write(f"{row['label']:<35} {row['n_reads']:>7} {row['n_clusters']:>6} {row['same_label_pct']:>6.1f}%  {row['top_sources']}\n")
+
+                f.write("\n--- AUTO-LABEL CROSS-TABULATION ---\n\n")
+                label_ct = pd.crosstab(merged[label1_col], merged[label2_col], margins=True)
+                f.write(label_ct.to_string() + "\n")
 
         # Interpretation
         f.write("\n--- INTERPRETATION ---\n\n")
@@ -299,19 +386,23 @@ def main():
 
     # Load clusterings
     print(f"\nLoading {args.label1} clustering: {args.clustering1}")
-    df1, enrich1_map = load_clustering(args.clustering1)
+    df1, enrich1_map, name1_map = load_clustering(args.clustering1)
     print(f"  Reads: {len(df1)}, Clusters: {df1['cluster'].nunique()}")
+    if name1_map:
+        print(f"  Auto-labels: {len([v for v in name1_map.values() if v])} clusters labeled")
 
     print(f"\nLoading {args.label2} clustering: {args.clustering2}")
-    df2, enrich2_map = load_clustering(args.clustering2)
+    df2, enrich2_map, name2_map = load_clustering(args.clustering2)
     print(f"  Reads: {len(df2)}, Clusters: {df2['cluster'].nunique()}")
+    if name2_map:
+        print(f"  Auto-labels: {len([v for v in name2_map.values() if v])} clusters labeled")
 
     # Prepare merged dataframe
-    df1_subset = df1[['read', 'cluster', 'enrichment']].copy()
-    df1_subset.columns = ['read', f'{args.label1}_cluster', f'{args.label1}_enrich']
+    df1_subset = df1[['read', 'cluster', 'enrichment', 'cluster_name']].copy()
+    df1_subset.columns = ['read', f'{args.label1}_cluster', f'{args.label1}_enrich', f'{args.label1}_label']
 
-    df2_subset = df2[['read', 'cluster', 'enrichment']].copy()
-    df2_subset.columns = ['read', f'{args.label2}_cluster', f'{args.label2}_enrich']
+    df2_subset = df2[['read', 'cluster', 'enrichment', 'cluster_name']].copy()
+    df2_subset.columns = ['read', f'{args.label2}_cluster', f'{args.label2}_enrich', f'{args.label2}_label']
 
     merged = df1_subset.merge(df2_subset, on='read')
     print(f"\nMerged reads: {len(merged)}")
@@ -324,7 +415,8 @@ def main():
     print("\nGenerating comparison report...")
     report_file = f"{args.output_prefix}.comparison_report.txt"
     generate_report(merged, df1, df2, enrich1_map, enrich2_map,
-                    args.label1, args.label2, report_file)
+                    args.label1, args.label2, report_file,
+                    name1_map=name1_map, name2_map=name2_map)
     print(f"  Saved: {report_file}")
 
     # Generate plots
@@ -394,6 +486,38 @@ def main():
         pdf.savefig(fig, bbox_inches='tight', facecolor=PLOT_BG_COLOR)
         plt.close(fig)
 
+        # Page 5: Auto-label flow heatmap (if labels available)
+        label1_col = f'{args.label1}_label'
+        label2_col = f'{args.label2}_label'
+        if label1_col in merged.columns and label2_col in merged.columns:
+            has_labels = ((merged[label1_col] != '(unlabeled)').any() or
+                          (merged[label2_col] != '(unlabeled)').any())
+            if has_labels:
+                # Forward: row = label1, col = label2, row-normalized
+                ct = pd.crosstab(merged[label1_col], merged[label2_col])
+                ct_pct = ct.div(ct.sum(axis=1), axis=0) * 100
+
+                # Size figure based on number of labels
+                n_rows, n_cols = ct_pct.shape
+                fig_w = max(10, n_cols * 1.2 + 4)
+                fig_h = max(6, n_rows * 0.6 + 3)
+                fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+                fig.patch.set_facecolor(PLOT_BG_COLOR)
+
+                cmap = 'YlGnBu' if args.dark_mode else 'Blues'
+                # Show percentages, suppress <1% for readability
+                annot_matrix = ct_pct.copy()
+                sns.heatmap(ct_pct, annot=True, fmt='.0f', cmap=cmap, ax=ax,
+                            cbar_kws={'label': '% of reads (row-normalized)'},
+                            linewidths=0.5, vmin=0, vmax=100,
+                            mask=(ct_pct < 0.5))
+                ax.set_xlabel(f'{args.label2} auto-label')
+                ax.set_ylabel(f'{args.label1} auto-label')
+                ax.set_title(f'Auto-label Flow: {args.label1} → {args.label2}\n(row-normalized %, cells <1% hidden)')
+                plt.tight_layout()
+                pdf.savefig(fig, bbox_inches='tight', facecolor=PLOT_BG_COLOR)
+                plt.close(fig)
+
     print(f"  Saved: {plots_file}")
 
     # Save cluster mapping matrix
@@ -404,6 +528,25 @@ def main():
     )
     overlap_matrix.to_csv(matrix_file, sep='\t')
     print(f"  Saved: {matrix_file}")
+
+    # Save auto-label cross-tabulation
+    label1_col = f'{args.label1}_label'
+    label2_col = f'{args.label2}_label'
+    if label1_col in merged.columns and label2_col in merged.columns:
+        labels_file = f"{args.output_prefix}.comparison_labels.tsv"
+        label_xtab = merged.groupby([label1_col, label2_col]).size().reset_index(name='n_reads')
+        # Add pct_of_a: what fraction of label_a goes to this label_b
+        a_totals = merged[label1_col].value_counts()
+        label_xtab['pct_of_a'] = label_xtab.apply(
+            lambda r: round(100 * r['n_reads'] / a_totals[r[label1_col]], 1), axis=1)
+        # Add pct_of_b: what fraction of label_b comes from this label_a
+        b_totals = merged[label2_col].value_counts()
+        label_xtab['pct_of_b'] = label_xtab.apply(
+            lambda r: round(100 * r['n_reads'] / b_totals[r[label2_col]], 1), axis=1)
+        label_xtab.columns = ['label_a', 'label_b', 'n_reads', 'pct_of_a', 'pct_of_b']
+        label_xtab = label_xtab.sort_values('n_reads', ascending=False)
+        label_xtab.to_csv(labels_file, sep='\t', index=False)
+        print(f"  Saved: {labels_file}")
 
     # Print summary
     print(f"\n{'=' * 60}")
@@ -426,6 +569,8 @@ def main():
     print(f"  - {report_file}")
     print(f"  - {plots_file}")
     print(f"  - {matrix_file}")
+    if label1_col in merged.columns and label2_col in merged.columns:
+        print(f"  - {labels_file}")
 
 
 if __name__ == "__main__":

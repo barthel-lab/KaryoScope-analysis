@@ -176,7 +176,7 @@ This graph representation enables clustering sequences by their structural patte
 
 ### 1.4 Sequence Filtering and Quality Control {#14-sequence-filtering-and-quality-control}
 
-Sequences undergo filtering to ensure optimized input for clustering (default parameters shown below, modifiable via script arguments):
+Sequences undergo filtering to ensure optimized input for clustering. Filtering proceeds in order: length filtering first, then feature masking (default parameters shown below, modifiable via script arguments):
 
 #### 1.4.1 Sequence Length Filtering
 
@@ -202,10 +202,10 @@ Certain features are masked/excluded from analysis:
 
 **Example filtering impact (Core-4 telomeric sequences dataset):**
 ```
-Total records: 6,850,068
-After feature exclusion: 6,476,740 (94.5%)
 Sequences before length filter: 12,357
 Sequences after length filter: 8,422 (68.1%)
+Total records: 6,850,068
+After feature exclusion: 6,476,740 (94.5%)
 Final dataset: 8,422 sequences for clustering
 ```
 
@@ -484,7 +484,7 @@ Symmetric mode reduces dimensionality by treating A→B and B→A as equivalent,
 
 #### Edge Weighting
 
-Three matrix types are available:
+Four matrix types are available (controlled by `--matrix-type`, which sets weighting for both edges and abundance):
 
 **Binary Matrix:**
 ```
@@ -513,15 +513,27 @@ for each transition (feature_i → feature_j):
 - **Binary**: Set to 1 (no accumulation, presence/absence only)
 - **Count**: Increment by 1 each occurrence (accumulation: `edge_value += 1`)
 - **Length-weighted**: Add normalized weight each occurrence (accumulation: `edge_value += weight`)
+- **Count-log1p**: Same as count, then `log(x+1)` applied to all edge values
+
+**Count-Log1p Matrix:**
+```
+edge_value = log(count + 1) for each transition in the sequence
+```
+
+Applies `log(x+1)` to raw transition counts, compressing dynamic range so rare-but-biologically-meaningful transitions become relatively more prominent. Standard transformation for count data in genomics.
 
 ### 3.3 Abundance Variables {#33-abundance-variables}
 
-Abundance variables capture the compositional content of each sequence by measuring the proportion of each genomic feature:
+Abundance variables capture the compositional content of each sequence. The `--matrix-type` flag controls both edge and abundance weighting:
 
-```python
-for each feature in sequence:
-    abundance[feature] = total_feature_length / sequence_length
-```
+| `--matrix-type` | Abundance formula |
+|---|---|
+| `length_weighted` (default) | `total_feature_bp / sequence_length` |
+| `binary` | `1` if feature present, else `0` |
+| `count` | `total_feature_bp` (raw, unnormalized) |
+| `count_log1p` | `log(total_feature_bp + 1)` |
+
+Note: abundance is **length-based** (total bp per feature), not occurrence-based (number of BED records).
 
 This provides complementary information to edge variables: while edges capture feature connectivity patterns, abundances capture overall feature content.
 
@@ -1011,6 +1023,9 @@ q_values = false_discovery_control(raw_pvals, method='by')
 - `length_weighted` (default): Edge weight = source feature length normalized by sequence length. Best for biological interpretation as it reflects the relative genomic span of transitions.
 - `count`: Edge weight = number of times transition occurs in the sequence. Use if feature lengths are unreliable or when transition frequency is more informative than length.
 - `binary`: Edge weight = 1 if transition occurs at least once in the sequence, else 0. Use for presence/absence patterns only, ignoring frequency and length.
+- `count_log1p`: Applies `log(x+1)` to raw counts (edges) and raw bp totals (abundance). Compresses dynamic range, making rare transitions more visible. Use when clustering is dominated by high-count transitions and rare structural patterns are underrepresented.
+
+**Note:** `--matrix-type` controls both edge and abundance weighting.
 
 **Matrix Mode (for concatenation-merged features only):**
 
@@ -1104,8 +1119,8 @@ q_values = false_discovery_control(raw_pvals, method='by')
 1. Input: BED files (path graphs)
    ↓
 2. Extract edge and abundance variables
-   → Edge matrix (transitions, length-weighted)
-   → Abundance matrix (feature proportions)
+   → Edge matrix (transitions; binary, count, length-weighted, or count-log1p)
+   → Abundance matrix (same weighting as edges)
    ↓
 3. Combine: Feature matrix [n_sequences × n_variables]
    → Typical: 8000 sequences × 300 variables (7% dense)

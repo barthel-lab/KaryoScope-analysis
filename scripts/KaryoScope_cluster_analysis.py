@@ -90,11 +90,12 @@ parser.add_argument("--exclude-features", dest="exclude_features", default="nove
 parser.add_argument("--linkage-method", dest="linkage_method", default="ward",
                     help="Linkage method for hierarchical clustering (default: ward)")
 parser.add_argument("--matrix-type", dest="matrix_type", default="length_weighted",
-                    choices=["binary", "count", "length_weighted"],
-                    help="Type of adjacency matrix:\n"
-                         "  binary: 0/1 for presence/absence of transitions\n"
-                         "  count: count of each transition\n"
-                         "  length_weighted: transitions weighted by feature length (default: length_weighted)")
+                    choices=["binary", "count", "length_weighted", "count_log1p"],
+                    help="Type of adjacency matrix (controls both edges and abundance):\n"
+                         "  binary: 0/1 presence/absence\n"
+                         "  count: raw transition counts / raw feature bp totals\n"
+                         "  length_weighted: feature-length proportions (default)\n"
+                         "  count_log1p: log(count+1), compresses dynamic range for rare features")
 parser.add_argument("--edges", dest="edge_mode", default="symmetric",
                     choices=["directional", "symmetric"],
                     help="Edge counting mode:\n"
@@ -1039,7 +1040,7 @@ def build_layer_matrix(seq_names, seq_feature_data, seq_length_dict, layer_idx, 
                 if pair_name in pair_to_idx:
                     edge_matrix[i, pair_to_idx[pair_name]] = 1
 
-        elif matrix_type == "count":
+        elif matrix_type in ("count", "count_log1p"):
             edges = get_edges([f for f, _ in layer_data], edge_mode=edge_mode)
             for from_feat, to_feat in edges:
                 pair_name = f"{from_feat}->{to_feat}"
@@ -1053,6 +1054,9 @@ def build_layer_matrix(seq_names, seq_feature_data, seq_length_dict, layer_idx, 
                 if pair_name in pair_to_idx:
                     edge_matrix[i, pair_to_idx[pair_name]] += weight / read_len
 
+    if matrix_type == "count_log1p":
+        edge_matrix = np.log1p(edge_matrix)
+
     n_edge_cols = len(layer_pairs)
 
     # Build abundance matrix if requested
@@ -1064,15 +1068,30 @@ def build_layer_matrix(seq_names, seq_feature_data, seq_length_dict, layer_idx, 
             read_len = seq_length_dict.get(read_name, 1)
             layer_data = layer_read_data[read_name]
 
-            # Sum lengths per feature
-            feature_lengths = defaultdict(float)
-            for feat, length in layer_data:
-                feature_lengths[feat] += length
+            if matrix_type == "binary":
+                for feat, _length in layer_data:
+                    if feat in feature_to_idx:
+                        abundance_matrix[i, feature_to_idx[feat]] = 1
 
-            # Convert to proportions
-            for feat, total_len in feature_lengths.items():
-                if feat in feature_to_idx:
-                    abundance_matrix[i, feature_to_idx[feat]] = total_len / read_len
+            elif matrix_type in ("count", "count_log1p"):
+                # Raw total bp per feature (length-based, not occurrence-based)
+                feature_lengths = defaultdict(float)
+                for feat, length in layer_data:
+                    feature_lengths[feat] += length
+                for feat, total_len in feature_lengths.items():
+                    if feat in feature_to_idx:
+                        abundance_matrix[i, feature_to_idx[feat]] = total_len
+
+            else:  # length_weighted
+                feature_lengths = defaultdict(float)
+                for feat, length in layer_data:
+                    feature_lengths[feat] += length
+                for feat, total_len in feature_lengths.items():
+                    if feat in feature_to_idx:
+                        abundance_matrix[i, feature_to_idx[feat]] = total_len / read_len
+
+        if matrix_type == "count_log1p":
+            abundance_matrix = np.log1p(abundance_matrix)
 
         matrix = np.hstack([edge_matrix, abundance_matrix])
         n_abundance_cols = len(layer_features)
@@ -1124,7 +1143,7 @@ def build_combined_matrix(seq_names, seq_feature_data, seq_length_dict, all_feat
                 if pair_name in pair_to_idx:
                     edge_matrix[i, pair_to_idx[pair_name]] = 1
 
-        elif matrix_type == "count":
+        elif matrix_type in ("count", "count_log1p"):
             edges = get_edges([f for f, _ in feat_data], edge_mode=edge_mode)
             for from_feat, to_feat in edges:
                 pair_name = f"{from_feat}->{to_feat}"
@@ -1138,6 +1157,9 @@ def build_combined_matrix(seq_names, seq_feature_data, seq_length_dict, all_feat
                 if pair_name in pair_to_idx:
                     edge_matrix[i, pair_to_idx[pair_name]] += weight / read_len
 
+    if matrix_type == "count_log1p":
+        edge_matrix = np.log1p(edge_matrix)
+
     n_edge_cols = len(all_pairs)
 
     # Build abundance matrix if requested
@@ -1149,15 +1171,30 @@ def build_combined_matrix(seq_names, seq_feature_data, seq_length_dict, all_feat
             read_len = seq_length_dict.get(read_name, 1)
             feat_data = seq_feature_data[read_name]
 
-            # Sum lengths per feature
-            feature_lengths = defaultdict(float)
-            for feat, length in feat_data:
-                feature_lengths[feat] += length
+            if matrix_type == "binary":
+                for feat, _length in feat_data:
+                    if feat in feature_to_idx:
+                        abundance_matrix[i, feature_to_idx[feat]] = 1
 
-            # Convert to proportions
-            for feat, total_len in feature_lengths.items():
-                if feat in feature_to_idx:
-                    abundance_matrix[i, feature_to_idx[feat]] = total_len / read_len
+            elif matrix_type in ("count", "count_log1p"):
+                # Raw total bp per feature (length-based, not occurrence-based)
+                feature_lengths = defaultdict(float)
+                for feat, length in feat_data:
+                    feature_lengths[feat] += length
+                for feat, total_len in feature_lengths.items():
+                    if feat in feature_to_idx:
+                        abundance_matrix[i, feature_to_idx[feat]] = total_len
+
+            else:  # length_weighted
+                feature_lengths = defaultdict(float)
+                for feat, length in feat_data:
+                    feature_lengths[feat] += length
+                for feat, total_len in feature_lengths.items():
+                    if feat in feature_to_idx:
+                        abundance_matrix[i, feature_to_idx[feat]] = total_len / read_len
+
+        if matrix_type == "count_log1p":
+            abundance_matrix = np.log1p(abundance_matrix)
 
         matrix = np.hstack([edge_matrix, abundance_matrix])
         n_abundance_cols = len(all_features)

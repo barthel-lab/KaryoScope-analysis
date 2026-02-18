@@ -196,6 +196,65 @@ def compute_cluster_bp_scores(cluster_reads, bed_df):
     return {feat: round(100 * bp / total_bp, 2) for feat, bp in feature_bp.items()}
 
 
+def compute_cluster_max_density(cluster_reads, bed_df, window_size=1000):
+    """Compute median max feature density per kb window for a cluster.
+
+    For each read, finds the maximum fraction of any 1kb window covered by
+    each feature. Returns median of these per-read max values across the cluster.
+
+    Returns dict of {feature: median_max_pct}.
+    """
+    import numpy as np
+
+    cluster_bed = bed_df[bed_df['read'].isin(cluster_reads)]
+    if len(cluster_bed) == 0:
+        return {}
+
+    all_features = cluster_bed['feature'].unique()
+    feature_maxes = {f: [] for f in all_features}
+
+    for _read_id, read_records in cluster_bed.groupby('read'):
+        read_start = read_records['start'].min()
+        read_end = read_records['end'].max()
+        span = read_end - read_start
+
+        if span <= 0:
+            continue
+
+        if span < window_size:
+            # Short read: overall fraction per feature
+            for feat, group in read_records.groupby('feature'):
+                events = np.zeros(span + 1, dtype=np.int32)
+                starts = group['start'].values - read_start
+                ends = np.minimum(group['end'].values - read_start, span)
+                np.add.at(events, starts, 1)
+                np.add.at(events, ends, -1)
+                coverage = (np.cumsum(events[:span]) > 0).sum()
+                feature_maxes[feat].append(coverage / span)
+            continue
+
+        for feat, group in read_records.groupby('feature'):
+            # Event-based binary coverage array
+            events = np.zeros(span + 1, dtype=np.int32)
+            starts = group['start'].values - read_start
+            ends = np.minimum(group['end'].values - read_start, span)
+            np.add.at(events, starts, 1)
+            np.add.at(events, ends, -1)
+            coverage = (np.cumsum(events[:span]) > 0).astype(np.int32)
+
+            # Max window sum via cumulative sum
+            cumsum = np.empty(len(coverage) + 1, dtype=np.int64)
+            cumsum[0] = 0
+            np.cumsum(coverage, out=cumsum[1:])
+            window_sums = cumsum[window_size:] - cumsum[:-window_size]
+            feature_maxes[feat].append(window_sums.max() / window_size)
+
+    return {
+        feat: round(100 * pd.Series(vals).median(), 2) if vals else 0
+        for feat, vals in feature_maxes.items()
+    }
+
+
 # --- Feature classification constants for interspersion metrics ---
 _SATELLITE_LAYER1 = frozenset({
     'hsat3', 'hsat1A', 'hsat2', 'hsat1B', 'active', 'censat', 'bsat',
@@ -766,16 +825,19 @@ def main():
         for fs in featuresets:
             if fs in bed_data:
                 row[f'{fs}_top'] = summarize_featureset(cluster_reads, bed_data[fs], args.top_n, exclude_patterns)
-            # Per-feature columns: read-presence then bp-level, interleaved per feature
+            # Per-feature columns: read-presence, bp-level, max density per kb
             scores = {}
             bp_scores = {}
+            max_density = {}
             if fs in feature_fractions:
                 scores = score_cluster_features(cluster_reads, feature_fractions[fs], feature_thresholds[fs])
             if fs in bed_data:
                 bp_scores = compute_cluster_bp_scores(cluster_reads, bed_data[fs])
+                max_density = compute_cluster_max_density(cluster_reads, bed_data[fs])
             for feat in feature_names.get(fs, []):
                 row[f'{fs}__{feat}'] = scores.get(feat, 0)
                 row[f'{fs}_bp__{feat}'] = bp_scores.get(feat, 0)
+                row[f'{fs}_maxkb__{feat}'] = max_density.get(feat, 0)
 
         # ct_bp_pct from generalized bp scores (backward compat with auto_label)
         if 'telomere_region' in bed_data:
