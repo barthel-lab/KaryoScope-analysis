@@ -2295,6 +2295,13 @@ def features_to_pixels_direct(colored_features, bar_length, ratio, min_width=0.5
         width = max(natural_width, effective_min)
         segments.append((width, natural_width, color, opacity, effective_min))
 
+    # Step 1.5: If min-width floors alone exceed bar_length, the bar is too
+    # short for per-fragment guarantees — fall back to natural (proportional)
+    # widths so that large features aren't squeezed out by many tiny ones.
+    floor_total = sum(em for _, _, _, _, em in segments)
+    if floor_total > bar_length:
+        segments = [(nw, nw, c, o, 0) for _, nw, c, o, _ in segments]
+
     # Step 2: If total exceeds bar_length, shrink features proportionally
     # (only shrink the portion above each feature's floor)
     total = sum(w for w, _, _, _, _ in segments)
