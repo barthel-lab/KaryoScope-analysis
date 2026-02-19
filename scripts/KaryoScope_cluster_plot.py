@@ -4961,7 +4961,13 @@ def plot_structural_mode(args, matrix_data):
         print("Error: 'chromosome' column missing. Not a structural analysis output?")
         sys.exit(1)
 
-    chromosomes = sorted(reps_df['chromosome'].unique(), key=lambda x: (len(x), x))
+    def _chrom_sort_key(x):
+        """Sort chr1..chr22, chrX, chrY in natural order."""
+        c = x.replace('chr', '')
+        if c.isdigit():
+            return (0, int(c))
+        return (1, {'X': 0, 'Y': 1}.get(c, 2))
+    chromosomes = sorted(reps_df['chromosome'].unique(), key=_chrom_sort_key)
     print(f"Plotting {len(chromosomes)} chromosomes")
 
     # BED Data Source
@@ -5165,7 +5171,7 @@ def plot_structural_mode(args, matrix_data):
         d.append(draw.Text(f"KaryoScope: {chrom} Structural Analysis", 24, canvas_width/2, 40, 
                           fill=text_color, font_weight='bold', text_anchor='middle'))
         
-        panel_bg = "#111111" if bg_color == "black" else "#F5F5F5"
+        panel_bg = "#111111" if bg_color == "black" else "#FFFFFF"
         d.append(draw.Rectangle(margin_x - 5, 75, panel_width + 10, canvas_height - 180, fill=panel_bg, rx=10, ry=10))
 
         reads_needed = set(r['sequence'] for r in selected_reads)
@@ -5368,7 +5374,7 @@ def plot_structural_mode(args, matrix_data):
             
         for j, r_obj in enumerate(selected_reads):
             read, ry = r_obj['sequence'], row_y_centers[j] - (len(featuresets)*fs_height)/2
-            l_color = "#888888" if r_obj['type'] == "Major" else "#FF4444"
+            l_color = ("#888888" if bg_color == "black" else "#000000") if r_obj['type'] == "Major" else "#FF4444"
             
             # Detailed label — extract sample and haplotype from read name
             sample_val = r_obj.get('sample', 'unknown')
@@ -5452,7 +5458,8 @@ def plot_structural_mode(args, matrix_data):
 
         legend_y = canvas_height - 60
         d.append(draw.Text("Legend:", 14, margin_x, legend_y, fill=text_color, font_weight='bold'))
-        d.append(draw.Text("Major (Dominant)", 12, margin_x + 100, legend_y, fill="#888888"))
+        major_legend_color = "#888888" if bg_color == "black" else "#000000"
+        d.append(draw.Text("Major (Dominant)", 12, margin_x + 100, legend_y, fill=major_legend_color))
         d.append(draw.Text("Outlier (Variant)", 12, margin_x + 300, legend_y, fill="#FF4444"))
         if featuresets: d.append(draw.Text(f"Tracks: {', '.join(featuresets)}", 12, margin_x + 500, legend_y, fill=text_color))
         d.save_svg(f"{out_base}.{chrom}.svg")
