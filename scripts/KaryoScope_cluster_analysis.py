@@ -1226,6 +1226,8 @@ if args.matrix_mode == "layered" and n_layers > 1:
 
     # Concatenate all layer matrices
     adj_matrix = np.hstack(all_layer_matrices)
+    svd_feature_name_list = None  # Feature names not tracked for layered mode
+    print("  Note: SVD feature names not available in layered mode")
 
 else:
     # Combined mode: treat merged features as atomic (original approach)
@@ -1238,6 +1240,22 @@ else:
         seq_names, seq_feature_data, seq_length_dict, all_features,
         args.edge_mode, args.matrix_type, args.include_abundance
     )
+
+    # Build feature name list matching exact column order of combined matrix
+    svd_feature_name_list = []
+    if args.edge_mode == "symmetric":
+        for i, f1 in enumerate(all_features):
+            for f2 in all_features[i+1:]:
+                svd_feature_name_list.append(f"edge:{f1}->{f2}")
+    else:
+        for f1 in all_features:
+            for f2 in all_features:
+                if f1 != f2:
+                    svd_feature_name_list.append(f"edge:{f1}->{f2}")
+    if args.include_abundance:
+        for f in all_features:
+            svd_feature_name_list.append(f"abundance:{f}")
+
     print(f"  Unique features: {len(all_features)}")
     print(f"  Edge columns: {total_edge_cols}")
     if args.include_abundance:
@@ -1261,6 +1279,8 @@ if active_cols > 0:
 
 # --- Optional dimensionality reduction ---
 adj_matrix_full = adj_matrix  # Keep full matrix for reference
+svd_components_export = None
+svd_explained_variance_ratio_export = None
 if args.reduce_dims and args.reduce_dims > 0:
     n_samples, n_features = adj_matrix.shape
     n_components = min(args.reduce_dims, n_samples - 1, n_features)
@@ -1294,6 +1314,10 @@ if args.reduce_dims and args.reduce_dims > 0:
         print(f"  Top {top_k} variance %: {', '.join(f'{v:.1f}%' for v in top_var)}")
 
         print(f"  Reduced matrix shape: {adj_matrix.shape}")
+
+        # Stash SVD data for NPZ export
+        svd_components_export = svd.components_
+        svd_explained_variance_ratio_export = svd.explained_variance_ratio_
 
         # Generate SVD scree plot
         var_ratio = svd.explained_variance_ratio_
@@ -2011,6 +2035,16 @@ save_dict = {
 }
 if cluster_linkage is not None:
     save_dict['cluster_linkage'] = cluster_linkage
+if svd_components_export is not None:
+    save_dict['svd_components'] = svd_components_export
+    save_dict['svd_explained_variance_ratio'] = svd_explained_variance_ratio_export
+    if svd_feature_name_list is not None:
+        save_dict['svd_feature_names'] = np.array(svd_feature_name_list)
+        print(f"  Including SVD data: {svd_components_export.shape[0]} components x {len(svd_feature_name_list)} features")
+    else:
+        print(f"  Including SVD components but not feature names (layered mode)")
+else:
+    print(f"  SVD data not included (dimensionality reduction not used)")
 np.savez(matrix_file, **save_dict)
 print(f"  Saved feature matrix to: {matrix_file}")
 if cluster_linkage is not None:

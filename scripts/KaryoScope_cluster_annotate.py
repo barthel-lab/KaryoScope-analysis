@@ -207,6 +207,29 @@ def compute_cluster_bp_scores(cluster_reads, bed_df):
     return {feat: round(100 * bp / total_bp, 2) for feat, bp in feature_bp.items()}
 
 
+BLOCK_GAP_TOL = 100  # merge blocks separated by ≤100 bp gaps
+
+
+def _max_block_length(coverage, gap_tol=BLOCK_GAP_TOL):
+    """Longest contiguous block of 1s in coverage, merging gaps ≤ gap_tol bp."""
+    import numpy as np
+    diffs = np.diff(np.concatenate([[0], coverage, [0]]))
+    run_starts = np.where(diffs == 1)[0]
+    run_ends = np.where(diffs == -1)[0]
+    if len(run_starts) == 0:
+        return 0
+    # Merge runs separated by small gaps
+    merged_starts = [run_starts[0]]
+    merged_ends = [run_ends[0]]
+    for i in range(1, len(run_starts)):
+        if run_starts[i] - merged_ends[-1] <= gap_tol:
+            merged_ends[-1] = run_ends[i]
+        else:
+            merged_starts.append(run_starts[i])
+            merged_ends.append(run_ends[i])
+    return int(max(me - ms for ms, me in zip(merged_starts, merged_ends)))
+
+
 def compute_cluster_window_densities(cluster_reads, bed_df, window_size=1000):
     """Compute per-1kb window density statistics for each feature across a cluster.
 
@@ -227,7 +250,7 @@ def compute_cluster_window_densities(cluster_reads, bed_df, window_size=1000):
     all_features = cluster_bed['feature'].unique()
     # Per-read stats collected for aggregation
     feature_stats = {f: {'max': [], 'min': [], 'median': [], 'first': [], 'last': [],
-                          'terminal': [], 'terminal_min': []}
+                          'terminal': [], 'terminal_min': [], 'max_block': []}
                      for f in all_features}
 
     n_skipped = 0
@@ -248,9 +271,11 @@ def compute_cluster_window_densities(cluster_reads, bed_df, window_size=1000):
                 ends = np.minimum(group['end'].values - read_start, span)
                 np.add.at(events, starts, 1)
                 np.add.at(events, ends, -1)
-                frac = (np.cumsum(events[:span]) > 0).sum() / span
+                coverage_arr = (np.cumsum(events[:span]) > 0).astype(np.int32)
+                frac = coverage_arr.sum() / span
                 for key in ('max', 'min', 'median', 'first', 'last', 'terminal', 'terminal_min'):
                     feature_stats[feat][key].append(frac)
+                feature_stats[feat]['max_block'].append(_max_block_length(coverage_arr))
             continue
 
         for feat, group in read_records.groupby('feature'):
@@ -277,11 +302,12 @@ def compute_cluster_window_densities(cluster_reads, bed_df, window_size=1000):
             feature_stats[feat]['last'].append(last_val)
             feature_stats[feat]['terminal'].append(max(first_val, last_val))
             feature_stats[feat]['terminal_min'].append(min(first_val, last_val))
+            feature_stats[feat]['max_block'].append(_max_block_length(coverage))
 
     # Pad with zeros for reads missing a feature (or absent from cluster_bed entirely)
     n_valid = len(cluster_reads) - n_skipped
     for feat in all_features:
-        for key in ('max', 'min', 'median', 'first', 'last', 'terminal', 'terminal_min'):
+        for key in ('max', 'min', 'median', 'first', 'last', 'terminal', 'terminal_min', 'max_block'):
             n_pad = n_valid - len(feature_stats[feat][key])
             if n_pad > 0:
                 feature_stats[feat][key].extend([0] * n_pad)
@@ -289,9 +315,12 @@ def compute_cluster_window_densities(cluster_reads, bed_df, window_size=1000):
     result = {}
     for feat, stats in feature_stats.items():
         feat_result = {}
-        for key in ('max', 'min', 'median', 'first', 'last', 'terminal', 'terminal_min'):
+        for key in ('max', 'min', 'median', 'first', 'last', 'terminal', 'terminal_min', 'max_block'):
             vals = stats[key]
-            feat_result[key] = round(100 * pd.Series(vals).median(), 2) if vals else 0
+            if key == 'max_block':
+                feat_result[key] = round(pd.Series(vals).median(), 0) if vals else 0
+            else:
+                feat_result[key] = round(100 * pd.Series(vals).median(), 2) if vals else 0
         result[feat] = feat_result
     return result
 
@@ -477,6 +506,8 @@ def _print_params_and_command(args):
         ("exclude-features", _fmt(args.exclude_features, "exclude_features"), None),
         ("log-file", _fmt(args.log_file, "log_file"), None),
         ("auto-label", _fmt(args.auto_label, "auto_label"), None),
+        ("alt-samples", _fmt(args.alt_samples, "alt_samples"), None),
+        ("alt-threshold", _fmt(args.alt_threshold, "alt_threshold"), None),
     ]
 
     print("\n" + "=" * 60)
@@ -497,8 +528,10 @@ def auto_label_cluster(row, featureset_prefix):
     """Auto-label a cluster using a structural decision tree based on terminal telomere density.
 
     Primary classifier: terminal telomere density (dfirst/dlast) determines whether reads
-    have telomere at both ends (ECTR-like), one end (Subtelomere-like), or only internally
-    (Interstitial). Enrichment qualifiers (satellite, TAR1/ITS, rDNA, SegDup) are appended.
+    have telomere at both ends (ECTR), one end (Subtelomere), or only internally
+    (Interstitial). Subtelomeres with long contiguous canonical telomere blocks
+    (max_block_bp >= 6 kb) are labeled "Type II ALT subtelomere".
+    Enrichment qualifiers (satellite, TAR1/ITS, rDNA, SegDup) are appended.
 
     Args:
         row: dict with all annotation columns for one cluster
@@ -519,6 +552,8 @@ def auto_label_cluster(row, featureset_prefix):
     NCAN_VARIANT = 25     # noncanonical dmax for variant-enriched qualifier
     SAT_DOMINANT = 80     # readpct for satellite-dominant (rule 5)
     CT_ENRICH = 20        # ct_bp_pct for SegDup enrichment
+    ALT_BLOCK_BP = 6000   # max_block_bp threshold for Type II ALT subtelomere
+    ARM_PRESENT = 30      # p_arm or q_arm dmax to count as having arm sequence
 
     # --- Terminal telomere metrics (orientation-independent) ---
     can_dterm      = row.get(f'{pfx}_dterminal__canonical_telomere', 0)
@@ -528,6 +563,7 @@ def auto_label_cluster(row, featureset_prefix):
     can_dmax       = row.get(f'{pfx}_dmax__canonical_telomere', 0)
     ncan_dmax      = row.get(f'{pfx}_dmax__noncanonical_telomere', 0)
     tel_dmax       = max(can_dmax, ncan_dmax)
+    can_max_block  = row.get(f'{pfx}_max_block_bp__canonical_telomere', 0)
     can_dfirst     = row.get(f'{pfx}_dfirst__canonical_telomere', 0)
     can_dlast      = row.get(f'{pfx}_dlast__canonical_telomere', 0)
     ncan_dfirst    = row.get(f'{pfx}_dfirst__noncanonical_telomere', 0)
@@ -548,6 +584,11 @@ def auto_label_cluster(row, featureset_prefix):
     tar1_dmax = row.get(f'{pfx}_dmax__TAR1', 0)
     rdna_dmax = row.get('acrocentric_dmax__rDNA', 0)
     ct        = row.get('ct_bp_pct', 0)
+
+    # Arm metrics: detect whether reads extend into a chromosome arm (or SegDup)
+    p_arm_dmax = row.get(f'{pfx}_dmax__p_arm', 0)
+    q_arm_dmax = row.get(f'{pfx}_dmax__q_arm', 0)
+    has_arm = max(p_arm_dmax, q_arm_dmax) >= ARM_PRESENT or ct >= CT_ENRICH
 
     its_readpct  = row.get(f'{pfx}_readpct__ITS', 0)
     tar1_readpct = row.get(f'{pfx}_readpct__TAR1', 0)
@@ -580,11 +621,19 @@ def auto_label_cluster(row, featureset_prefix):
     max_sat_readpct_name  = max(sat_readpct, key=sat_readpct.get)
     max_sat_readpct_score = sat_readpct[max_sat_readpct_name]
 
+    # --- Enrichment qualifier formatter ---
+    def _format_quals(quals):
+        if not quals:
+            return ""
+        if len(quals) == 1:
+            return f" ({quals[0]}-enriched)"
+        return " (" + "-, ".join(quals[:-1]) + "-, " + quals[-1] + "-enriched)"
+
     # --- Enrichment qualifier builder (uses dmax) ---
     def _enrichment_qualifiers():
         quals = []
         if ncan_dmax_val > NCAN_VARIANT:
-            quals.append('variant-enriched')
+            quals.append('variant')
         if max_sat_dmax_score >= ENRICH_DMAX:
             quals.append(max_sat_dmax_name)
         if tar1_dmax >= ENRICH_DMAX and its_dmax >= ENRICH_DMAX:
@@ -597,17 +646,20 @@ def auto_label_cluster(row, featureset_prefix):
             quals.append('rDNA')
         if ct >= CT_ENRICH:
             quals.append('SegDup')
-        return f" ({', '.join(quals)})" if quals else ""
+        return _format_quals(quals)
 
     # --- Decision tree ---
 
-    # 1. ECTR-like: telomere at both read ends (stricter thresholds)
-    if ectr:
-        return f"ECTR-like{_enrichment_qualifiers()}"
+    # 1. ECTR: telomere at both ends, OR telomere at one end without arm/SegDup
+    if ectr or (sub and not has_arm):
+        return f"ECTR{_enrichment_qualifiers()}"
 
-    # 2. Subtelomere-like: telomere at one read end (more lenient thresholds)
+    # 2. Subtelomere: telomere at one end with arm or SegDup at the other
+    #    Type II ALT subtelomere: long contiguous canonical telomere block (≥6 kb)
     if sub:
-        return f"Subtelomere-like{_enrichment_qualifiers()}"
+        if can_max_block >= ALT_BLOCK_BP:
+            return f"Type II ALT subtelomere{_enrichment_qualifiers()}"
+        return f"Subtelomere{_enrichment_qualifiers()}"
 
     # 3. Interstitial telomere: telomere dmax high but not at ends
     if tel_dmax >= DMAX_HIGH:
@@ -628,7 +680,7 @@ def auto_label_cluster(row, featureset_prefix):
             quals.append('rDNA')
         if ct >= CT_ENRICH:
             quals.append('SegDup')
-        suffix = f" ({', '.join(quals)})" if quals else ""
+        suffix = _format_quals(quals)
         return f"{base}{suffix}"
 
     # 5. Satellite dominant (uses readpct)
@@ -1045,6 +1097,10 @@ def main():
     parser.add_argument("--feature-importance", dest="feature_importance",
                         action="store_true", default=False,
                         help="Analyze which annotation columns and raw BED features matter most for cluster structure")
+    parser.add_argument("--alt-samples", dest="alt_samples", default=None,
+                        help="Comma-separated sample prefixes for Type I ALT relabeling (e.g. 'U2OsTrf1Fok1MUT,U2OsTrf1Fok1_WT')")
+    parser.add_argument("--alt-threshold", dest="alt_threshold", type=float, default=80,
+                        help="ALT sample percentage threshold for Type I ALT relabeling (default: 80)")
 
     global _argparse_defaults
     _argparse_defaults = {}
@@ -1301,6 +1357,7 @@ def main():
                 row[f'{fs}_dlast__{feat}'] = feat_wd.get('last', 0)
                 row[f'{fs}_dterminal__{feat}'] = feat_wd.get('terminal', 0)
                 row[f'{fs}_dterminal_min__{feat}'] = feat_wd.get('terminal_min', 0)
+                row[f'{fs}_max_block_bp__{feat}'] = feat_wd.get('max_block', 0)
 
         # ct_bp_pct from generalized bp scores (backward compat with auto_label)
         if 'telomere_region' in bed_data:
@@ -1309,6 +1366,17 @@ def main():
         if args.auto_label:
             pfx = 'telomere_region' if 'telomere_region' in bed_data else 'region'
             row['cluster_name'] = auto_label_cluster(row, pfx)
+
+            # Type I ALT relabeling: prepend "Type I ALT" for ALT-enriched clusters
+            if args.alt_samples:
+                alt_sample_list = [s.strip() for s in args.alt_samples.split(',')]
+                alt_pct = sum(row.get(f'{s}_pct', 0) or 0 for s in alt_sample_list)
+                label = row['cluster_name']
+                if (label
+                        and alt_pct > args.alt_threshold
+                        and not label.startswith('ECTR')
+                        and not label.startswith('Type II ALT')):
+                    row['cluster_name'] = 'Type I ALT ' + label[0].lower() + label[1:]
 
         results.append(row)
 
