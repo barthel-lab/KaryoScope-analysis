@@ -510,12 +510,13 @@ def auto_label_cluster(row, featureset_prefix):
     pfx = featureset_prefix
 
     # --- Thresholds ---
-    CAN_ECTR = 90         # canonical terminal density for ECTR (each end)
+    CAN_ECTR = 70         # canonical terminal density for ECTR (each end)
     NCAN_ECTR = 10        # noncanonical terminal density for ECTR (each end)
     CAN_SUB = 15          # canonical terminal density for Subtelomere (one end)
     NCAN_SUB = 5          # noncanonical terminal density for Subtelomere (one end)
-    DMAX_HIGH = 50        # dmax to count as "feature present in reads"
-    ENRICH_DMAX = 50      # dmax for enrichment qualifiers (satellite, TAR1, ITS, rDNA)
+    DMAX_HIGH = 35        # dmax to count as "feature present in reads"
+    ENRICH_DMAX = 35      # dmax for enrichment qualifiers (satellite, TAR1, ITS, rDNA)
+    NCAN_VARIANT = 25     # noncanonical dmax for variant-enriched qualifier
     SAT_DOMINANT = 80     # readpct for satellite-dominant (rule 5)
     CT_ENRICH = 20        # ct_bp_pct for SegDup enrichment
 
@@ -527,13 +528,18 @@ def auto_label_cluster(row, featureset_prefix):
     can_dmax       = row.get(f'{pfx}_dmax__canonical_telomere', 0)
     ncan_dmax      = row.get(f'{pfx}_dmax__noncanonical_telomere', 0)
     tel_dmax       = max(can_dmax, ncan_dmax)
+    can_dfirst     = row.get(f'{pfx}_dfirst__canonical_telomere', 0)
+    can_dlast      = row.get(f'{pfx}_dlast__canonical_telomere', 0)
+    ncan_dfirst    = row.get(f'{pfx}_dfirst__noncanonical_telomere', 0)
+    ncan_dlast     = row.get(f'{pfx}_dlast__noncanonical_telomere', 0)
 
     # End-check helper: is this end telomeric?
     def _end_is_tel(can_d, ncan_d, can_thresh, ncan_thresh):
         return can_d >= can_thresh or ncan_d >= ncan_thresh
 
-    # ECTR: both ends telomeric → use terminal_min (weaker end must pass)
-    ectr = _end_is_tel(can_dterm_min, ncan_dterm_min, CAN_ECTR, NCAN_ECTR)
+    # ECTR: both ends telomeric → check dfirst and dlast independently
+    ectr = (_end_is_tel(can_dfirst, ncan_dfirst, CAN_ECTR, NCAN_ECTR) and
+            _end_is_tel(can_dlast, ncan_dlast, CAN_ECTR, NCAN_ECTR))
     # Subtelomere: at least one end telomeric → use terminal (stronger end must pass)
     sub = _end_is_tel(can_dterm, ncan_dterm, CAN_SUB, NCAN_SUB)
 
@@ -545,6 +551,7 @@ def auto_label_cluster(row, featureset_prefix):
 
     its_readpct  = row.get(f'{pfx}_readpct__ITS', 0)
     tar1_readpct = row.get(f'{pfx}_readpct__TAR1', 0)
+    ncan_dmax_val = row.get(f'{pfx}_dmax__noncanonical_telomere', 0)
 
     # Satellite: dmax for enrichment, readpct for dominance (rule 5)
     sat_dmax = {
@@ -576,6 +583,8 @@ def auto_label_cluster(row, featureset_prefix):
     # --- Enrichment qualifier builder (uses dmax) ---
     def _enrichment_qualifiers():
         quals = []
+        if ncan_dmax_val > NCAN_VARIANT:
+            quals.append('variant-enriched')
         if max_sat_dmax_score >= ENRICH_DMAX:
             quals.append(max_sat_dmax_name)
         if tar1_dmax >= ENRICH_DMAX and its_dmax >= ENRICH_DMAX:
