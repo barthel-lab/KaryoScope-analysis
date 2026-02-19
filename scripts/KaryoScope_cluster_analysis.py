@@ -202,6 +202,7 @@ def run_structure_mode(in_data, args):
     
     all_cluster_assignments = []
     chromosome_linkages = {}
+    chromosome_metadata = {}  # Per-chrom: leaf_clusters, leaf_counts, major_cluster_id, cluster_label_map
     
     # Standard hierarchical clustering imports
     from scipy.cluster.hierarchy import linkage, fcluster
@@ -321,6 +322,26 @@ def run_structure_mode(in_data, args):
         major_consensus_s = major_structs[0][0]
         major_consensus_idx = unique_structure_list.index(major_consensus_s)
         
+        # Save per-chromosome metadata for dendrogram reconstruction in plot script
+        leaf_clusters = np.array([structure_to_cluster[s] for s in unique_structure_list])
+        leaf_counts = np.array([len(unique_structures[s]) for s in unique_structure_list])
+        # Build cluster label map: fcluster_id -> display cluster name
+        cluster_label_map = {}
+        for s in unique_structure_list:
+            cid = structure_to_cluster[s]
+            is_major = (cid == major_cluster_id)
+            c_type = "Major" if is_major else "Outlier"
+            label = f"{chrom}_{c_type}"
+            if not is_major:
+                label += f"_{cid}"
+            cluster_label_map[cid] = label
+        chromosome_metadata[chrom] = {
+            'leaf_clusters': leaf_clusters,
+            'leaf_counts': leaf_counts,
+            'major_cluster_id': major_cluster_id,
+            'cluster_label_map': cluster_label_map,
+        }
+
         # Pre-calculate lengths per feature for the length-weighted metric
         read_feature_lengths = chrom_data.groupby(['sequence', 'feature'])['length'].sum().unstack(fill_value=0)
         consensus_read = unique_structures[major_consensus_s][0]
@@ -381,7 +402,8 @@ def run_structure_mode(in_data, args):
     
     np.savez_compressed(
         matrix_file, mode='structure', chromosomes=chromosomes,
-        linkages=chromosome_linkages, info="Per-chromosome structural analysis"
+        linkages=chromosome_linkages, metadata=chromosome_metadata,
+        info="Per-chromosome structural analysis"
     )
     print(f"\nSaved structural assignments: {assignments_file}")
     sys.exit(0)

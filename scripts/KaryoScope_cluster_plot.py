@@ -4808,6 +4808,90 @@ def draw_mini_dendrogram(d, linkage_matrix, x_base, y_base, width, height, row_y
                               stroke="#FF4444", stroke_width=2, stroke_dasharray="5,5"))
 
 
+def draw_collapsed_dendrogram(d, linkage_matrix, leaf_clusters, cluster_display_order,
+                              cluster_y_centers, x_base, width, color="white",
+                              threshold=None, show_threshold=False):
+    """Draw a dendrogram from the original linkage, collapsing clusters to single rows.
+
+    Traverses the linkage tree. For merges within the same cluster (below threshold),
+    the subtree is collapsed to the cluster's display row. For merges between different
+    clusters (above threshold), the full inter-cluster branching structure is drawn.
+
+    Args:
+        linkage_matrix: Original scipy linkage matrix (Z) from clustering
+        leaf_clusters: Array mapping leaf index -> fcluster cluster ID
+        cluster_display_order: List of fcluster cluster IDs in display order (top to bottom)
+        cluster_y_centers: Dict mapping fcluster cluster ID -> y center position
+        x_base: Left x position of dendrogram area
+        width: Width of dendrogram area
+        color: Line color
+        threshold: Clustering threshold (for threshold line)
+        show_threshold: Whether to draw the threshold line
+    """
+    import scipy.cluster.hierarchy as sch
+
+    n_leaves = len(leaf_clusters)
+    if n_leaves < 2 or linkage_matrix is None:
+        return
+
+    max_dist = linkage_matrix[-1, 2]
+    if max_dist == 0:
+        max_dist = 1.0
+
+    # Build mapping: node index -> which cluster(s) it contains
+    # For leaves, it's their cluster ID. For internal nodes, union of children.
+    node_clusters = {}
+    for i in range(n_leaves):
+        node_clusters[i] = {int(leaf_clusters[i])}
+
+    # Track node positions for drawing
+    node_x = {}
+    node_y = {}
+
+    # Leaves: collapsed to their cluster's y position, x at right edge
+    for i in range(n_leaves):
+        cid = int(leaf_clusters[i])
+        node_x[i] = x_base + width
+        node_y[i] = cluster_y_centers.get(cid, 0)
+
+    # Process merges
+    for i, (idx1, idx2, dist, count) in enumerate(linkage_matrix):
+        idx1, idx2 = int(idx1), int(idx2)
+        node_idx = n_leaves + i
+
+        c1 = node_clusters[idx1]
+        c2 = node_clusters[idx2]
+        merged = c1 | c2
+
+        node_clusters[node_idx] = merged
+
+        # If both children are within the same single cluster, collapse (no drawing)
+        if len(c1) == 1 and len(c2) == 1 and c1 == c2:
+            cid = list(c1)[0]
+            node_x[node_idx] = x_base + width  # stay at right edge
+            node_y[node_idx] = cluster_y_centers.get(cid, 0)
+            continue
+
+        # This is an inter-cluster merge (or a merge that spans clusters) — draw it
+        y1, y2 = node_y[idx1], node_y[idx2]
+        x_merge = x_base + width - (dist / max_dist) * width
+
+        d.append(draw.Line(node_x[idx1], y1, x_merge, y1, stroke=color, stroke_width=2.5))
+        d.append(draw.Line(node_x[idx2], y2, x_merge, y2, stroke=color, stroke_width=2.5))
+        d.append(draw.Line(x_merge, y1, x_merge, y2, stroke=color, stroke_width=2.5))
+
+        node_x[node_idx] = x_merge
+        node_y[node_idx] = (y1 + y2) / 2
+
+    # Draw threshold line
+    if show_threshold and threshold is not None:
+        x_thresh = x_base + width - (threshold / max_dist) * width
+        all_ys = sorted(cluster_y_centers.values())
+        if x_thresh >= x_base and x_thresh <= x_base + width and all_ys:
+            d.append(draw.Line(x_thresh, all_ys[0] - 20, x_thresh, all_ys[-1] + 20,
+                              stroke="#FF4444", stroke_width=2, stroke_dasharray="5,5"))
+
+
 def _load_bed_direct(bed_files, featuresets, reads_needed):
     """Load BED data directly from file(s), matching reads by scaffold name.
 
@@ -4969,40 +5053,92 @@ def plot_structural_mode(args, matrix_data):
         else:
             read_bed_data = load_bed_data(sample_bed_paths, database, featuresets, args.smoothness, reads_needed)
         
-        # Local clustering
+        # Dendrogram: use original linkage from npz if available, else recompute
+        original_Z = None
+        chrom_meta = None
         local_Z = None
         leaf_order = None
+        use_collapsed = False
+
+        if matrix_data is not None:
+            try:
+                all_meta = matrix_data['metadata'].item()
+                if chrom in all_meta:
+                    chrom_meta = all_meta[chrom]
+                all_linkages = matrix_data['linkages'].item()
+                if chrom in all_linkages and all_linkages[chrom] is not None:
+                    original_Z = all_linkages[chrom]
+                    use_collapsed = True
+            except Exception:
+                pass
+
         if getattr(args, 'show_dendrogram', False) and len(selected_reads) > 1:
-            unique_f = sorted(list(set(f['feature'] for r in read_bed_data for fs in read_bed_data[r] for f in read_bed_data[r][fs])))
-            f_map = {f: chr(j+200) for j, f in enumerate(unique_f)}
-            encoded = []
-            for r_obj in selected_reads:
-                r = r_obj['sequence']
-                if r in read_bed_data:
-                    fs0 = featuresets[0]
-                    feats = sorted(read_bed_data[r].get(fs0, []), key=lambda x: x['start'])
-                    encoded.append("".join([f_map.get(f['feature'], '?') for f in feats]))
-                else: encoded.append("")
+            if use_collapsed and chrom_meta is not None:
+                # Reorder selected_reads by optimal leaf order from original dendrogram
+                leaf_clusters = chrom_meta['leaf_clusters']
+                cluster_label_map = chrom_meta['cluster_label_map']
 
-            dm = np.zeros((len(encoded), len(encoded)))
-            def _lev(s1, s2):
-                if len(s1) < len(s2): return _lev(s2, s1)
-                if not s2: return len(s1)
-                p = range(len(s2) + 1)
-                for c in s1:
-                    cur = [p[0]+1]
-                    for j, c2 in enumerate(s2): cur.append(min(p[j+1]+1, cur[j]+1, p[j]+(c!=c2)))
-                    p = cur
-                return p[-1]
+                # Compute optimal leaf order from original Z, then derive cluster order
+                orig_leaf_order = sch.leaves_list(original_Z)
+                # Walk leaves in dendrogram order, collect clusters in first-seen order
+                seen = set()
+                cluster_display_order = []
+                for leaf_idx in orig_leaf_order:
+                    cid = int(leaf_clusters[leaf_idx])
+                    if cid not in seen:
+                        seen.add(cid)
+                        cluster_display_order.append(cid)
 
-            for j1 in range(len(encoded)):
-                for j2 in range(j1+1, len(encoded)):
-                    d_val = _lev(encoded[j1], encoded[j2])
-                    dm[j1, j2] = dm[j2, j1] = d_val / max(len(encoded[j1]), len(encoded[j2]), 1)
-            
-            local_Z = sch.linkage(squareform(dm), method='ward')
-            leaf_order = sch.leaves_list(local_Z)
-            selected_reads = [selected_reads[idx] for idx in leaf_order]
+                # Build map from cluster label -> display index
+                cid_to_label = {}
+                for cid, label in cluster_label_map.items():
+                    cid_to_label[int(cid)] = label
+
+                # Reorder selected_reads to match cluster_display_order
+                cluster_to_rep = {r['cluster']: r for r in selected_reads}
+                reordered = []
+                for cid in cluster_display_order:
+                    label = cid_to_label.get(cid)
+                    if label and label in cluster_to_rep:
+                        reordered.append(cluster_to_rep[label])
+                # Add any remaining that weren't matched (shouldn't happen, but safety)
+                reordered_set = set(id(r) for r in reordered)
+                for r in selected_reads:
+                    if id(r) not in reordered_set:
+                        reordered.append(r)
+                selected_reads = reordered
+            else:
+                # Fallback: recompute dendrogram from reps BED data
+                unique_f = sorted(list(set(f['feature'] for r in read_bed_data for fs in read_bed_data[r] for f in read_bed_data[r][fs])))
+                f_map = {f: chr(j+200) for j, f in enumerate(unique_f)}
+                encoded = []
+                for r_obj in selected_reads:
+                    r = r_obj['sequence']
+                    if r in read_bed_data:
+                        fs0 = featuresets[0]
+                        feats = sorted(read_bed_data[r].get(fs0, []), key=lambda x: x['start'])
+                        encoded.append("".join([f_map.get(f['feature'], '?') for f in feats]))
+                    else: encoded.append("")
+
+                dm = np.zeros((len(encoded), len(encoded)))
+                def _lev(s1, s2):
+                    if len(s1) < len(s2): return _lev(s2, s1)
+                    if not s2: return len(s1)
+                    p = range(len(s2) + 1)
+                    for c in s1:
+                        cur = [p[0]+1]
+                        for j, c2 in enumerate(s2): cur.append(min(p[j+1]+1, cur[j]+1, p[j]+(c!=c2)))
+                        p = cur
+                    return p[-1]
+
+                for j1 in range(len(encoded)):
+                    for j2 in range(j1+1, len(encoded)):
+                        d_val = _lev(encoded[j1], encoded[j2])
+                        dm[j1, j2] = dm[j2, j1] = d_val / max(len(encoded[j1]), len(encoded[j2]), 1)
+
+                local_Z = sch.linkage(squareform(dm), method='ward')
+                leaf_order = sch.leaves_list(local_Z)
+                selected_reads = [selected_reads[idx] for idx in leaf_order]
 
         # Compute per-read min start for relative coordinate positioning
         read_min_start = {}
@@ -5041,11 +5177,26 @@ def plot_structural_mode(args, matrix_data):
         for j in range(len(selected_reads)):
             row_y_centers.append(110 + j * (len(featuresets)*fs_height + row_spacing) + (len(featuresets)*fs_height)/2)
 
-        if show_d and local_Z is not None:
-            draw_mini_dendrogram(d, local_Z, margin_x + 10, 110, dendro_w - 20, 0, row_y_centers,
-                                 color=text_color, threshold=getattr(args, 'structural_threshold', 0.25),
-                                 show_threshold=getattr(args, 'show_threshold', False),
-                                 leaf_order=leaf_order)
+        if show_d:
+            threshold_val = getattr(args, 'structural_threshold', 0.25)
+            show_thresh = getattr(args, 'show_threshold', False)
+            if use_collapsed and original_Z is not None and chrom_meta is not None:
+                # Build cluster_y_centers: fcluster_id -> y position
+                cluster_y_map = {}
+                cid_to_label = {int(cid): label for cid, label in chrom_meta['cluster_label_map'].items()}
+                for j, r_obj in enumerate(selected_reads):
+                    for cid, label in cid_to_label.items():
+                        if r_obj['cluster'] == label:
+                            cluster_y_map[cid] = row_y_centers[j]
+                            break
+                draw_collapsed_dendrogram(d, original_Z, chrom_meta['leaf_clusters'],
+                                          cluster_display_order, cluster_y_map,
+                                          margin_x + 10, dendro_w - 20, color=text_color,
+                                          threshold=threshold_val, show_threshold=show_thresh)
+            elif local_Z is not None:
+                draw_mini_dendrogram(d, local_Z, margin_x + 10, 110, dendro_w - 20, 0, row_y_centers,
+                                     color=text_color, threshold=threshold_val,
+                                     show_threshold=show_thresh, leaf_order=leaf_order)
             
         for j, r_obj in enumerate(selected_reads):
             read, ry = r_obj['sequence'], row_y_centers[j] - (len(featuresets)*fs_height)/2
