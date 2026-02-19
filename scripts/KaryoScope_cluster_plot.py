@@ -4761,21 +4761,31 @@ def compute_density_line(features, bin_size, read_length, max_density=50):
 # Structural Analysis Plotting (Additive)
 # =============================================================================
 
-def draw_mini_dendrogram(d, linkage_matrix, x_base, y_base, width, height, row_y_centers, color="white", threshold=None, show_threshold=False):
+def draw_mini_dendrogram(d, linkage_matrix, x_base, y_base, width, height, row_y_centers, color="white", threshold=None, show_threshold=False, leaf_order=None):
     """Draw a small dendrogram to the left of feature bars."""
     n_leaves = len(row_y_centers)
     if n_leaves < 2:
         return
-        
+
     max_dist = linkage_matrix[-1, 2] if len(linkage_matrix) > 0 else 1.0
     if max_dist == 0: max_dist = 1.0
-    
+
+    # Build mapping from linkage leaf index to display row y position
+    # leaf_order[display_row] = linkage_leaf_index, so invert it
+    leaf_to_row = {}
+    if leaf_order is not None:
+        for display_row, linkage_leaf in enumerate(leaf_order):
+            leaf_to_row[linkage_leaf] = display_row
+    else:
+        for i in range(n_leaves):
+            leaf_to_row[i] = i
+
     node_x = {}
     node_y = {}
-    
+
     for i in range(n_leaves):
         node_x[i] = x_base + width
-        node_y[i] = row_y_centers[i]
+        node_y[i] = row_y_centers[leaf_to_row[i]]
         
     for i, (idx1, idx2, dist, count) in enumerate(linkage_matrix):
         idx1, idx2 = int(idx1), int(idx2)
@@ -4798,28 +4808,62 @@ def draw_mini_dendrogram(d, linkage_matrix, x_base, y_base, width, height, row_y
                               stroke="#FF4444", stroke_width=2, stroke_dasharray="5,5"))
 
 
+def _load_bed_direct(bed_files, featuresets, reads_needed):
+    """Load BED data directly from file(s), matching reads by scaffold name.
+
+    Used in structural mode when BED files don't follow standard per-sample naming.
+    Treats the first featureset as the feature layer for all records.
+    """
+    read_data = defaultdict(lambda: defaultdict(list))
+    fs = featuresets[0]  # structural mode uses a single featureset
+
+    for bed_path in bed_files:
+        open_func = gzip.open if bed_path.endswith('.gz') else open
+        mode = 'rt' if bed_path.endswith('.gz') else 'r'
+        with open_func(bed_path, mode) as f:
+            for line in f:
+                parts = line.strip().split('\t')
+                if len(parts) < 4:
+                    continue
+                scaffold = parts[0]
+                if scaffold not in reads_needed:
+                    continue
+                try:
+                    start, stop = int(parts[1]), int(parts[2])
+                except ValueError:
+                    continue
+                read_data[scaffold][fs].append({
+                    'start': start,
+                    'stop': stop,
+                    'feature': parts[3]
+                })
+
+    return read_data
+
+
 def plot_structural_mode(args, matrix_data):
     """Generate multi-panel structural plot (separate files per chromosome)."""
     print("structural mode plotting...")
-    
+
     import scipy.cluster.hierarchy as sch
     from scipy.spatial.distance import squareform
-    
+
     # Load assignments
     reps_file = f"{args.cluster_prefix}.sequence_assignments.tsv"
     if not os.path.exists(reps_file):
         print(f"Error: {reps_file} not found.")
         sys.exit(1)
-        
+
     reps_df = pd.read_csv(reps_file, sep='\t')
     if 'chromosome' not in reps_df.columns:
         print("Error: 'chromosome' column missing. Not a structural analysis output?")
         sys.exit(1)
-        
+
     chromosomes = sorted(reps_df['chromosome'].unique(), key=lambda x: (len(x), x))
     print(f"Plotting {len(chromosomes)} chromosomes")
-    
+
     # BED Data Source
+    use_direct_bed = False
     if args.bed_files:
         sample_bed_paths, database = parse_bed_paths(args.bed_files)
     elif args.input_bed_prefix:
@@ -4832,6 +4876,14 @@ def plot_structural_mode(args, matrix_data):
     else:
         sample_bed_paths = {}
         database = args.database
+
+    # Override database if explicitly provided
+    if args.database:
+        database = args.database
+
+    # Check if we should use direct BED loading (structural mode with non-standard filenames)
+    if args.bed_files:
+        use_direct_bed = True
 
     featuresets = args.featuresets.split(',')
     featureset_colors, _ = load_color_files(args.colors_dir, database, featuresets)
@@ -4878,7 +4930,7 @@ def plot_structural_mode(args, matrix_data):
             rep = pick_cluster_rep(c_data, c_type)
             
             cluster_reps.append({
-                'read': rep['sequence'],
+                'sequence': rep['sequence'],
                 'cluster': cid,
                 'type': c_type,
                 'sample': rep['sample'] if 'sample' in rep else 'unknown',
@@ -4912,10 +4964,14 @@ def plot_structural_mode(args, matrix_data):
         d.append(draw.Rectangle(margin_x - 5, 75, panel_width + 10, canvas_height - 180, fill=panel_bg, rx=10, ry=10))
 
         reads_needed = set(r['sequence'] for r in selected_reads)
-        read_bed_data = load_bed_data(sample_bed_paths, database, featuresets, args.smoothness, reads_needed)
+        if use_direct_bed:
+            read_bed_data = _load_bed_direct(args.bed_files, featuresets, reads_needed)
+        else:
+            read_bed_data = load_bed_data(sample_bed_paths, database, featuresets, args.smoothness, reads_needed)
         
         # Local clustering
         local_Z = None
+        leaf_order = None
         if getattr(args, 'show_dendrogram', False) and len(selected_reads) > 1:
             unique_f = sorted(list(set(f['feature'] for r in read_bed_data for fs in read_bed_data[r] for f in read_bed_data[r][fs])))
             f_map = {f: chr(j+200) for j, f in enumerate(unique_f)}
@@ -4948,28 +5004,48 @@ def plot_structural_mode(args, matrix_data):
             leaf_order = sch.leaves_list(local_Z)
             selected_reads = [selected_reads[idx] for idx in leaf_order]
 
-        max_len = 0
+        # Compute per-read min start for relative coordinate positioning
+        read_min_start = {}
         for r_obj in selected_reads:
             r = r_obj['sequence']
             if r in read_bed_data:
+                min_s = None
                 for fs in read_bed_data[r]:
-                    for feat in read_bed_data[r][fs]: max_len = max(max_len, feat['stop'])
-        if max_len == 0: max_len = 10000 
-        
+                    for feat in read_bed_data[r][fs]:
+                        if min_s is None or feat['start'] < min_s:
+                            min_s = feat['start']
+                read_min_start[r] = min_s if min_s is not None else 0
+            else:
+                read_min_start[r] = 0
+
+        # Max span (relative) across all reads
+        max_span = 0
+        for r_obj in selected_reads:
+            r = r_obj['sequence']
+            if r in read_bed_data:
+                offset = read_min_start[r]
+                for fs in read_bed_data[r]:
+                    for feat in read_bed_data[r][fs]:
+                        span = feat['stop'] - offset
+                        if span > max_span:
+                            max_span = span
+        if max_span == 0: max_span = 10000
+
         show_d = getattr(args, 'show_dendrogram', False)
         dendro_w = 250 if show_d else 20
-        label_w = 400 # Slightly wider for detailed labels
+        label_w = 300
         bars_x_start = margin_x + (dendro_w if show_d else 0) + label_w + 20
-        ratio = (panel_width - (dendro_w if show_d else 0) - label_w - 60) / max_len
+        ratio = (panel_width - (dendro_w if show_d else 0) - label_w - 60) / max_span
         
         row_y_centers = []
         for j in range(len(selected_reads)):
             row_y_centers.append(110 + j * (len(featuresets)*fs_height + row_spacing) + (len(featuresets)*fs_height)/2)
 
         if show_d and local_Z is not None:
-            draw_mini_dendrogram(d, local_Z, margin_x + 10, 110, dendro_w - 20, 0, row_y_centers, 
-                                 color=text_color, threshold=getattr(args, 'structural_threshold', 0.25), 
-                                 show_threshold=getattr(args, 'show_threshold', False))
+            draw_mini_dendrogram(d, local_Z, margin_x + 10, 110, dendro_w - 20, 0, row_y_centers,
+                                 color=text_color, threshold=getattr(args, 'structural_threshold', 0.25),
+                                 show_threshold=getattr(args, 'show_threshold', False),
+                                 leaf_order=leaf_order)
             
         for j, r_obj in enumerate(selected_reads):
             read, ry = r_obj['sequence'], row_y_centers[j] - (len(featuresets)*fs_height)/2
@@ -4991,10 +5067,11 @@ def plot_structural_mode(args, matrix_data):
             display_name = label_text if len(label_text) <= 65 else label_text[:35] + "..." + label_text[-25:]
             d.append(draw.Text(display_name, 12, margin_x + (dendro_w if show_d else 10), ry + (len(featuresets)*fs_height)/2 + 4, fill=l_color, font_family='monospace'))
             if read in read_bed_data:
+                offset = read_min_start.get(read, 0)
                 for fs_idx, fs in enumerate(featuresets):
                     for feat in read_bed_data[read].get(fs, []):
                         w = max((feat['stop'] - feat['start']) * ratio, 2.5)
-                        x = bars_x_start + (feat['start'] * ratio)
+                        x = bars_x_start + ((feat['start'] - offset) * ratio)
                         color, op = featureset_colors[fs].get(feat['feature'], ("#ffffff", 1.0))
                         d.append(draw.Rectangle(x, ry + (fs_idx * fs_height), w, fs_height, fill=color, fill_opacity=op))
 

@@ -247,9 +247,9 @@ def run_structure_mode(in_data, args):
             print(f"  Skipping {chrom} (only {n_reads} sample)")
             for r in seq_names:
                 all_cluster_assignments.append({
-                    'read': r, 'chromosome': chrom, 
+                    'sequence': r, 'chromosome': chrom,
                     'cluster_id': f"{chrom}_Major", 'cluster_type': 'Major',
-                    'enrichment': 'Major', 
+                    'enrichment': 'Major',
                     'sample': read_sample_map[r]
                 })
             continue
@@ -322,7 +322,7 @@ def run_structure_mode(in_data, args):
         major_consensus_idx = unique_structure_list.index(major_consensus_s)
         
         # Pre-calculate lengths per feature for the length-weighted metric
-        read_feature_lengths = chrom_data.groupby(['read', 'feature'])['length'].sum().unstack(fill_value=0)
+        read_feature_lengths = chrom_data.groupby(['sequence', 'feature'])['length'].sum().unstack(fill_value=0)
         consensus_read = unique_structures[major_consensus_s][0]
         consensus_lengths = read_feature_lengths.loc[consensus_read]
         consensus_feat_set = set(major_consensus_s)
@@ -362,7 +362,7 @@ def run_structure_mode(in_data, args):
                     l_div += abs(v_cons - v_read)
 
                 all_cluster_assignments.append({
-                    'read': r, 'chromosome': chrom, 
+                    'sequence': r, 'chromosome': chrom,
                     'cluster': full_cluster_id, 'cluster_type': c_type,
                     'norm_divergence': norm_div,
                     'raw_divergence': raw_div,
