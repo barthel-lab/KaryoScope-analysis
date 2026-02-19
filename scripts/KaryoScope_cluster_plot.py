@@ -4838,6 +4838,8 @@ def draw_collapsed_dendrogram(d, linkage_matrix, leaf_clusters, cluster_display_
     if max_dist == 0:
         max_dist = 1.0
 
+    displayed_clusters = set(cluster_y_centers.keys())
+
     # Build mapping: node index -> which cluster(s) it contains
     # For leaves, it's their cluster ID. For internal nodes, union of children.
     node_clusters = {}
@@ -4872,16 +4874,32 @@ def draw_collapsed_dendrogram(d, linkage_matrix, leaf_clusters, cluster_display_
             node_y[node_idx] = cluster_y_centers.get(cid, 0)
             continue
 
-        # This is an inter-cluster merge (or a merge that spans clusters) — draw it
+        # Check which sides have displayed clusters
+        c1_displayed = c1 & displayed_clusters
+        c2_displayed = c2 & displayed_clusters
+
         y1, y2 = node_y[idx1], node_y[idx2]
         x_merge = x_base + width - (dist / max_dist) * width
 
-        d.append(draw.Line(node_x[idx1], y1, x_merge, y1, stroke=color, stroke_width=2.5))
-        d.append(draw.Line(node_x[idx2], y2, x_merge, y2, stroke=color, stroke_width=2.5))
-        d.append(draw.Line(x_merge, y1, x_merge, y2, stroke=color, stroke_width=2.5))
-
-        node_x[node_idx] = x_merge
-        node_y[node_idx] = (y1 + y2) / 2
+        if c1_displayed and c2_displayed:
+            # Both sides have visible clusters — draw the merge
+            d.append(draw.Line(node_x[idx1], y1, x_merge, y1, stroke=color, stroke_width=2.5))
+            d.append(draw.Line(node_x[idx2], y2, x_merge, y2, stroke=color, stroke_width=2.5))
+            d.append(draw.Line(x_merge, y1, x_merge, y2, stroke=color, stroke_width=2.5))
+            node_x[node_idx] = x_merge
+            node_y[node_idx] = (y1 + y2) / 2
+        elif c1_displayed:
+            # Only left side visible — propagate its position
+            node_x[node_idx] = node_x[idx1]
+            node_y[node_idx] = node_y[idx1]
+        elif c2_displayed:
+            # Only right side visible — propagate its position
+            node_x[node_idx] = node_x[idx2]
+            node_y[node_idx] = node_y[idx2]
+        else:
+            # Neither side displayed — just propagate
+            node_x[node_idx] = x_base + width
+            node_y[node_idx] = 0
 
     # Draw threshold line
     if show_threshold and threshold is not None:
@@ -4986,47 +5004,150 @@ def plot_structural_mode(args, matrix_data):
     if getattr(args, 'priority_samples', None):
         priority_samples = [s.strip() for s in args.priority_samples.split(',')]
         
-    for chrom in chromosomes:
-        chrom_df = reps_df[reps_df['chromosome'] == chrom]
-        unique_cids = chrom_df['cluster'].unique()
-        
-        # Helper to pick the best representative for a given cluster dataframe
-        def pick_cluster_rep(cluster_subset, c_type):
-            # First, check for priority samples
-            for ps in priority_samples:
-                match = cluster_subset[cluster_subset['sample'] == ps]
-                if not match.empty: return match.iloc[0]
-                match = cluster_subset[cluster_subset['sequence'].str.startswith(ps)]
-                if not match.empty: return match.iloc[0]
-                
-            if c_type == 'Major':
-                return cluster_subset.iloc[0]
-                
-            # For outliers, pick the one with highest raw_divergence
-            return cluster_subset.sort_values('raw_divergence', ascending=False).iloc[0]
+    all_selected_reads = []  # Track selected reads across chromosomes for TSV export
 
+    def extract_clade_id(cluster_name):
+        """Extract clade ID from cluster name (e.g., 'chr1_Outlier_20' -> '20', 'chr1_Major' -> 'M')"""
+        if '_Major' in cluster_name:
+            return 'M'
+        parts = cluster_name.split('_')
+        if len(parts) >= 3:
+            return parts[-1]
+        return '?'
+
+    def get_top_n_ranks(df, col, n=3, tolerance=0.02):
+        """Select top N ranks with tolerance for almost-identical scores, capping at 3 per rank."""
+        sorted_df = df.sort_values(by=col, ascending=False)
+        if sorted_df.empty: return pd.DataFrame()
+
+        selected_indices = []
+        current_rank = 0
+        rank_start_score = -1
+        last_score = -1
+        rank_count = 0
+
+        for idx, row in sorted_df.iterrows():
+            score = row[col]
+            if last_score == -1 or score < rank_start_score * (1.0 - tolerance):
+                current_rank += 1
+                rank_count = 0
+                rank_start_score = score
+
+            if current_rank > n:
+                break
+
+            if rank_count < 3:
+                selected_indices.append(idx)
+                rank_count += 1
+            last_score = score
+        return sorted_df.loc[selected_indices]
+
+    for chrom in chromosomes:
+        chrom_df = reps_df[reps_df['chromosome'] == chrom].copy()
+
+        # Calculate BW Score (Binary x Length / 1e6)
+        chrom_df['bw_score'] = (chrom_df['binary_divergence'] * chrom_df['length_weighted_divergence']) / 1_000_000
+
+        # Compute cluster counts for clade display
+        cluster_counts = chrom_df.groupby('cluster').size().to_dict()
+
+        n_reps = args.max_reps if args.max_reps else 3
+
+        # --- Multi-rep outlier selection (dual-metric: norm_divergence + bw_score) ---
         cluster_reps = []
-        for cid in unique_cids:
-            c_data = chrom_df[chrom_df['cluster'] == cid]
-            if c_data.empty: continue
-            
-            c_type = c_data.iloc[0]['cluster_type']
-            rep = pick_cluster_rep(c_data, c_type)
-            
+
+        # 1. Major Cluster (Exactly 1)
+        major_df = chrom_df[chrom_df['cluster_type'] == 'Major']
+        if not major_df.empty:
+            # Check for priority samples first
+            rep = None
+            for ps in priority_samples:
+                match = major_df[major_df['sample'] == ps]
+                if not match.empty:
+                    rep = match.iloc[0]
+                    break
+                match = major_df[major_df['sequence'].str.startswith(ps)]
+                if not match.empty:
+                    rep = match.iloc[0]
+                    break
+            if rep is None:
+                rep = major_df.iloc[0]
             cluster_reps.append({
                 'sequence': rep['sequence'],
-                'cluster': cid,
-                'type': c_type,
+                'cluster': rep['cluster'],
+                'type': 'Major',
                 'sample': rep['sample'] if 'sample' in rep else 'unknown',
                 'raw_div': rep['raw_divergence'] if 'raw_divergence' in rep else 0.0,
-                'norm_div': rep['norm_divergence'] if 'norm_divergence' in rep else 0.0
+                'norm_div': rep['norm_divergence'] if 'norm_divergence' in rep else 0.0,
+                'bw_score': rep['bw_score']
             })
-            
+
+        # 2. Outliers Selection (dual-metric)
+        outlier_df = chrom_df[chrom_df['cluster_type'] == 'Outlier'].copy()
+        if not outlier_df.empty:
+            selected_ids = {r['sequence'] for r in cluster_reps}
+
+            # Check for priority samples in outliers
+            for ps in priority_samples:
+                match = outlier_df[outlier_df['sample'] == ps]
+                if match.empty:
+                    match = outlier_df[outlier_df['sequence'].str.startswith(ps)]
+                for _, rep in match.iterrows():
+                    if rep['sequence'] not in selected_ids:
+                        cluster_reps.append({
+                            'sequence': rep['sequence'],
+                            'cluster': rep['cluster'],
+                            'type': 'Outlier',
+                            'sample': rep['sample'] if 'sample' in rep else 'unknown',
+                            'raw_div': rep['raw_divergence'] if 'raw_divergence' in rep else 0.0,
+                            'norm_div': rep['norm_divergence'] if 'norm_divergence' in rep else 0.0,
+                            'bw_score': rep['bw_score']
+                        })
+                        selected_ids.add(rep['sequence'])
+
+            # Step A: Top N ranks by norm_divergence (tied scores = 1 rank)
+            norm_winners = get_top_n_ranks(outlier_df, 'norm_divergence', n=n_reps)
+            for _, rep in norm_winners.iterrows():
+                if rep['sequence'] not in selected_ids:
+                    cluster_reps.append({
+                        'sequence': rep['sequence'],
+                        'cluster': rep['cluster'],
+                        'type': 'Outlier',
+                        'sample': rep['sample'] if 'sample' in rep else 'unknown',
+                        'raw_div': rep['raw_divergence'] if 'raw_divergence' in rep else 0.0,
+                        'norm_div': rep['norm_divergence'] if 'norm_divergence' in rep else 0.0,
+                        'bw_score': rep['bw_score']
+                    })
+                    selected_ids.add(rep['sequence'])
+
+            # Step B: Top N by bw_score (rank-based with 3-read cap per rank)
+            bw_winners = get_top_n_ranks(outlier_df, 'bw_score', n=n_reps)
+            for _, rep in bw_winners.iterrows():
+                if rep['sequence'] not in selected_ids:
+                    cluster_reps.append({
+                        'sequence': rep['sequence'],
+                        'cluster': rep['cluster'],
+                        'type': 'Outlier',
+                        'sample': rep['sample'] if 'sample' in rep else 'unknown',
+                        'raw_div': rep['raw_divergence'] if 'raw_divergence' in rep else 0.0,
+                        'norm_div': rep['norm_divergence'] if 'norm_divergence' in rep else 0.0,
+                        'bw_score': rep['bw_score']
+                    })
+                    selected_ids.add(rep['sequence'])
+
         # Sort reps: Major first, then Outliers by raw_div descending
         cluster_reps.sort(key=lambda x: (0 if x['type'] == 'Major' else 1, -x['raw_div']))
+
+        # Add clade info to each rep
+        for r in cluster_reps:
+            r['clade_id'] = extract_clade_id(r['cluster'])
+            r['clade_count'] = cluster_counts.get(r['cluster'], 0)
         
         selected_reads = cluster_reps
-                    
+
+        # Track selected reads for TSV export
+        all_selected_reads.extend([r['sequence'] for r in cluster_reps])
+
         if not selected_reads: continue
 
         if not getattr(args, 'show_dendrogram', False):
@@ -5095,13 +5216,17 @@ def plot_structural_mode(args, matrix_data):
                     cid_to_label[int(cid)] = label
 
                 # Reorder selected_reads to match cluster_display_order
-                cluster_to_rep = {r['cluster']: r for r in selected_reads}
+                # Group all reps by cluster (multiple reps can share a cluster)
+                from collections import defaultdict as _dd
+                cluster_to_reps = _dd(list)
+                for r in selected_reads:
+                    cluster_to_reps[r['cluster']].append(r)
                 reordered = []
                 for cid in cluster_display_order:
                     label = cid_to_label.get(cid)
-                    if label and label in cluster_to_rep:
-                        reordered.append(cluster_to_rep[label])
-                # Add any remaining that weren't matched (shouldn't happen, but safety)
+                    if label and label in cluster_to_reps:
+                        reordered.extend(cluster_to_reps[label])
+                # Add any remaining that weren't matched
                 reordered_set = set(id(r) for r in reordered)
                 for r in selected_reads:
                     if id(r) not in reordered_set:
@@ -5154,18 +5279,45 @@ def plot_structural_mode(args, matrix_data):
             else:
                 read_min_start[r] = 0
 
-        # Max span (relative) across all reads
-        max_span = 0
+        # Max span (relative) across all reads, capped to avoid extreme outliers
+        per_read_spans = {}
         for r_obj in selected_reads:
             r = r_obj['sequence']
             if r in read_bed_data:
                 offset = read_min_start[r]
+                r_span = 0
                 for fs in read_bed_data[r]:
                     for feat in read_bed_data[r][fs]:
-                        span = feat['stop'] - offset
-                        if span > max_span:
-                            max_span = span
+                        s = feat['stop'] - offset
+                        if s > r_span:
+                            r_span = s
+                per_read_spans[r] = r_span
+        all_spans = sorted(per_read_spans.values()) if per_read_spans else [10000]
+        # Detect natural break in spans via largest consecutive ratio
+        span_cap = max(all_spans) if all_spans else 10000
+        if len(all_spans) >= 3:
+            max_gap_ratio = 1
+            gap_idx = -1
+            for _gi in range(len(all_spans) - 1):
+                if all_spans[_gi] > 0:
+                    _ratio = all_spans[_gi + 1] / all_spans[_gi]
+                    if _ratio > max_gap_ratio:
+                        max_gap_ratio = _ratio
+                        gap_idx = _gi
+            if max_gap_ratio > 3:
+                # Natural break — cap at 2x the value below the gap
+                span_cap = all_spans[gap_idx] * 2
+            else:
+                mid = len(all_spans) // 2
+                if len(all_spans) % 2 == 0:
+                    median_span = (all_spans[mid - 1] + all_spans[mid]) / 2
+                else:
+                    median_span = all_spans[mid]
+                span_cap = median_span * 1.5
+        max_span = min(max(all_spans), span_cap) if all_spans else 10000
         if max_span == 0: max_span = 10000
+        # Track which reads are clipped
+        clipped_reads = {r for r, s in per_read_spans.items() if s > max_span}
 
         show_d = getattr(args, 'show_dendrogram', False)
         dendro_w = 250 if show_d else 20
@@ -5181,18 +5333,34 @@ def plot_structural_mode(args, matrix_data):
             threshold_val = getattr(args, 'structural_threshold', 0.25)
             show_thresh = getattr(args, 'show_threshold', False)
             if use_collapsed and original_Z is not None and chrom_meta is not None:
-                # Build cluster_y_centers: fcluster_id -> y position
-                cluster_y_map = {}
+                # Build cluster_y_centers: fcluster_id -> center y of all reps in that cluster
                 cid_to_label = {int(cid): label for cid, label in chrom_meta['cluster_label_map'].items()}
+                label_to_cid = {label: cid for cid, label in cid_to_label.items()}
+                # Collect all y positions per cluster
+                cluster_y_positions = {}
                 for j, r_obj in enumerate(selected_reads):
-                    for cid, label in cid_to_label.items():
-                        if r_obj['cluster'] == label:
-                            cluster_y_map[cid] = row_y_centers[j]
-                            break
+                    cid = label_to_cid.get(r_obj['cluster'])
+                    if cid is not None:
+                        cluster_y_positions.setdefault(cid, []).append(row_y_centers[j])
+                # Use center of each cluster's group
+                cluster_y_map = {cid: sum(ys)/len(ys) for cid, ys in cluster_y_positions.items()}
                 draw_collapsed_dendrogram(d, original_Z, chrom_meta['leaf_clusters'],
                                           cluster_display_order, cluster_y_map,
                                           margin_x + 10, dendro_w - 20, color=text_color,
                                           threshold=threshold_val, show_threshold=show_thresh)
+                # Draw bracket lines for multi-rep clusters: vertical line + horizontal ticks
+                bracket_x = margin_x + dendro_w - 10  # right edge of dendrogram area
+                for cid, ys in cluster_y_positions.items():
+                    if len(ys) > 1:
+                        y_min, y_max = min(ys), max(ys)
+                        center_y = cluster_y_map[cid]
+                        # Vertical bracket spanning all reps
+                        d.append(draw.Line(bracket_x, y_min, bracket_x, y_max,
+                                           stroke=text_color, stroke_width=1.5))
+                        # Horizontal tick from bracket to each rep row
+                        for y in ys:
+                            d.append(draw.Line(bracket_x, y, bracket_x + 8, y,
+                                               stroke=text_color, stroke_width=1.5))
             elif local_Z is not None:
                 draw_mini_dendrogram(d, local_Z, margin_x + 10, 110, dendro_w - 20, 0, row_y_centers,
                                      color=text_color, threshold=threshold_val,
@@ -5202,29 +5370,85 @@ def plot_structural_mode(args, matrix_data):
             read, ry = r_obj['sequence'], row_y_centers[j] - (len(featuresets)*fs_height)/2
             l_color = "#888888" if r_obj['type'] == "Major" else "#FF4444"
             
-            # Detailed label
+            # Detailed label — extract sample and haplotype from read name
             sample_val = r_obj.get('sample', 'unknown')
-            if sample_val == 'pangenome' and '#' in read:
-                sample_val = read.split('#')[0]
+            if '#' in read:
+                parts = read.split('#')
+                sample_val = parts[0]
+                if len(parts) >= 2:
+                    sample_val += f"#h{parts[1]}"
                 
-            clean_cid = r_obj['cluster'].replace(f"{chrom}_", "")
             raw_div = r_obj.get('raw_div', 0)
             norm_div = r_obj.get('norm_div', 0)
-            
-            label_text = f"[{sample_val}] {clean_cid}"
-            if r_obj['type'] != "Major":
-                label_text += f" (raw:{int(raw_div)}, norm:{norm_div:.2f})"
-                
+
+            if r_obj['type'] == "Major":
+                label_text = f"[{sample_val}] Major"
+            else:
+                label_text = f"[{sample_val}] (raw:{int(raw_div)}, norm:{norm_div:.2f})"
+
+            # Optionally append clade info
+            clade_suffix = ""
+            if getattr(args, 'show_clade_id', False) or getattr(args, 'show_clade_count', False):
+                parts_clade = []
+                if getattr(args, 'show_clade_id', False):
+                    parts_clade.append(f"C{r_obj.get('clade_id', '?')}")
+                if getattr(args, 'show_clade_count', False):
+                    parts_clade.append(f"n={r_obj.get('clade_count', '?')}")
+                if parts_clade:
+                    clade_suffix = f" [{', '.join(parts_clade)}]"
+            label_text += clade_suffix
+
             display_name = label_text if len(label_text) <= 65 else label_text[:35] + "..." + label_text[-25:]
             d.append(draw.Text(display_name, 12, margin_x + (dendro_w if show_d else 10), ry + (len(featuresets)*fs_height)/2 + 4, fill=l_color, font_family='monospace'))
             if read in read_bed_data:
                 offset = read_min_start.get(read, 0)
+                is_clipped = read in clipped_reads
+                bar_max_x = bars_x_start + (max_span * ratio)  # right edge of drawable area
+
+                # Compute total bar span for outline (clamped to max_span)
+                total_start = None
+                total_stop = 0
+                for fs_tmp in read_bed_data[read]:
+                    for feat in read_bed_data[read][fs_tmp]:
+                        s = feat['start'] - offset
+                        e = feat['stop'] - offset
+                        if total_start is None or s < total_start:
+                            total_start = s
+                        if e > total_stop:
+                            total_stop = e
+                if total_start is None:
+                    total_start = 0
+                clamped_stop = min(total_stop, max_span)
+                # Draw outline rectangle in white background mode
+                if bg_color != "black":
+                    outline_x = bars_x_start + (total_start * ratio)
+                    outline_w = (clamped_stop - total_start) * ratio
+                    for fs_idx in range(len(featuresets)):
+                        d.append(draw.Rectangle(outline_x, ry + (fs_idx * fs_height), outline_w, fs_height,
+                                                fill="none", stroke="black", stroke_width=1))
                 for fs_idx, fs in enumerate(featuresets):
                     for feat in read_bed_data[read].get(fs, []):
-                        w = max((feat['stop'] - feat['start']) * ratio, 2.5)
-                        x = bars_x_start + ((feat['start'] - offset) * ratio)
+                        feat_start = (feat['start'] - offset) * ratio
+                        feat_end = (feat['stop'] - offset) * ratio
+                        x = bars_x_start + feat_start
+                        x_end = bars_x_start + feat_end
+                        # Clip to drawable area
+                        if x >= bar_max_x:
+                            continue  # entirely beyond clip
+                        if x_end > bar_max_x:
+                            x_end = bar_max_x
+                        w = max(x_end - x, 2.5)
                         color, op = featureset_colors[fs].get(feat['feature'], ("#ffffff", 1.0))
                         d.append(draw.Rectangle(x, ry + (fs_idx * fs_height), w, fs_height, fill=color, fill_opacity=op))
+                # Draw // clip indicator for clipped reads
+                if is_clipped:
+                    clip_color = "#FF4444" if bg_color == "black" else "#CC0000"
+                    bar_top = ry
+                    bar_bot = ry + len(featuresets) * fs_height
+                    for sl in range(2):  # two slashes
+                        sx = bar_max_x + 3 + sl * 5
+                        d.append(draw.Line(sx + 4, bar_top, sx, bar_bot,
+                                           stroke=clip_color, stroke_width=2))
 
         legend_y = canvas_height - 60
         d.append(draw.Text("Legend:", 14, margin_x, legend_y, fill=text_color, font_weight='bold'))
@@ -5268,6 +5492,14 @@ def plot_structural_mode(args, matrix_data):
             
         all_d.save_svg(f"{out_base}.all_chromosomes.svg")
         
+    # Save sub-TSV of representative reads
+    if all_selected_reads:
+        reps_df['bw_score'] = (reps_df['binary_divergence'] * reps_df['length_weighted_divergence']) / 1_000_000
+        selected_reps_df = reps_df[reps_df['sequence'].isin(all_selected_reads)]
+        reps_out = f"{args.cluster_prefix}.representative_reads.tsv"
+        selected_reps_df.to_csv(reps_out, sep='\t', index=False)
+        print(f"Saved representative sub-TSV: {reps_out}")
+
     print("Finished generating structural plots.")
     sys.exit(0)
 
