@@ -869,6 +869,32 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
                     print(f"  Warning: reads_file is empty, no filtering applied")
             except Exception as e:
                 print(f"  Warning: Could not read reads_file: {e}")
+    # Check cluster_labels_file for annotation-selected representatives
+    elif cluster_labels_file:
+        try:
+            if cluster_labels_file.endswith('.tsv'):
+                labels_df = pd.read_csv(cluster_labels_file, sep='\t')
+            else:
+                labels_df = pd.read_excel(cluster_labels_file)
+            rep_cols = [c for c in labels_df.columns if c.startswith('representative_read_')]
+            if rep_cols:
+                allowed_reads = set()
+                for col in rep_cols:
+                    allowed_reads.update(labels_df[col].dropna().astype(str).tolist())
+                allowed_reads.discard('')
+                if allowed_reads:
+                    reps_df = reps_df[reps_df['sequence'].isin(allowed_reads)]
+                    print(f"  Using {len(allowed_reads)} annotation-selected representatives from {cluster_labels_file}")
+
+                    # Build rank info from representative columns
+                    for _, lrow in labels_df.iterrows():
+                        for col in rep_cols:
+                            rank_num = int(col.replace('representative_read_', ''))
+                            read_id = lrow.get(col)
+                            if pd.notna(read_id) and str(read_id):
+                                read_ranks[str(read_id)] = rank_num
+        except Exception as e:
+            print(f"  Warning: Could not read cluster labels for representatives: {e}")
 
     # Merge enrichment info from cluster_analysis.tsv
     if cluster_enrichments:
@@ -2733,6 +2759,7 @@ def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_me
         d.append(draw.Text(
             label, font_size=7, x=x, y=header_y,
             fill=text_color, font_family='sans-serif',
+            dominant_baseline='central',
             transform=f"rotate(-90 {x} {header_y})",
             text_anchor='start'
         ))
@@ -3404,7 +3431,8 @@ def _compute_bubble_style(pct, pval, odds, base_color, bubble_radius, max_log2_o
 
 def draw_enrichment_grid(d, cluster_pos_start, cluster_pos_end, grid_start, cluster_stats,
                          sample_colors, bubble_radius=6, bubble_spacing=2,
-                         orientation='vertical', text_color='white', draw_labels=False):
+                         orientation='vertical', text_color='white', draw_labels=False,
+                         sample_order=None):
     """Draw a grid of enrichment bubbles showing per-sample statistics.
 
     Supports both vertical (clusters as rows) and horizontal (clusters as columns) layouts.
@@ -3428,12 +3456,13 @@ def draw_enrichment_grid(d, cluster_pos_start, cluster_pos_end, grid_start, clus
     if not cluster_stats:
         return 0, []
 
-    # Get sample names from first cluster that has per_sample data
-    sample_order = []
-    for stats in cluster_stats.values():
-        if stats.get('samples'):
-            sample_order = stats['samples']
-            break
+    # Get sample names from first cluster that has per_sample data (unless provided)
+    if sample_order is None:
+        sample_order = []
+        for stats in cluster_stats.values():
+            if stats.get('samples'):
+                sample_order = stats['samples']
+                break
 
     if not sample_order:
         return 0, []
@@ -3522,6 +3551,7 @@ def draw_enrichment_grid_header(d, x_start, y_pos, sample_order, sample_colors,
             font_size=8, x=x_center, y=y_pos,
             fill=color, font_family='sans-serif',
             text_anchor='start',
+            dominant_baseline='central',
             transform=f'rotate(-90, {x_center}, {y_pos})'
         ))
 
@@ -5683,6 +5713,10 @@ def main():
         # Skip enrichment bubbles and cluster labels when using full dendrogram (individual read view)
         if full_dendro_data is None:
             if use_enrichment_grid and grid_sample_names:
+                # Sync grid sample order with matrix clustering when matrix is present
+                if matrix_data and 'all_samples' in matrix_data:
+                    grid_sample_names = matrix_data['all_samples']
+
                 # Grid mode: draw a column of bubbles for each sample
                 grid_x_start = dendro_tip_x + dendrogram_to_bubble_gap
 
@@ -5706,7 +5740,8 @@ def main():
 
                 # Draw the enrichment grid
                 draw_enrichment_grid(d, cluster_y_start, cluster_y_end, grid_x_start, cluster_stats,
-                                    sample_colors, bubble_radius=grid_bubble_radius, bubble_spacing=grid_bubble_spacing)
+                                    sample_colors, bubble_radius=grid_bubble_radius, bubble_spacing=grid_bubble_spacing,
+                                    sample_order=grid_sample_names)
             else:
                 # Single bubble mode (original behavior)
                 bubble_x = dendro_tip_x + dendrogram_to_bubble_gap + bubble_radius
