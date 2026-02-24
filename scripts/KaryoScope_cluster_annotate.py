@@ -378,19 +378,6 @@ def classify_bed_feature(feature):
     return 'other'
 
 
-def compute_cluster_ct_bp_pct(cluster_reads, bed_df):
-    """Compute bp-weighted ct (centric transition) proportion for a cluster."""
-    cluster_bed = bed_df[bed_df['read'].isin(cluster_reads)]
-    if len(cluster_bed) == 0:
-        return 0.0
-    total_bp = cluster_bed['length'].sum()
-    if total_bp == 0:
-        return 0.0
-    ct_bp = cluster_bed.loc[
-        cluster_bed['feature'].str.split(':', n=1).str[0] == 'ct', 'length'
-    ].sum()
-    return round(100 * ct_bp / total_bp, 2)
-
 
 def compute_cluster_interspersion(cluster_reads, bed_df):
     """Compute typed interspersion rates (transitions per kb) for a cluster.
@@ -703,38 +690,48 @@ def score_read_against_annotation(read_densities, read_interspersion,
     return round(score, 4)
 
 
-def normalize_representatives_by_length(cluster_candidates, n_per_cluster):
+def compute_length_score(read_span, target_span, max_log2_dev=3.0):
+    """Score how close a read's length is to the target.
+
+    Returns 1.0 when read_span == target, decaying to 0.0 at 2^max_log2_dev × deviation.
+    Uses log2 scale so 2x and 0.5x are penalized equally.
+    """
+    if read_span <= 0 or target_span <= 0:
+        return 0.0
+    log2_ratio = abs(math.log2(read_span / target_span))
+    return max(0.0, 1.0 - log2_ratio / max_log2_dev)
+
+
+def normalize_representatives_by_length(cluster_candidates, n_per_cluster, target_length=None):
     """Reorder candidates so that index N reads have similar lengths across clusters.
 
-    For each rank position (1..N), pick the candidate from each cluster whose
-    read_span is closest to the median read_span at that rank across all clusters.
+    For each rank position (1..N), pick the candidate from each cluster that
+    best optimizes the combined score (feature + length) while staying close
+    to the target length.
 
     Args:
-        cluster_candidates: dict {cluster_id: [{'sequence': ..., 'read_span': ..., 'score': ...}, ...]}
-                            Candidates sorted by score descending.
+        cluster_candidates: dict {cluster_id: [{'sequence': ..., 'read_span': ..., 'score': ...,
+                            'length_score': ..., 'combined': ...}, ...]}
+                            Candidates sorted by combined score descending.
         n_per_cluster: number of representatives to select per cluster
+        target_length: global target span (e.g. median across all reads). If None,
+                       derives from candidate pool.
 
     Returns:
         dict {cluster_id: [{'sequence': ..., 'read_span': ..., 'score': ..., 'rank': int}, ...]}
     """
-    # Compute target lengths for each rank position
-    all_lengths = []
-    for cluster_id, candidates in cluster_candidates.items():
-        lengths = [c['read_span'] for c in candidates[:n_per_cluster]]
-        all_lengths.append(lengths)
-
-    target_lengths = []
-    for rank in range(n_per_cluster):
-        lengths_at_rank = [ls[rank] if rank < len(ls) else 0 for ls in all_lengths]
-        lengths_at_rank = [l for l in lengths_at_rank if l > 0]
-        if lengths_at_rank:
-            target_lengths.append(sorted(lengths_at_rank)[len(lengths_at_rank) // 2])
-        else:
-            target_lengths.append(0)
+    # Use global target, else median of all candidates
+    if target_length:
+        target_lengths = [target_length] * n_per_cluster
+    else:
+        all_spans = [c['read_span'] for cands in cluster_candidates.values()
+                     for c in cands if c['read_span'] > 0]
+        median_span = sorted(all_spans)[len(all_spans) // 2] if all_spans else 0
+        target_lengths = [median_span] * n_per_cluster
 
     print(f"  Representative target lengths by rank: {[f'{l:,}bp' for l in target_lengths]}")
 
-    # For each cluster, assign candidates to ranks based on closest length match
+    # For each cluster, assign candidates to ranks by combined score + length proximity
     normalized = {}
     for cluster_id, candidates in cluster_candidates.items():
         available = list(candidates)
@@ -744,8 +741,9 @@ def normalize_representatives_by_length(cluster_candidates, n_per_cluster):
             if not available:
                 break
             target = target_lengths[rank]
-            best_idx = min(range(len(available)),
-                           key=lambda i: abs(available[i]['read_span'] - target))
+            best_idx = max(range(len(available)),
+                           key=lambda i: (available[i].get('combined', available[i]['score']),
+                                          -abs(available[i]['read_span'] - target)))
             pick = available.pop(best_idx)
             pick['rank'] = rank + 1
             assigned.append(pick)
@@ -795,8 +793,18 @@ def select_annotation_representatives(results, assignments, bed_data,
         # Fallback: estimate span from BED records
         span_col = None
 
+    # Compute global target length (median read_span across all reads)
+    if 'read_span' in assignments.columns:
+        global_median_span = float(assignments['read_span'].median())
+    elif 'read_length' in assignments.columns:
+        global_median_span = float(assignments['read_length'].median())
+    else:
+        global_median_span = None
+
     print(f"\n  Selecting {n_reps} annotation-aware representatives per cluster...")
     print(f"  Using featureset '{density_fs}' for density scoring")
+    if global_median_span:
+        print(f"  Target read span (global median): {global_median_span:,.0f}bp")
 
     cluster_candidates = {}
 
@@ -829,7 +837,7 @@ def select_annotation_representatives(results, assignments, bed_data,
             per_read_interspersion = compute_per_read_interspersion_bulk(
                 cluster_reads, interspersion_bed)
 
-        # Score each read
+        # Score each read (feature score + length score → combined via geometric mean)
         scored = []
         for read_id in cluster_reads:
             read_dens = per_read_densities.get(read_id, {})
@@ -837,23 +845,60 @@ def select_annotation_representatives(results, assignments, bed_data,
                          {'total': 0, 'can_ncan': 0, 'tel_sat': 0, 'arm_tel': 0})
             score = score_read_against_annotation(
                 read_dens, read_inter, row, featureset_prefix)
+            span = read_spans.get(read_id, 0)
+            length_score = compute_length_score(span, global_median_span) if global_median_span else 1.0
+
+            # Geometric mean: jointly optimizes both — neither can be ignored
+            combined = math.sqrt(score * length_score) if (score > 0 and length_score > 0) else 0.0
+
             scored.append({
                 'sequence': read_id,
-                'read_span': read_spans.get(read_id, 0),
+                'read_span': span,
                 'score': score,
+                'length_score': length_score,
+                'combined': combined,
             })
 
-        # Sort by score descending, keep top 3*n_reps candidates
-        scored.sort(key=lambda x: x['score'], reverse=True)
-        cluster_candidates[cluster_id] = scored[:3 * n_reps]
+        # Sort by combined score descending, keep expanded candidate pool
+        scored.sort(key=lambda x: x['combined'], reverse=True)
+        cluster_candidates[cluster_id] = scored[:max(20, 5 * n_reps)]
 
         n_reads = len(cluster_reads)
-        top_score = scored[0]['score'] if scored else 0
+        top = scored[0] if scored else {}
         print(f"    Cluster {cluster_id} ({row.get('cluster_name', '')}): "
-              f"{n_reads} reads, top score={top_score:.3f}")
+              f"{n_reads} reads, top score={top.get('score', 0):.3f}, "
+              f"length_score={top.get('length_score', 0):.3f}, "
+              f"combined={top.get('combined', 0):.3f}")
 
-    # Normalize lengths across clusters
-    normalized = normalize_representatives_by_length(cluster_candidates, n_reps)
+    # --- Pass 1: median-targeted selection ---
+    normalized = normalize_representatives_by_length(cluster_candidates, n_reps,
+                                                     target_length=global_median_span)
+
+    # --- Pass 2: re-select targeting the longest Pass 1 representative ---
+    all_rep_spans = [c['read_span'] for cands in normalized.values()
+                     for c in cands if c.get('read_span', 0) > 0]
+    if all_rep_spans:
+        max_rep_span = max(all_rep_spans)
+        print(f"\n  Pass 2: re-targeting to longest representative ({max_rep_span:,.0f}bp)")
+
+        # Recompute combined scores using max_rep_span as target
+        for cluster_id, candidates in cluster_candidates.items():
+            for c in candidates:
+                c['length_score'] = compute_length_score(c['read_span'], max_rep_span)
+                c['combined'] = (math.sqrt(c['score'] * c['length_score'])
+                                 if (c['score'] > 0 and c['length_score'] > 0) else 0.0)
+            candidates.sort(key=lambda x: x['combined'], reverse=True)
+
+        normalized = normalize_representatives_by_length(cluster_candidates, n_reps,
+                                                         target_length=max_rep_span)
+
+        pass2_spans = [c['read_span'] for cands in normalized.values()
+                       for c in cands if c.get('read_span', 0) > 0]
+        if pass2_spans:
+            print(f"  Pass 2 representative spans: min={min(pass2_spans):,.0f}bp, "
+                  f"median={sorted(pass2_spans)[len(pass2_spans)//2]:,.0f}bp, "
+                  f"max={max(pass2_spans):,.0f}bp")
+
     return normalized
 
 
@@ -962,7 +1007,7 @@ def auto_label_cluster(row, featureset_prefix):
     ENRICH_DMAX = 35      # dmax for enrichment qualifiers (satellite, TAR1, ITS, rDNA)
     NCAN_VARIANT = 25     # noncanonical dmax for variant-enriched qualifier
     SAT_DOMINANT = 80     # readpct for satellite-dominant (rule 5)
-    CT_ENRICH = 20        # ct_bp_pct for SegDup enrichment
+    CT_ENRICH = 20        # {pfx}_bppct__ct for SegDup enrichment
     ALT_BLOCK_BP = 6000   # max_block_bp threshold for Type II ALT subtelomere
     ARM_PRESENT = 30      # p_arm or q_arm dmax to count as having arm sequence
 
@@ -994,7 +1039,7 @@ def auto_label_cluster(row, featureset_prefix):
     its_dmax  = row.get(f'{pfx}_dmax__ITS', 0)
     tar1_dmax = row.get(f'{pfx}_dmax__TAR1', 0)
     rdna_dmax = row.get('acrocentric_dmax__rDNA', 0)
-    ct        = row.get('ct_bp_pct', 0)
+    ct        = row.get(f'{pfx}_bppct__ct', 0)
 
     # Arm metrics: detect whether reads extend into a chromosome arm (or SegDup)
     p_arm_dmax = row.get(f'{pfx}_dmax__p_arm', 0)
@@ -1113,9 +1158,9 @@ def analyze_annotation_importance(result_df):
     import numpy as np
     from scipy import stats as scipy_stats
 
-    # Extract numeric score columns: all __ columns + ct_bp_pct + interspersion_*
+    # Extract numeric score columns: all __ columns + interspersion_*
     score_cols = [c for c in result_df.columns
-                  if ('__' in c or c == 'ct_bp_pct' or c.startswith('interspersion_'))]
+                  if ('__' in c or c.startswith('interspersion_'))]
     if not score_cols:
         print("  WARNING: No score columns found for annotation importance analysis")
         return None, None
@@ -1140,8 +1185,6 @@ def analyze_annotation_importance(result_df):
                 if featureset.endswith(suffix):
                     featureset = featureset[:-len(suffix)]
                     break
-        elif col == 'ct_bp_pct':
-            featureset = 'ct'
         elif col.startswith('interspersion_'):
             featureset = 'interspersion'
         else:
@@ -1774,11 +1817,10 @@ def main():
                 row[f'{fs}_dterminal_min__{feat}'] = feat_wd.get('terminal_min', 0)
                 row[f'{fs}_max_block_bp__{feat}'] = feat_wd.get('max_block', 0)
 
-        # ct_bp_pct from generalized bp scores (backward compat with auto_label)
-        if 'telomere_region' in bed_data:
-            row['ct_bp_pct'] = row.get('telomere_region_bppct__ct', 0)
-
         if args.auto_label:
+            if 'telomere_region' not in bed_data and 'region' not in bed_data:
+                print("ERROR: --auto-label requires 'telomere_region' or 'region' in --featuresets")
+                sys.exit(1)
             pfx = 'telomere_region' if 'telomere_region' in bed_data else 'region'
             row['cluster_name'] = auto_label_cluster(row, pfx)
 
