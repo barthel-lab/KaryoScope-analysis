@@ -2,8 +2,12 @@
 """
 KaryoScope Cluster Annotation
 
-Summarizes the dominant features for each cluster based on BED file annotations.
-Annotates each featureset layer separately (e.g., region, subtelomeric, chromosome).
+Summarizes the dominant features for each cluster based on pre-computed per-read
+sequence annotations (from KaryoScope_sequence_annotate.py).
+
+Two-step pipeline:
+  1. KaryoScope_sequence_annotate.py: per-read BED → sequence annotations TSV
+  2. KaryoScope_cluster_annotate.py (this script): sequence annotations → cluster annotations TSV
 
 Per-feature columns (for featureset 'fs' and feature 'feat'):
   {fs}_readpct__{feat}   % of cluster reads where feature > adaptive threshold
@@ -17,16 +21,16 @@ Per-feature columns (for featureset 'fs' and feature 'feat'):
 Reads shorter than 1kb use overall coverage fraction for all density stats.
 
 Usage:
-  python KaryoScope_cluster_annotate.py \
-    --prefix analysis_output_prefix \
-    --bed-dir results \
+  python KaryoScope_cluster_annotate.py \\
+    --prefix analysis_output_prefix \\
+    --sequence-annotations sequence_annotations.tsv \\
     --output cluster_annotations.tsv
 
-  # With specific featuresets:
-  python KaryoScope_cluster_annotate.py \
-    --prefix analysis_output_prefix \
-    --bed-dir results \
-    --featuresets region,subtelomeric,chromosome \
+  # With auto-labeling:
+  python KaryoScope_cluster_annotate.py \\
+    --prefix analysis_output_prefix \\
+    --sequence-annotations sequence_annotations.tsv \\
+    --auto-label \\
     --output cluster_annotations.tsv
 
 The script automatically finds these files from the prefix:
@@ -36,7 +40,6 @@ The script automatically finds these files from the prefix:
 
 import argparse
 import fnmatch
-import gzip
 import math
 import os
 import sys
@@ -47,69 +50,56 @@ _original_command = ' '.join(sys.argv)
 import pandas as pd
 
 
-def load_bed_file(filepath):
-    """Load a BED file (optionally gzipped) into a DataFrame."""
-    open_func = gzip.open if filepath.endswith('.gz') else open
-    mode = 'rt' if filepath.endswith('.gz') else 'r'
+def load_sequence_annotations(filepath):
+    """Load per-read annotations TSV from sequence_annotate.
 
-    records = []
-    with open_func(filepath, mode) as f:
-        for line in f:
-            parts = line.strip().split('\t')
-            if len(parts) >= 4:
-                read = parts[0]
-                start = int(parts[1])
-                end = int(parts[2])
-                feature = parts[3]
-                length = end - start
-                records.append({
-                    'read': read,
-                    'start': start,
-                    'end': end,
-                    'feature': feature,
-                    'length': length
-                })
-    return pd.DataFrame(records)
+    Returns:
+        tuple: (DataFrame, detected_featuresets list, feature_names_per_fs dict)
+    """
+    df = pd.read_csv(filepath, sep='\t')
+
+    # Auto-detect featuresets and feature names from column prefixes
+    # Columns are like: {fs}_frac__{feat}, {fs}_bp__{feat}, {fs}_dmax__{feat}, etc.
+    featuresets = []
+    feature_names_per_fs = {}
+
+    # Look for {fs}_frac__{feat} columns to detect featuresets and features
+    for col in df.columns:
+        if '_frac__' in col:
+            parts = col.split('_frac__', 1)
+            fs = parts[0]
+            feat = parts[1]
+            if fs not in featuresets:
+                featuresets.append(fs)
+                feature_names_per_fs[fs] = []
+            feature_names_per_fs[fs].append(feat)
+
+    # Sort feature names for consistency
+    for fs in feature_names_per_fs:
+        feature_names_per_fs[fs] = sorted(feature_names_per_fs[fs])
+
+    print(f"  Loaded {len(df)} reads, {len(featuresets)} featuresets")
+    for fs in featuresets:
+        print(f"    {fs}: {len(feature_names_per_fs[fs])} features")
+
+    return df, featuresets, feature_names_per_fs
 
 
-def find_featureset_beds(bed_dirs, samples, featuresets, database="KS_human_CHM13", smoothness="smoothed"):
-    """Find BED files for each featureset for each sample, searching multiple directories."""
-    beds_by_featureset = {fs: [] for fs in featuresets}
+def load_adaptive_thresholds(filepath):
+    """Load thresholds TSV.
 
-    for sample in samples:
-        for fs in featuresets:
-            found = False
-            for bed_dir in bed_dirs:
-                base_path = f"{bed_dir}/{sample}/telogator/1/KaryoScope/{database}"
-
-                # Try different naming patterns (nested directory structure)
-                patterns = [
-                    f"{base_path}/{sample}.telogator.1.{database}.{fs}.{smoothness}.KaryoScope.bed",
-                    f"{base_path}/{sample}.telogator.1.{database}.{fs}.{smoothness}.bed",
-                    f"{base_path}/{sample}.telogator.1.{database}.{fs}.{smoothness}.features.bed",
-                    f"{base_path}/{sample}.telogator.1.{database}.{fs}.{smoothness}.merged.bed",
-                ]
-                # Also try flat directory (files directly in bed_dir)
-                patterns += [
-                    f"{bed_dir}/{sample}.telogator.1.{database}.{fs}.{smoothness}.KaryoScope.bed",
-                    f"{bed_dir}/{sample}.telogator.1.{database}.{fs}.{smoothness}.bed",
-                    f"{bed_dir}/{sample}.telogator.1.{database}.{fs}.{smoothness}.features.bed",
-                    f"{bed_dir}/{sample}.telogator.1.{database}.{fs}.{smoothness}.merged.bed",
-                ]
-
-                for pattern in patterns:
-                    if os.path.exists(pattern):
-                        beds_by_featureset[fs].append(pattern)
-                        found = True
-                        break
-                    elif os.path.exists(pattern + '.gz'):
-                        beds_by_featureset[fs].append(pattern + '.gz')
-                        found = True
-                        break
-                if found:
-                    break
-
-    return beds_by_featureset
+    Returns:
+        dict {featureset: {feature: threshold}}
+    """
+    df = pd.read_csv(filepath, sep='\t')
+    thresholds = {}
+    for _, row in df.iterrows():
+        fs = row['featureset']
+        feat = row['feature']
+        if fs not in thresholds:
+            thresholds[fs] = {}
+        thresholds[fs][feat] = row['threshold']
+    return thresholds
 
 
 def matches_any_pattern(feature, patterns):
@@ -120,21 +110,28 @@ def matches_any_pattern(feature, patterns):
     return False
 
 
-def summarize_featureset(cluster_reads, bed_df, top_n=3, exclude_patterns=None):
-    """Summarize features for a cluster from a single featureset."""
-    cluster_bed = bed_df[bed_df['read'].isin(cluster_reads)]
+def summarize_featureset(cluster_reads, seq_annotations, fs, top_n=3, exclude_patterns=None):
+    """Summarize features for a cluster from pre-computed sequence annotations."""
+    cluster_ann = seq_annotations[seq_annotations['sequence'].isin(cluster_reads)]
 
-    if len(cluster_bed) == 0:
+    if len(cluster_ann) == 0:
         return ''
 
-    # Count by feature (weighted by length)
-    feature_bp = cluster_bed.groupby('feature')['length'].sum()
-
-    if len(feature_bp) == 0:
+    # Sum bp columns for this featureset across cluster reads
+    bp_cols = [c for c in cluster_ann.columns if c.startswith(f'{fs}_bp__')]
+    if not bp_cols:
         return ''
 
-    # Calculate total BEFORE filtering (so percentages reflect true proportion)
+    feature_bp = {}
+    for col in bp_cols:
+        feat = col.split('__', 1)[1]
+        feature_bp[feat] = cluster_ann[col].sum()
+
+    feature_bp = pd.Series(feature_bp)
     total_bp = feature_bp.sum()
+
+    if total_bp == 0:
+        return ''
 
     # Filter out excluded features for display only
     if exclude_patterns:
@@ -143,422 +140,115 @@ def summarize_featureset(cluster_reads, bed_df, top_n=3, exclude_patterns=None):
     if len(feature_bp) == 0:
         return ''
 
-    # Top features by coverage (percentages relative to total including excluded)
+    # Top features by coverage
     top_features = feature_bp.nlargest(top_n)
     top_str = '; '.join([f"{f}({100*v/total_bp:.1f}%)" for f, v in top_features.items()])
 
     return top_str
 
 
-def compute_read_feature_fractions(bed_df):
-    """Compute per-read feature coverage fractions.
-
-    Returns a DataFrame: read × feature matrix of coverage fractions.
-    """
-    # Total bp per read
-    read_totals = bed_df.groupby('read')['length'].sum()
-    # Per read × feature bp
-    read_feature_bp = bed_df.groupby(['read', 'feature'])['length'].sum().unstack(fill_value=0)
-    # Divide by total
-    fractions = read_feature_bp.div(read_totals, axis=0)
-    return fractions
-
-
-def compute_adaptive_thresholds(fractions, min_thresh=0.001, max_thresh=0.05):
-    """Compute adaptive significance thresholds per feature.
-
-    For each feature: threshold = clamp(median_nonzero / 3, min_thresh, max_thresh)
-    """
-    thresholds = {}
-    for feature in fractions.columns:
-        nonzero = fractions[feature][fractions[feature] > 0]
-        if len(nonzero) == 0:
-            thresholds[feature] = min_thresh
-        else:
-            med = nonzero.median()
-            thresholds[feature] = max(min_thresh, min(max_thresh, med / 3))
-    return thresholds
-
-
-def score_cluster_features(cluster_reads, fractions, thresholds):
+def score_cluster_features(cluster_reads, seq_annotations, fs, thresholds):
     """For each feature, compute % of cluster reads exceeding the adaptive threshold."""
-    cluster_frac = fractions.reindex(cluster_reads).fillna(0)
+    cluster_ann = seq_annotations[seq_annotations['sequence'].isin(cluster_reads)]
     n_reads = len(cluster_reads)
     scores = {}
     for feature, thresh in thresholds.items():
-        if feature in cluster_frac.columns:
-            n_sig = (cluster_frac[feature] > thresh).sum()
+        col = f'{fs}_frac__{feature}'
+        if col in cluster_ann.columns:
+            # Zero-fill for reads in cluster_reads but not in cluster_ann
+            vals = cluster_ann[col].fillna(0)
+            n_sig = (vals > thresh).sum()
+            # Account for reads missing from annotations (they contribute 0, which is <= thresh)
             scores[feature] = round(100 * n_sig / n_reads, 1) if n_reads > 0 else 0
+        else:
+            scores[feature] = 0
     return scores
 
 
-def compute_cluster_bp_scores(cluster_reads, bed_df):
-    """Compute bp-weighted feature proportions for a cluster.
-
-    Returns dict of {feature: bp_pct} where bp_pct = 100 * feature_bp / total_bp.
-    """
-    cluster_bed = bed_df[bed_df['read'].isin(cluster_reads)]
-    if len(cluster_bed) == 0:
+def compute_cluster_bp_scores(cluster_reads, seq_annotations, fs):
+    """Compute bp-weighted feature proportions for a cluster."""
+    cluster_ann = seq_annotations[seq_annotations['sequence'].isin(cluster_reads)]
+    if len(cluster_ann) == 0:
         return {}
-    total_bp = cluster_bed['length'].sum()
+
+    bp_cols = [c for c in cluster_ann.columns if c.startswith(f'{fs}_bp__')]
+    total_bp_col = f'{fs}_total_bp'
+
+    total_bp = cluster_ann[total_bp_col].sum() if total_bp_col in cluster_ann.columns else 0
     if total_bp == 0:
         return {}
-    feature_bp = cluster_bed.groupby('feature')['length'].sum()
-    return {feat: round(100 * bp / total_bp, 2) for feat, bp in feature_bp.items()}
-
-
-BLOCK_GAP_TOL = 100  # merge blocks separated by ≤100 bp gaps
-
-
-def _max_block_length(coverage, gap_tol=BLOCK_GAP_TOL):
-    """Longest contiguous block of 1s in coverage, merging gaps ≤ gap_tol bp."""
-    import numpy as np
-    diffs = np.diff(np.concatenate([[0], coverage, [0]]))
-    run_starts = np.where(diffs == 1)[0]
-    run_ends = np.where(diffs == -1)[0]
-    if len(run_starts) == 0:
-        return 0
-    # Merge runs separated by small gaps
-    merged_starts = [run_starts[0]]
-    merged_ends = [run_ends[0]]
-    for i in range(1, len(run_starts)):
-        if run_starts[i] - merged_ends[-1] <= gap_tol:
-            merged_ends[-1] = run_ends[i]
-        else:
-            merged_starts.append(run_starts[i])
-            merged_ends.append(run_ends[i])
-    return int(max(me - ms for ms, me in zip(merged_starts, merged_ends)))
-
-
-def compute_cluster_window_densities(cluster_reads, bed_df, window_size=1000):
-    """Compute per-1kb window density statistics for each feature across a cluster.
-
-    For each read, computes a binary coverage array and derives sliding-window
-    density statistics (max, min, median, first-1kb, last-1kb).  Returns the
-    median of each per-read statistic across the cluster, scaled 0-100.
-
-    Short reads (<1kb) use overall coverage fraction for all five stats.
-
-    Returns dict of {feature: {'max': v, 'min': v, 'median': v, 'first': v, 'last': v}}.
-    """
-    import numpy as np
-
-    cluster_bed = bed_df[bed_df['read'].isin(cluster_reads)]
-    if len(cluster_bed) == 0:
-        return {}
-
-    all_features = cluster_bed['feature'].unique()
-    # Per-read stats collected for aggregation
-    feature_stats = {f: {'max': [], 'min': [], 'median': [], 'first': [], 'last': [],
-                          'terminal': [], 'terminal_min': [], 'max_block': []}
-                     for f in all_features}
-
-    n_skipped = 0
-    for _read_id, read_records in cluster_bed.groupby('read'):
-        read_start = read_records['start'].min()
-        read_end = read_records['end'].max()
-        span = read_end - read_start
-
-        if span <= 0:
-            n_skipped += 1
-            continue
-
-        if span < window_size:
-            # Short read: overall fraction per feature — same value for all 5 stats
-            for feat, group in read_records.groupby('feature'):
-                events = np.zeros(span + 1, dtype=np.int32)
-                starts = group['start'].values - read_start
-                ends = np.minimum(group['end'].values - read_start, span)
-                np.add.at(events, starts, 1)
-                np.add.at(events, ends, -1)
-                coverage_arr = (np.cumsum(events[:span]) > 0).astype(np.int32)
-                frac = coverage_arr.sum() / span
-                for key in ('max', 'min', 'median', 'first', 'last', 'terminal', 'terminal_min'):
-                    feature_stats[feat][key].append(frac)
-                feature_stats[feat]['max_block'].append(_max_block_length(coverage_arr))
-            continue
-
-        for feat, group in read_records.groupby('feature'):
-            # Event-based binary coverage array
-            events = np.zeros(span + 1, dtype=np.int32)
-            starts = group['start'].values - read_start
-            ends = np.minimum(group['end'].values - read_start, span)
-            np.add.at(events, starts, 1)
-            np.add.at(events, ends, -1)
-            coverage = (np.cumsum(events[:span]) > 0).astype(np.int32)
-
-            # Sliding-window sums via cumulative sum
-            cumsum = np.empty(len(coverage) + 1, dtype=np.int64)
-            cumsum[0] = 0
-            np.cumsum(coverage, out=cumsum[1:])
-            window_sums = cumsum[window_size:] - cumsum[:-window_size]
-
-            feature_stats[feat]['max'].append(window_sums.max() / window_size)
-            feature_stats[feat]['min'].append(window_sums.min() / window_size)
-            feature_stats[feat]['median'].append(np.median(window_sums) / window_size)
-            first_val = coverage[:window_size].sum() / window_size
-            last_val = coverage[-window_size:].sum() / window_size
-            feature_stats[feat]['first'].append(first_val)
-            feature_stats[feat]['last'].append(last_val)
-            feature_stats[feat]['terminal'].append(max(first_val, last_val))
-            feature_stats[feat]['terminal_min'].append(min(first_val, last_val))
-            feature_stats[feat]['max_block'].append(_max_block_length(coverage))
-
-    # Pad with zeros for reads missing a feature (or absent from cluster_bed entirely)
-    n_valid = len(cluster_reads) - n_skipped
-    for feat in all_features:
-        for key in ('max', 'min', 'median', 'first', 'last', 'terminal', 'terminal_min', 'max_block'):
-            n_pad = n_valid - len(feature_stats[feat][key])
-            if n_pad > 0:
-                feature_stats[feat][key].extend([0] * n_pad)
 
     result = {}
-    for feat, stats in feature_stats.items():
-        feat_result = {}
-        for key in ('max', 'min', 'median', 'first', 'last', 'terminal', 'terminal_min', 'max_block'):
-            vals = stats[key]
-            if key == 'max_block':
-                feat_result[key] = round(pd.Series(vals).median(), 0) if vals else 0
-            else:
-                feat_result[key] = round(100 * pd.Series(vals).median(), 2) if vals else 0
-        result[feat] = feat_result
+    for col in bp_cols:
+        feat = col.split('__', 1)[1]
+        feat_bp = cluster_ann[col].sum()
+        result[feat] = round(100 * feat_bp / total_bp, 2)
+
     return result
 
 
-# --- Feature classification constants for interspersion metrics ---
-_SATELLITE_LAYER1 = frozenset({
-    'hsat3', 'hsat1A', 'hsat2', 'hsat1B', 'active', 'censat', 'bsat',
-    'monomeric', 'gsat', 'hor_multigroup1', 'hsat_multigroup1',
-    'hsat1_multigroup1', 'asat_multigroup1',
-})
-_LAYER2_CANONICAL = frozenset({'canonical_telomere'})
-_LAYER2_NONCANONICAL = frozenset({'noncanonical_telomere'})
-_LAYER2_ITS_TAR1 = frozenset({'ITS', 'TAR1'})
-_CT_LAYER1 = frozenset({'ct'})
-_ARM_LAYER1 = frozenset({'p_arm', 'q_arm', 'arm_multigroup1'})
+def compute_cluster_window_densities(cluster_reads, seq_annotations, fs, feature_names):
+    """Compute cluster-level window density stats from pre-computed per-read annotations.
 
+    Reads pre-computed density columns ({fs}_dmax__{feat} etc.) from sequence annotations,
+    zero-pads for missing reads, and takes the median across cluster reads.
+    Values are scaled 0-100 for cluster output (input values are 0-1 raw fractions).
 
-def classify_bed_feature(feature):
-    """Classify a BED feature (single-layer or 2-layer) into a category.
-
-    Handles both formats:
-      - Single-layer: 'canonical_telomere', 'ct', 'active'
-      - Two-layer:    'ct:nonsubtelomeric', 'arm_multigroup1:canonical_telomere'
-
-    Priority:
-    1. Satellite layer-1 always wins
-    2. Layer-2 matches override ct/arm layer-1
-    3. Layer-1 matches for canonical/noncanonical/ITS_TAR1 (single-layer BEDs)
-    4. ct/arm layer-1 only when no layer-2 match
-    5. Everything else -> other
+    Returns dict of {feature: {'max': v, 'min': v, 'median': v, 'first': v, 'last': v,
+                                'terminal': v, 'terminal_min': v, 'max_block': v}}.
     """
-    parts = feature.split(':', 1)
-    layer1 = parts[0]
-    layer2 = parts[1] if len(parts) > 1 else ''
+    n_total = len(cluster_reads)
+    if n_total == 0:
+        return {}
 
-    if layer1 in _SATELLITE_LAYER1:
-        return 'satellite'
-    if layer2 in _LAYER2_CANONICAL:
-        return 'canonical'
-    if layer2 in _LAYER2_NONCANONICAL:
-        return 'noncanonical'
-    if layer2 in _LAYER2_ITS_TAR1:
-        return 'ITS_TAR1'
-    # Single-layer: check layer-1 against telomere-type sets
-    if layer1 in _LAYER2_CANONICAL:
-        return 'canonical'
-    if layer1 in _LAYER2_NONCANONICAL:
-        return 'noncanonical'
-    if layer1 in _LAYER2_ITS_TAR1:
-        return 'ITS_TAR1'
-    if layer1 in _CT_LAYER1:
-        return 'ct'
-    if layer1 in _ARM_LAYER1:
-        return 'arm'
-    return 'other'
+    cluster_ann = seq_annotations[seq_annotations['sequence'].isin(cluster_reads)]
+
+    result = {}
+    for feat in feature_names:
+        feat_result = {}
+        for stat_key, col_key in [('max', 'dmax'), ('min', 'dmin'), ('median', 'dmedian'),
+                                   ('first', 'dfirst'), ('last', 'dlast'),
+                                   ('terminal', 'dterminal'), ('terminal_min', 'dterminal_min'),
+                                   ('max_block', 'max_block_bp')]:
+            col = f'{fs}_{col_key}__{feat}'
+            if col in cluster_ann.columns:
+                vals = cluster_ann[col].tolist()
+                # Zero-pad for reads in cluster but not in annotations
+                n_pad = n_total - len(vals)
+                if n_pad > 0:
+                    vals.extend([0] * n_pad)
+                median_val = pd.Series(vals).median()
+                if stat_key == 'max_block':
+                    feat_result[stat_key] = round(median_val, 0)
+                else:
+                    feat_result[stat_key] = round(100 * median_val, 2)
+            else:
+                feat_result[stat_key] = 0
+        result[feat] = feat_result
+
+    return result
 
 
-
-def compute_cluster_interspersion(cluster_reads, bed_df):
-    """Compute typed interspersion rates (transitions per kb) for a cluster.
-
-    Returns dict with median rates across all reads:
-      total, can_ncan, tel_sat, arm_tel
-    """
-    cluster_bed = bed_df[bed_df['read'].isin(cluster_reads)]
-    if len(cluster_bed) == 0:
+def compute_cluster_interspersion(cluster_reads, seq_annotations):
+    """Compute cluster-level interspersion from pre-computed per-read annotations."""
+    n_total = len(cluster_reads)
+    if n_total == 0:
         return {'total': 0.0, 'can_ncan': 0.0, 'tel_sat': 0.0, 'arm_tel': 0.0}
 
-    read_rates = {'total': [], 'can_ncan': [], 'tel_sat': [], 'arm_tel': []}
-
-    for _read_id, read_records in cluster_bed.groupby('read'):
-        records = read_records.sort_values('start')
-        span_kb = (records['end'].max() - records['start'].min()) / 1000
-        if span_kb <= 0:
-            for key in read_rates:
-                read_rates[key].append(0.0)
-            continue
-
-        categories = [classify_bed_feature(f) for f in records['feature']]
-
-        # Total transitions: all category changes
-        total = sum(
-            1 for i in range(1, len(categories))
-            if categories[i] != categories[i - 1]
-        )
-
-        # Typed transitions: filter out 'other' (noise features like
-        # telomere_like_multigroup1, novel) so they don't break adjacency
-        # between meaningful categories
-        filtered = [c for c in categories if c != 'other']
-        can_ncan = tel_sat = arm_tel = 0
-        for i in range(1, len(filtered)):
-            if filtered[i] == filtered[i - 1]:
-                continue
-            pair = frozenset({filtered[i - 1], filtered[i]})
-            if pair == frozenset({'canonical', 'noncanonical'}):
-                can_ncan += 1
-            if 'satellite' in pair and pair & {'canonical', 'noncanonical'}:
-                tel_sat += 1
-            if 'arm' in pair and pair & {'canonical', 'noncanonical', 'ITS_TAR1'}:
-                arm_tel += 1
-
-        read_rates['total'].append(total / span_kb)
-        read_rates['can_ncan'].append(can_ncan / span_kb)
-        read_rates['tel_sat'].append(tel_sat / span_kb)
-        read_rates['arm_tel'].append(arm_tel / span_kb)
+    cluster_ann = seq_annotations[seq_annotations['sequence'].isin(cluster_reads)]
 
     result = {}
-    for key, values in read_rates.items():
-        result[key] = round(pd.Series(values).median(), 2) if values else 0.0
-    return result
-
-
-def compute_per_read_window_densities_bulk(read_ids, bed_df, window_size=1000):
-    """Compute per-read 1kb window density statistics for each feature.
-
-    Same computation as compute_cluster_window_densities, but returns per-read
-    stats instead of cluster medians.
-
-    Returns:
-        dict of {read_id: {feature: {'max': v, 'min': v, 'median': v,
-                 'first': v, 'last': v, 'terminal': v, 'terminal_min': v,
-                 'max_block': v}}}
-        Values are raw fractions (0-1) except max_block which is in bp.
-    """
-    import numpy as np
-
-    read_bed = bed_df[bed_df['read'].isin(read_ids)]
-    if len(read_bed) == 0:
-        return {}
-
-    result = {}
-
-    for read_id, read_records in read_bed.groupby('read'):
-        read_start = read_records['start'].min()
-        read_end = read_records['end'].max()
-        span = read_end - read_start
-
-        if span <= 0:
-            continue
-
-        read_result = {}
-
-        if span < window_size:
-            for feat, group in read_records.groupby('feature'):
-                events = np.zeros(span + 1, dtype=np.int32)
-                starts = group['start'].values - read_start
-                ends = np.minimum(group['end'].values - read_start, span)
-                np.add.at(events, starts, 1)
-                np.add.at(events, ends, -1)
-                coverage_arr = (np.cumsum(events[:span]) > 0).astype(np.int32)
-                frac = coverage_arr.sum() / span
-                read_result[feat] = {
-                    'max': frac, 'min': frac, 'median': frac,
-                    'first': frac, 'last': frac,
-                    'terminal': frac, 'terminal_min': frac,
-                    'max_block': _max_block_length(coverage_arr),
-                }
+    for key in ['total', 'can_ncan', 'tel_sat', 'arm_tel']:
+        col = f'interspersion_{key}'
+        if col in cluster_ann.columns:
+            vals = cluster_ann[col].tolist()
+            # Zero-pad for missing reads
+            n_pad = n_total - len(vals)
+            if n_pad > 0:
+                vals.extend([0] * n_pad)
+            result[key] = round(pd.Series(vals).median(), 2)
         else:
-            for feat, group in read_records.groupby('feature'):
-                events = np.zeros(span + 1, dtype=np.int32)
-                starts = group['start'].values - read_start
-                ends = np.minimum(group['end'].values - read_start, span)
-                np.add.at(events, starts, 1)
-                np.add.at(events, ends, -1)
-                coverage = (np.cumsum(events[:span]) > 0).astype(np.int32)
-
-                cumsum = np.empty(len(coverage) + 1, dtype=np.int64)
-                cumsum[0] = 0
-                np.cumsum(coverage, out=cumsum[1:])
-                window_sums = cumsum[window_size:] - cumsum[:-window_size]
-
-                first_val = coverage[:window_size].sum() / window_size
-                last_val = coverage[-window_size:].sum() / window_size
-                read_result[feat] = {
-                    'max': window_sums.max() / window_size,
-                    'min': window_sums.min() / window_size,
-                    'median': float(np.median(window_sums)) / window_size,
-                    'first': first_val,
-                    'last': last_val,
-                    'terminal': max(first_val, last_val),
-                    'terminal_min': min(first_val, last_val),
-                    'max_block': _max_block_length(coverage),
-                }
-
-        result[read_id] = read_result
-
-    return result
-
-
-def compute_per_read_interspersion_bulk(read_ids, bed_df):
-    """Compute per-read typed interspersion rates (transitions per kb).
-
-    Same computation as compute_cluster_interspersion, but returns per-read
-    stats instead of cluster medians.
-
-    Returns:
-        dict of {read_id: {'total': v, 'can_ncan': v, 'tel_sat': v, 'arm_tel': v}}
-    """
-    read_bed = bed_df[bed_df['read'].isin(read_ids)]
-    if len(read_bed) == 0:
-        return {}
-
-    result = {}
-
-    for read_id, read_records in read_bed.groupby('read'):
-        records = read_records.sort_values('start')
-        span_kb = (records['end'].max() - records['start'].min()) / 1000
-        if span_kb <= 0:
-            result[read_id] = {'total': 0.0, 'can_ncan': 0.0, 'tel_sat': 0.0, 'arm_tel': 0.0}
-            continue
-
-        categories = [classify_bed_feature(f) for f in records['feature']]
-
-        total = sum(
-            1 for i in range(1, len(categories))
-            if categories[i] != categories[i - 1]
-        )
-
-        filtered = [c for c in categories if c != 'other']
-        can_ncan = tel_sat = arm_tel = 0
-        for i in range(1, len(filtered)):
-            if filtered[i] == filtered[i - 1]:
-                continue
-            pair = frozenset({filtered[i - 1], filtered[i]})
-            if pair == frozenset({'canonical', 'noncanonical'}):
-                can_ncan += 1
-            if 'satellite' in pair and pair & {'canonical', 'noncanonical'}:
-                tel_sat += 1
-            if 'arm' in pair and pair & {'canonical', 'noncanonical', 'ITS_TAR1'}:
-                arm_tel += 1
-
-        result[read_id] = {
-            'total': round(total / span_kb, 2),
-            'can_ncan': round(can_ncan / span_kb, 2),
-            'tel_sat': round(tel_sat / span_kb, 2),
-            'arm_tel': round(arm_tel / span_kb, 2),
-        }
+            result[key] = 0.0
 
     return result
 
@@ -753,47 +443,21 @@ def normalize_representatives_by_length(cluster_candidates, n_per_cluster, targe
     return normalized
 
 
-def select_annotation_representatives(results, assignments, bed_data,
+def select_annotation_representatives(results, assignments, seq_annotations,
                                        featureset_prefix, n_reps):
     """Select annotation-aware representative reads for each cluster.
 
-    For each cluster:
-    1. Compute per-read densities and interspersion
-    2. Score every read against the cluster's annotation profile
-    3. Keep top 3*n_reps candidates
-    4. Normalize lengths across clusters
-
-    Args:
-        results: list of cluster annotation row dicts (from the main loop)
-        assignments: DataFrame with sequence, cluster, sample columns + read_span
-        bed_data: dict {featureset: DataFrame} of loaded BED data
-        featureset_prefix: e.g. 'telomere_region'
-        n_reps: number of representatives per cluster
-
-    Returns:
-        dict {cluster_id: [{'sequence': ..., 'read_span': ..., 'score': ..., 'rank': int}, ...]}
+    Uses pre-computed per-read density and interspersion data from sequence annotations
+    instead of recomputing from BED files.
     """
-    # Determine which BED to use for densities
-    density_fs = featureset_prefix
-    density_bed = bed_data.get(density_fs)
-    if density_bed is None:
-        # Fallback: try 'region'
-        density_fs = 'region'
-        density_bed = bed_data.get('region')
-    if density_bed is None:
-        print("  WARNING: No BED data available for representative scoring")
-        return {}
-
-    # BED for interspersion (always telomere_region or region)
-    interspersion_bed = bed_data.get('telomere_region', bed_data.get('region'))
+    pfx = featureset_prefix
 
     # Detect read_span column
     span_col = 'read_span' if 'read_span' in assignments.columns else 'read_length'
     if span_col not in assignments.columns:
-        # Fallback: estimate span from BED records
         span_col = None
 
-    # Compute global target length (median read_span across all reads)
+    # Compute global target length
     if 'read_span' in assignments.columns:
         global_median_span = float(assignments['read_span'].median())
     elif 'read_length' in assignments.columns:
@@ -802,9 +466,16 @@ def select_annotation_representatives(results, assignments, bed_data,
         global_median_span = None
 
     print(f"\n  Selecting {n_reps} annotation-aware representatives per cluster...")
-    print(f"  Using featureset '{density_fs}' for density scoring")
+    print(f"  Using featureset '{pfx}' for density scoring")
     if global_median_span:
         print(f"  Target read span (global median): {global_median_span:,.0f}bp")
+
+    # Detect feature names from columns
+    density_features = []
+    for col in seq_annotations.columns:
+        if col.startswith(f'{pfx}_dmax__'):
+            feat = col.split('__', 1)[1]
+            density_features.append(feat)
 
     cluster_candidates = {}
 
@@ -823,21 +494,39 @@ def select_annotation_representatives(results, assignments, bed_data,
         if span_col:
             for _, r in cluster_assignments.iterrows():
                 read_spans[r['sequence']] = r.get(span_col, 0)
-        else:
-            # Estimate from BED
-            read_bed = density_bed[density_bed['read'].isin(cluster_reads)]
-            for read_id, grp in read_bed.groupby('read'):
-                read_spans[read_id] = grp['end'].max() - grp['start'].min()
 
-        # Compute per-read stats
-        per_read_densities = compute_per_read_window_densities_bulk(
-            cluster_reads, density_bed)
+        # Extract per-read densities from pre-computed columns
+        cluster_ann = seq_annotations[seq_annotations['sequence'].isin(cluster_reads)]
+
+        per_read_densities = {}
+        for _, ann_row in cluster_ann.iterrows():
+            read_id = ann_row['sequence']
+            read_result = {}
+            for feat in density_features:
+                feat_stats = {}
+                for stat_key, col_key in [('max', 'dmax'), ('min', 'dmin'), ('median', 'dmedian'),
+                                           ('first', 'dfirst'), ('last', 'dlast'),
+                                           ('terminal', 'dterminal'), ('terminal_min', 'dterminal_min'),
+                                           ('max_block', 'max_block_bp')]:
+                    col = f'{pfx}_{col_key}__{feat}'
+                    if col in ann_row.index:
+                        feat_stats[stat_key] = ann_row[col]
+                    else:
+                        feat_stats[stat_key] = 0
+                if any(v != 0 for v in feat_stats.values()):
+                    read_result[feat] = feat_stats
+            per_read_densities[read_id] = read_result
+
         per_read_interspersion = {}
-        if interspersion_bed is not None:
-            per_read_interspersion = compute_per_read_interspersion_bulk(
-                cluster_reads, interspersion_bed)
+        for _, ann_row in cluster_ann.iterrows():
+            read_id = ann_row['sequence']
+            inter = {}
+            for key in ['total', 'can_ncan', 'tel_sat', 'arm_tel']:
+                col = f'interspersion_{key}'
+                inter[key] = ann_row.get(col, 0) if col in ann_row.index else 0
+            per_read_interspersion[read_id] = inter
 
-        # Score each read (feature score + length score → combined via geometric mean)
+        # Score each read
         scored = []
         for read_id in cluster_reads:
             read_dens = per_read_densities.get(read_id, {})
@@ -848,7 +537,6 @@ def select_annotation_representatives(results, assignments, bed_data,
             span = read_spans.get(read_id, 0)
             length_score = compute_length_score(span, global_median_span) if global_median_span else 1.0
 
-            # Geometric mean: jointly optimizes both — neither can be ignored
             combined = math.sqrt(score * length_score) if (score > 0 and length_score > 0) else 0.0
 
             scored.append({
@@ -859,7 +547,6 @@ def select_annotation_representatives(results, assignments, bed_data,
                 'combined': combined,
             })
 
-        # Sort by combined score descending, keep expanded candidate pool
         scored.sort(key=lambda x: x['combined'], reverse=True)
         cluster_candidates[cluster_id] = scored[:max(20, 5 * n_reps)]
 
@@ -881,7 +568,6 @@ def select_annotation_representatives(results, assignments, bed_data,
         max_rep_span = max(all_rep_spans)
         print(f"\n  Pass 2: re-targeting to longest representative ({max_rep_span:,.0f}bp)")
 
-        # Recompute combined scores using max_rep_span as target
         for cluster_id, candidates in cluster_candidates.items():
             for c in candidates:
                 c['length_score'] = compute_length_score(c['read_span'], max_rep_span)
@@ -951,10 +637,9 @@ def _print_params_and_command(args):
     params = [
         ("prefix", str(args.prefix), None),
         ("output", str(args.output), None),
-        ("bed-dir", str(args.bed_dir), None),
+        ("sequence-annotations", str(args.sequence_annotations), None),
+        ("adaptive-thresholds", _fmt(args.adaptive_thresholds, "adaptive_thresholds"), None),
         ("featuresets", _fmt(args.featuresets, "featuresets"), None),
-        ("database", _fmt(args.database, "database"), None),
-        ("smoothness", _fmt(args.smoothness, "smoothness"), None),
         ("top-n", _fmt(args.top_n, "top_n"), None),
         ("clusters", _fmt(args.clusters, "clusters"), None),
         ("min-size", _fmt(args.min_size, "min_size"), None),
@@ -1522,15 +1207,12 @@ def main():
 
     parser.add_argument("--prefix", required=True,
                         help="Analysis prefix (auto-finds {prefix}.read_assignments.tsv, {prefix}.cluster_analysis.tsv)")
-    parser.add_argument("--bed-dir", dest="bed_dir", required=True,
-                        help="Comma-separated base directories containing sample BED files")
+    parser.add_argument("--sequence-annotations", dest="sequence_annotations", required=True,
+                        help="Per-read sequence annotations TSV from KaryoScope_sequence_annotate.py")
+    parser.add_argument("--adaptive-thresholds", dest="adaptive_thresholds", default=None,
+                        help="Adaptive thresholds TSV (default: auto-derived from --sequence-annotations path)")
     parser.add_argument("--featuresets", default="region,subtelomeric,chromosome,acrocentric,repeat,gene",
                         help="Comma-separated featuresets to annotate (default: region,subtelomeric,chromosome,acrocentric,repeat,gene)")
-    parser.add_argument("--database", default="KS_human_CHM13",
-                        help="Database name (default: KS_human_CHM13)")
-    parser.add_argument("--smoothness", default="smoothed",
-                        choices=["smoothed", "presmoothed"],
-                        help="BED file smoothness (default: smoothed)")
     parser.add_argument("--output", "-o", required=True,
                         help="Output TSV file")
     parser.add_argument("--top-n", dest="top_n", type=int, default=3,
@@ -1677,59 +1359,51 @@ def main():
         exclude_patterns = [p.strip() for p in args.exclude_features.split(',') if p.strip()]
         print(f"\nExcluding features matching: {exclude_patterns}")
 
-    # Parse featuresets
+    # Load sequence annotations
+    print(f"\nLoading sequence annotations: {args.sequence_annotations}")
+    seq_annotations, detected_featuresets, feature_names_per_fs = load_sequence_annotations(args.sequence_annotations)
+
+    # Determine featuresets to use (intersection of requested and detected)
     featuresets = [fs.strip() for fs in args.featuresets.split(',')]
-    print(f"\nFeaturesets to annotate: {featuresets}")
+    available_featuresets = [fs for fs in featuresets if fs in detected_featuresets]
+    missing_featuresets = [fs for fs in featuresets if fs not in detected_featuresets]
+    if missing_featuresets:
+        print(f"  WARNING: Requested featuresets not in annotations: {missing_featuresets}")
+    featuresets = available_featuresets
+    print(f"  Featuresets to annotate: {featuresets}")
 
-    # Parse bed directories (comma-separated)
-    bed_dirs = [d.strip() for d in args.bed_dir.split(',')]
+    feature_names = {fs: feature_names_per_fs[fs] for fs in featuresets}
 
-    # Find BED files for each featureset
-    print(f"\nFinding BED files in: {bed_dirs}")
-    beds_by_featureset = find_featureset_beds(
-        bed_dirs, samples, featuresets, args.database, args.smoothness
-    )
+    # Load adaptive thresholds
+    if args.adaptive_thresholds:
+        thresh_path = args.adaptive_thresholds
+    else:
+        # Auto-derive from sequence-annotations path
+        sa_prefix = args.sequence_annotations[:-4] if args.sequence_annotations.endswith('.tsv') else args.sequence_annotations
+        thresh_path = f"{sa_prefix}.adaptive_thresholds.tsv"
 
-    # Load BED data for each featureset
-    bed_data = {}
-    for fs in featuresets:
-        bed_files = beds_by_featureset[fs]
-        if not bed_files:
-            print(f"  WARNING: No BED files found for featureset '{fs}'")
-            continue
-
-        print(f"\n  Loading {fs}: {len(bed_files)} files")
-        all_data = []
-        for bf in bed_files:
-            df = load_bed_file(bf)
-            all_data.append(df)
-
-        bed_data[fs] = pd.concat(all_data, ignore_index=True)
-        print(f"    Total records: {len(bed_data[fs])}")
-
-    if not bed_data:
-        print("ERROR: No BED data loaded")
-        sys.exit(1)
-
-    # Compute per-read feature fractions and adaptive thresholds
-    feature_fractions = {}
     feature_thresholds = {}
-    feature_names = {}  # sorted feature names per featureset
-    for fs in featuresets:
-        if fs not in bed_data:
-            continue
-        fractions = compute_read_feature_fractions(bed_data[fs])
-        thresholds = compute_adaptive_thresholds(fractions)
-        feature_fractions[fs] = fractions
-        feature_thresholds[fs] = thresholds
-        feature_names[fs] = sorted(thresholds.keys())
-
-        # Print threshold summary
-        print(f"\n  Feature thresholds for {fs}:")
-        for feat in feature_names[fs]:
-            nonzero = fractions[feat][fractions[feat] > 0]
-            med = nonzero.median() if len(nonzero) > 0 else 0
-            print(f"    {feat}: {thresholds[feat]*100:.2f}% (median {med*100:.1f}%)")
+    if os.path.exists(thresh_path):
+        print(f"\nLoading adaptive thresholds: {thresh_path}")
+        feature_thresholds = load_adaptive_thresholds(thresh_path)
+        for fs in featuresets:
+            if fs in feature_thresholds:
+                print(f"  {fs}: {len(feature_thresholds[fs])} features")
+    else:
+        print(f"\nWARNING: Adaptive thresholds not found: {thresh_path}")
+        print("  Will compute thresholds from sequence annotations")
+        # Fallback: compute from frac columns
+        for fs in featuresets:
+            feature_thresholds[fs] = {}
+            for feat in feature_names.get(fs, []):
+                col = f'{fs}_frac__{feat}'
+                if col in seq_annotations.columns:
+                    nonzero = seq_annotations[col][seq_annotations[col] > 0]
+                    if len(nonzero) == 0:
+                        feature_thresholds[fs][feat] = 0.001
+                    else:
+                        med = nonzero.median()
+                        feature_thresholds[fs][feat] = max(0.001, min(0.05, med / 3))
 
     # Determine clusters to analyze
     clusters = sorted(assignments['cluster'].unique())
@@ -1783,9 +1457,10 @@ def main():
                 else:
                     row[col] = val
 
-        # Interspersion metrics (telomere_region featureset)
-        if 'telomere_region' in bed_data:
-            interspersion = compute_cluster_interspersion(cluster_reads, bed_data['telomere_region'])
+        # Interspersion metrics
+        has_interspersion = 'interspersion_total' in seq_annotations.columns
+        if has_interspersion:
+            interspersion = compute_cluster_interspersion(cluster_reads, seq_annotations)
             row['interspersion_total'] = interspersion['total']
             row['interspersion_can_ncan'] = interspersion['can_ncan']
             row['interspersion_tel_sat'] = interspersion['tel_sat']
@@ -1793,17 +1468,15 @@ def main():
 
         # Annotate each featureset
         for fs in featuresets:
-            if fs in bed_data:
-                row[f'{fs}_top'] = summarize_featureset(cluster_reads, bed_data[fs], args.top_n, exclude_patterns)
+            row[f'{fs}_top'] = summarize_featureset(cluster_reads, seq_annotations, fs, args.top_n, exclude_patterns)
             # Per-feature columns: read-presence, bp-level, window densities
             scores = {}
             bp_scores = {}
             window_densities = {}
-            if fs in feature_fractions:
-                scores = score_cluster_features(cluster_reads, feature_fractions[fs], feature_thresholds[fs])
-            if fs in bed_data:
-                bp_scores = compute_cluster_bp_scores(cluster_reads, bed_data[fs])
-                window_densities = compute_cluster_window_densities(cluster_reads, bed_data[fs])
+            if fs in feature_thresholds:
+                scores = score_cluster_features(cluster_reads, seq_annotations, fs, feature_thresholds[fs])
+            bp_scores = compute_cluster_bp_scores(cluster_reads, seq_annotations, fs)
+            window_densities = compute_cluster_window_densities(cluster_reads, seq_annotations, fs, feature_names.get(fs, []))
             for feat in feature_names.get(fs, []):
                 row[f'{fs}_readpct__{feat}'] = scores.get(feat, 0)
                 row[f'{fs}_bppct__{feat}'] = bp_scores.get(feat, 0)
@@ -1818,10 +1491,10 @@ def main():
                 row[f'{fs}_max_block_bp__{feat}'] = feat_wd.get('max_block', 0)
 
         if args.auto_label:
-            if 'telomere_region' not in bed_data and 'region' not in bed_data:
+            if 'telomere_region' not in featuresets and 'region' not in featuresets:
                 print("ERROR: --auto-label requires 'telomere_region' or 'region' in --featuresets")
                 sys.exit(1)
-            pfx = 'telomere_region' if 'telomere_region' in bed_data else 'region'
+            pfx = 'telomere_region' if 'telomere_region' in featuresets else 'region'
             row['cluster_name'] = auto_label_cluster(row, pfx)
 
             # Type I ALT relabeling: prepend "Type I ALT" for ALT-enriched clusters
@@ -1846,9 +1519,9 @@ def main():
     # --- Annotation-aware representative selection ---
     if args.select_representatives:
         n_reps = args.select_representatives
-        pfx_for_reps = 'telomere_region' if 'telomere_region' in bed_data else 'region'
+        pfx_for_reps = 'telomere_region' if 'telomere_region' in featuresets else featuresets[0] if featuresets else 'region'
         normalized_reps = select_annotation_representatives(
-            results, assignments, bed_data, pfx_for_reps, n_reps)
+            results, assignments, seq_annotations, pfx_for_reps, n_reps)
 
         # Add columns: representative_read_1, representative_read_2, ..., representative_read_N
         for rank in range(1, n_reps + 1):

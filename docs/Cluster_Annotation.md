@@ -2,15 +2,23 @@
 
 ## Overview
 
-`KaryoScope_cluster_annotate.py` takes the output of `KaryoScope_cluster_analysis.py` and annotates each cluster with structural metrics derived from the raw BED feature data. It computes density profiles, coverage statistics, interspersion rates, and optionally assigns automatic cluster names via a rule-based decision tree.
+`KaryoScope_cluster_annotate.py` takes pre-computed per-read annotations from `KaryoScope_sequence_annotate.py` and aggregates them to cluster-level structural metrics. It computes density profiles, coverage statistics, interspersion rates, and optionally assigns automatic cluster names via a rule-based decision tree.
+
+### Two-Step Pipeline
+
+The annotation pipeline is split into two steps:
+
+1. **`KaryoScope_sequence_annotate.py`**: Computes per-read feature metrics from raw BED files (resource-intensive, run once). See [Sequence Annotation](Sequence_Annotation.md).
+2. **`KaryoScope_cluster_annotate.py`** (this script): Aggregates per-read metrics to cluster-level annotations (lightweight, can be re-run).
 
 ### Inputs
 
 | Input | Source | Description |
 |-------|--------|-------------|
-| `--prefix` | cluster_analysis output | Path prefix for `.sequence_assignments.tsv` and `.cluster_analysis.tsv` |
-| `--bed-dir` | KaryoScope BED output | Directories containing per-sample BED files |
+| `--prefix` | cluster_analysis output | Path prefix for `.read_assignments.tsv` and `.cluster_analysis.tsv` |
+| `--sequence-annotations` | sequence_annotate output | Per-read annotations TSV from `KaryoScope_sequence_annotate.py` |
 | `--output` | User-specified | Output TSV path |
+| `--adaptive-thresholds` | (optional) | Thresholds TSV (auto-derived from `--sequence-annotations` path by default) |
 
 ### Output
 
