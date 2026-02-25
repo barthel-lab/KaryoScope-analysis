@@ -205,9 +205,18 @@ def draw_dynamic_scale_bar(frame, zoom, ratio, padding_x=20, padding_y=20,
         width=1,
     )
 
+    # Rotated label
     label = f"{nice_bp // 1000} Kbp" if nice_bp >= 1000 else f"{nice_bp} bp"
     font = _load_font(14)
-    draw_ctx.text((bar_x + 10, bar_y + 2), label, fill=text_color, font=font)
+    bbox = font.getbbox(label)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    txt_img = Image.new('RGBA', (tw + 4, th + 4), (0, 0, 0, 0))
+    txt_draw = ImageDraw.Draw(txt_img)
+    txt_draw.text((2, 2), label, fill=text_color + (255,), font=font)
+    txt_rotated = txt_img.rotate(90, expand=True)
+    label_x = max(0, bar_x - 3 - txt_rotated.width)
+    label_y = bar_y + (actual_height - txt_rotated.height) // 2
+    frame.paste(txt_rotated, (label_x, label_y), txt_rotated)
 
 
 # ─── Adaptive zoom helpers ───────────────────────────────────────────────────
@@ -642,6 +651,7 @@ def create_horizontal_panning(
     input_path, output_path, duration, fps, crop_ratio,
     viewport_width, viewport_height,
     scale_bar_path, legend_path, background, scale_bar_padding,
+    ratio=0,
 ):
     """Seamless horizontal panning animation (fixed zoom)."""
 
@@ -700,8 +710,21 @@ def create_horizontal_panning(
     last_stream = "panning"
     input_idx += 1
 
-    if scale_bar_path and os.path.exists(scale_bar_path):
-        inputs.extend(["-i", scale_bar_path])
+    if scale_bar_path and ratio > 0:
+        # Draw scale bar at viewport scale (matching how source is displayed)
+        zoom = viewport_height / crop_height
+        text_color = (255, 255, 255) if background == "black" else (0, 0, 0)
+        bg_rgb = (0, 0, 0) if background == "black" else (255, 255, 255)
+        sb_img = Image.new("RGB", (60, viewport_height), bg_rgb)
+        draw_dynamic_scale_bar(sb_img, zoom, ratio,
+                               padding_x=45, padding_y=scale_bar_padding,
+                               target_height=min(150, viewport_height // 4),
+                               text_color=text_color)
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            sb_path = tmp.name
+            temp_files.append(sb_path)
+            sb_img.save(sb_path, "PNG")
+        inputs.extend(["-i", sb_path])
         overlay_filter = (
             f"[{last_stream}][{input_idx}:v]overlay="
             f"{scale_bar_padding}:{scale_bar_padding}[with_scale]"
@@ -709,7 +732,7 @@ def create_horizontal_panning(
         filter_parts.append(overlay_filter)
         last_stream = "with_scale"
         input_idx += 1
-        print(f"  Adding scale bar: {scale_bar_path}")
+        print(f"  Adding scale bar (drawn at zoom={zoom:.3f})")
 
     if legend_path and os.path.exists(legend_path):
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
@@ -732,8 +755,11 @@ def create_horizontal_panning(
         lw, lh = legend_img.size
         if lw != viewport_width:
             s = viewport_width / lw
+            new_h = int(lh * s)
+            # Ensure even height for x264 compatibility after vstack
+            new_h = new_h + (new_h % 2)
             legend_img = legend_img.resize(
-                (viewport_width, int(lh * s)), Image.Resampling.LANCZOS
+                (viewport_width, new_h), Image.Resampling.LANCZOS
             )
 
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
@@ -780,6 +806,7 @@ def create_vertical_panning(
     input_path, output_path, duration, fps,
     viewport_width, viewport_height,
     scale_bar_path, legend_path, background, scale_bar_padding,
+    ratio=0,
 ):
     """Seamless vertical panning animation (fixed zoom)."""
 
@@ -832,8 +859,21 @@ def create_vertical_panning(
     last_stream = "panning"
     input_idx += 1
 
-    if scale_bar_path and os.path.exists(scale_bar_path):
-        inputs.extend(["-i", scale_bar_path])
+    if scale_bar_path and ratio > 0:
+        # Draw scale bar at viewport scale (matching how source is displayed)
+        zoom = scale_factor  # = viewport_width / orig_width
+        text_color = (255, 255, 255) if background == "black" else (0, 0, 0)
+        bg_rgb = (0, 0, 0) if background == "black" else (255, 255, 255)
+        sb_img = Image.new("RGB", (60, viewport_height), bg_rgb)
+        draw_dynamic_scale_bar(sb_img, zoom, ratio,
+                               padding_x=45, padding_y=scale_bar_padding,
+                               target_height=min(150, viewport_height // 4),
+                               text_color=text_color)
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            sb_path = tmp.name
+            temp_files.append(sb_path)
+            sb_img.save(sb_path, "PNG")
+        inputs.extend(["-i", sb_path])
         overlay_filter = (
             f"[{last_stream}][{input_idx}:v]overlay="
             f"{scale_bar_padding}:{scale_bar_padding}[with_scale]"
@@ -841,7 +881,7 @@ def create_vertical_panning(
         filter_parts.append(overlay_filter)
         last_stream = "with_scale"
         input_idx += 1
-        print(f"  Adding scale bar: {scale_bar_path}")
+        print(f"  Adding scale bar (drawn at zoom={zoom:.3f})")
 
     if legend_path and os.path.exists(legend_path):
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
@@ -864,8 +904,11 @@ def create_vertical_panning(
         lw, lh = legend_img.size
         if lh != viewport_height:
             s = viewport_height / lh
+            new_w = int(lw * s)
+            # Ensure even width for x264 compatibility after hstack
+            new_w = new_w + (new_w % 2)
             legend_img = legend_img.resize(
-                (int(lw * s), viewport_height), Image.Resampling.LANCZOS
+                (new_w, viewport_height), Image.Resampling.LANCZOS
             )
 
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
