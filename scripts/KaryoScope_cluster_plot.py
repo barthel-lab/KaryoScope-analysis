@@ -40,6 +40,7 @@ import fnmatch
 import glob
 import gzip
 import os
+import subprocess
 import sys
 from collections import defaultdict, OrderedDict
 from math import floor
@@ -55,6 +56,19 @@ import matplotlib
 import matplotlib.colors as mcolors
 import numpy as np
 import pandas as pd
+
+
+def _svg_to_png(svg_path):
+    """Convert SVG to PNG using rsvg-convert."""
+    png_path = svg_path.rsplit('.svg', 1)[0] + '.png'
+    try:
+        subprocess.run(['rsvg-convert', '-z', '4', '-f', 'png', '-o', png_path, svg_path],
+                       check=True, capture_output=True)
+        print(f"  Exported PNG: {png_path}")
+    except FileNotFoundError:
+        print(f"  Warning: rsvg-convert not found, skipping PNG export")
+    except subprocess.CalledProcessError as e:
+        print(f"  Warning: PNG export failed: {e.stderr.decode().strip()}")
 
 
 # =============================================================================
@@ -110,8 +124,13 @@ def parse_args():
 
     # Display options
     parser.add_argument("--background", dest="background_color", default="black",
-                        choices=["white", "black"],
+                        choices=["white", "black", "both"],
                         help="Background color for the SVG (default: black)")
+    parser.add_argument("--png", dest="png", action="store_true", default=False,
+                        help="Also export PNG alongside SVG (requires rsvg-convert)")
+    parser.add_argument("--dendro-cut", dest="dendro_cut", type=str, default=None,
+                        help="Cut dendrogram into groups and add extra spacing. "
+                             "Use 'n:K' for K groups or a number for distance threshold (e.g. 32)")
     parser.add_argument("--bar-width", dest="bar_width", type=int, default=8,
                         help="Width of each feature bar in pixels (default: 8)")
     parser.add_argument("--bar-spacing", dest="bar_spacing", type=int, default=0,
@@ -148,6 +167,8 @@ def parse_args():
     # Cluster filtering
     parser.add_argument("--max-qvalue", dest="max_qvalue", type=float, default=None,
                         help="Filter to clusters with q_value <= this threshold (e.g., 0.05 for significant only)")
+    parser.add_argument("--filter-enrichment", dest="filter_enrichment", nargs='+', default=None,
+                        help="Show only clusters matching these enrichment labels (e.g., U2OS-enriched mixed)")
 
     # Mode options
     parser.add_argument("--show-dendrogram", dest="show_dendrogram", action="store_true",
@@ -265,6 +286,7 @@ def _print_params_and_command(args, database, featuresets, background_color):
         ("curated-reps", _fmt(args.curated_reps, "curated_reps"), None),
         ("n-per-cluster", _fmt(args.max_reps, "max_reps"), None),
         ("max-qvalue", _fmt(args.max_qvalue, "max_qvalue"), None),
+        ("filter-enrichment", _fmt(args.filter_enrichment, "filter_enrichment"), None),
         ("vertical", _fmt(args.vertical, "vertical"), None),
         ("show-matrix", _fmt(args.show_matrix, "show_matrix"), None),
         ("column-tracks", _fmt(args.column_tracks, "column_tracks"), None),
@@ -374,7 +396,7 @@ def load_cluster_labels(labels_file, label_column="curated_annotation"):
     return labels
 
 
-def load_cluster_analysis(cluster_analysis_file, max_qvalue=None):
+def load_cluster_analysis(cluster_analysis_file, max_qvalue=None, filter_enrichment=None):
     """Load cluster analysis results to get enrichment info and cluster order.
 
     Args:
@@ -405,6 +427,11 @@ def load_cluster_analysis(cluster_analysis_file, max_qvalue=None):
                 n_before = len(df)
                 df = df[df['q_value'] <= max_qvalue]
                 print(f"  Filtered to {len(df)} significant clusters (q_value <= {max_qvalue}, was {n_before})")
+
+            if filter_enrichment is not None and 'enrichment' in df.columns:
+                n_before = len(df)
+                df = df[df['enrichment'].isin(filter_enrichment)]
+                print(f"  Filtered to {len(df)} clusters matching enrichment {filter_enrichment} (was {n_before})")
 
             cluster_df = df.copy()  # Keep original for feature info
 
@@ -1397,9 +1424,11 @@ def compute_cluster_dendrogram_order(feature_matrix_data, cluster_reads):
                 if len(children) != 2:
                     # Handle non-binary nodes by sequential merging
                     left_id, left_h, left_c = get_node_info(children[0])
-                    for child in children[1:]:
+                    for i, child in enumerate(children[1:], 1):
                         right_id, right_h, right_c = get_node_info(child)
-                        height = max(left_h, right_h) + (clade.branch_length or 0.1)
+                        # Reconstruct height from children's branch lengths
+                        left_bl = children[i - 1].branch_length if i == 1 else 0
+                        height = max(left_h + (left_bl or 0), right_h + (child.branch_length or 0))
                         linkage_rows.append([left_id, right_id, height, left_c + right_c])
                         left_id = node_counter[0]
                         node_counter[0] += 1
@@ -1410,8 +1439,11 @@ def compute_cluster_dendrogram_order(feature_matrix_data, cluster_reads):
                 left_id, left_h, left_c = get_node_info(children[0])
                 right_id, right_h, right_c = get_node_info(children[1])
 
-                # Height is the max child height plus branch length
-                height = max(left_h, right_h) + (clade.branch_length or 0.1)
+                # Reconstruct height from children's branch lengths (not clade's own)
+                height = max(
+                    left_h + (children[0].branch_length or 0),
+                    right_h + (children[1].branch_length or 0)
+                )
                 linkage_rows.append([left_id, right_id, height, left_c + right_c])
 
                 new_id = node_counter[0]
@@ -2071,7 +2103,8 @@ def draw_cluster_brackets(d, cluster_reads, cluster_x_start, cluster_x_end,
 # =============================================================================
 
 def draw_cluster_dendrogram_vertical(d, cluster_dendro_data, cluster_y_start, cluster_y_end,
-                                     left_margin, dendrogram_width, background_color):
+                                     left_margin, dendrogram_width, background_color,
+                                     cut_distance=None):
     """Draw cluster-level dendrogram on the LEFT side for vertical mode.
 
     Clusters are arranged vertically, dendrogram branches extend horizontally from left.
@@ -2194,6 +2227,58 @@ def draw_cluster_dendrogram_vertical(d, cluster_dendro_data, cluster_y_start, cl
         d.append(draw.Line(x_left, y1, x_left, y2, stroke=line_color, stroke_width=1))
 
     print(f"  Drew vertical dendrogram for {n_clusters} clusters")
+
+    return max_distance, dendro_base_x, dendrogram_width
+
+
+def draw_dendrogram_scale_axis(d, max_distance, dendro_base_x, dendrogram_width,
+                                axis_y, background_color, n_ticks=5):
+    """Draw a horizontal scale axis for the dendrogram showing genetic distance.
+
+    Args:
+        d: Drawing object
+        max_distance: Maximum distance value in the linkage
+        dendro_base_x: X coordinate where leaves attach (rightmost)
+        dendrogram_width: Total pixel width of dendrogram area
+        axis_y: Y coordinate for the axis
+        background_color: Background color for contrast
+        n_ticks: Number of tick marks
+    """
+    line_color = '#000000' if background_color == 'white' else '#FFFFFF'
+    usable_width = dendrogram_width - 15
+
+    def distance_to_x(dist):
+        return dendro_base_x - (dist / max_distance) * usable_width
+
+    x_start = distance_to_x(max_distance)
+    x_end = distance_to_x(0)
+
+    # Axis line
+    d.append(draw.Line(x_start, axis_y, x_end, axis_y, stroke=line_color, stroke_width=1))
+
+    # Tick marks and labels
+    for i in range(n_ticks + 1):
+        dist_val = max_distance * i / n_ticks
+        x = distance_to_x(dist_val)
+        d.append(draw.Line(x, axis_y, x, axis_y - 4, stroke=line_color, stroke_width=1))
+        # Format label
+        if max_distance >= 10:
+            label = f"{dist_val:.0f}"
+        elif max_distance >= 1:
+            label = f"{dist_val:.1f}"
+        else:
+            label = f"{dist_val:.2f}"
+        d.append(draw.Text(
+            label, font_size=7, x=x, y=axis_y - 7,
+            fill=line_color, font_family='sans-serif', text_anchor='middle'
+        ))
+
+    # Axis label
+    mid_x = (x_start + x_end) / 2
+    d.append(draw.Text(
+        'Cluster Distance', font_size=7, x=mid_x, y=axis_y - 16,
+        fill=line_color, font_family='sans-serif', text_anchor='middle'
+    ))
 
 
 def smooth_features_to_pixels(colored_features, bar_length, ratio, oversample=1):
@@ -2581,7 +2666,7 @@ def draw_feature_bars_column_mode(d, drawing_data, featuresets, bar_width, read_
 
 def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_metadata,
                        read_assignments_file, x_start, cell_width, cell_height, text_color,
-                       background_color='black', sample_display_names=None):
+                       background_color='black', sample_display_names=None, header_y=None):
     """Draw sample × cluster read count matrix for vertical mode.
 
     Uses FULL cluster read counts from read_assignments file, not just representatives.
@@ -2750,7 +2835,8 @@ def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_me
     total_matrix_width = current_x
 
     # Draw column headers (rotated sample names)
-    header_y = min(cluster_y_start.values()) - 5 if cluster_y_start else 30
+    if header_y is None:
+        header_y = min(cluster_y_start.values()) - 5 if cluster_y_start else 30
     for sample in all_samples:
         x = x_start + sample_x_positions[sample] + cell_width / 2
 
@@ -2931,6 +3017,7 @@ def draw_matrix_legend(d, x_start, y_start, max_count, text_color='white', backg
     ))
 
 
+
 def draw_sample_bar_plot(d, matrix_data, cluster_ids, cluster_enrichments, x_start, y_start,
                           cell_width, bar_height, text_color, background_color='black',
                           sample_colors=None):
@@ -3043,7 +3130,7 @@ def draw_sample_bar_plot(d, matrix_data, cluster_ids, cluster_enrichments, x_sta
 
 def draw_cluster_bar_plot(d, matrix_data, cluster_ids, cluster_y_start, cluster_y_end,
                           cluster_enrichments, x_start, bar_max_width, text_color, background_color='black',
-                          sample_colors=None):
+                          sample_colors=None, axis_y=None):
     """Draw horizontal stacked bar plot showing reads per sample per cluster (row sums).
 
     Args:
@@ -3105,7 +3192,8 @@ def draw_cluster_bar_plot(d, matrix_data, cluster_ids, cluster_y_start, cluster_
                 current_x += bar_width
 
     # Draw axis line on top
-    axis_y = min(cluster_y_start.values()) - 5
+    if axis_y is None:
+        axis_y = min(cluster_y_start.values()) - 5
     d.append(draw.Line(
         x_start, axis_y, x_start + bar_max_width, axis_y,
         stroke=text_color, stroke_width=1
@@ -3208,26 +3296,35 @@ def draw_sample_dendrogram(d, matrix_data, x_start, y_bottom, dendro_height, lin
 
 def draw_cluster_labels_vertical(d, cluster_y_start, cluster_y_end, x_start, text_color,
                                   cluster_labels=None, enrichment_colors=None, cluster_enrichments=None,
-                                  enrichment_display_names=None):
+                                  enrichment_display_names=None, cluster_bar_end_x=None):
     """Draw cluster labels on the RIGHT side for vertical mode (names only, no brackets).
 
     Args:
         d: Drawing object
         cluster_y_start: Dict of cluster_id -> y start position
         cluster_y_end: Dict of cluster_id -> y end position
-        x_start: X position for labels
+        x_start: X position for labels (fallback when cluster_bar_end_x not provided)
         text_color: Default text color
         cluster_labels: Dict of cluster_id -> custom label text
         enrichment_colors: Optional dict of enrichment -> color for coloring labels
         cluster_enrichments: Optional dict of cluster_id -> enrichment for coloring
+        cluster_bar_end_x: Optional dict of cluster_id -> x position of bar end
     """
     if cluster_labels is None:
         cluster_labels = {}
+
+    label_gap = 8
 
     for cluster_id in cluster_y_start:
         y_start = cluster_y_start[cluster_id]
         y_end = cluster_y_end[cluster_id]
         label_y = (y_start + y_end) / 2
+
+        # Position label at end of this cluster's bar, or fall back to fixed x
+        if cluster_bar_end_x and cluster_id in cluster_bar_end_x:
+            label_x = cluster_bar_end_x[cluster_id] + label_gap
+        else:
+            label_x = x_start
 
         # Get label text - include cluster ID in parenthesis for named clusters
         if cluster_id in cluster_labels and cluster_labels[cluster_id]:
@@ -3244,7 +3341,7 @@ def draw_cluster_labels_vertical(d, cluster_y_start, cluster_y_end, x_start, tex
 
         d.append(draw.Text(
             label_text,
-            font_size=9, x=x_start, y=label_y + 3,
+            font_size=9, x=label_x, y=label_y + 3,
             fill=color, font_family='sans-serif',
             text_anchor='start', font_weight='bold'
         ))
@@ -3279,7 +3376,7 @@ def draw_read_index_labels(d, cluster_reads, read_y_positions, x_position, bar_w
 
 
 def draw_enrichment_bubbles(d, cluster_y_start, cluster_y_end, x_center, cluster_stats,
-                            max_radius=8, min_radius=2):
+                            max_radius=8, min_radius=2, background_color='black'):
     """Draw enrichment bubbles next to tree tips in vertical mode.
 
     Args:
@@ -3290,6 +3387,7 @@ def draw_enrichment_bubbles(d, cluster_y_start, cluster_y_end, x_center, cluster
         cluster_stats: Dict of cluster_id -> {'odds_ratio': float, 'size': int, 'q_value': float}
         max_radius: Maximum bubble radius in pixels
         min_radius: Minimum bubble radius in pixels
+        background_color: Background color for stroke contrast
 
     Bubble encoding:
         - Color: log2(odds_ratio) mapped to diverging colormap (blue=Normal, red=Tumor)
@@ -3368,10 +3466,11 @@ def draw_enrichment_bubbles(d, cluster_y_start, cluster_y_end, x_center, cluster
         alpha = neg_log_q / 10
 
         # Draw the bubble
+        stroke_color = '#000000' if background_color == 'white' else '#FFFFFF'
         d.append(draw.Circle(
             x_center, y_center, radius,
             fill=color, fill_opacity=alpha,
-            stroke='white', stroke_width=0.5
+            stroke=stroke_color, stroke_width=0.5
         ))
 
 
@@ -3432,7 +3531,7 @@ def _compute_bubble_style(pct, pval, odds, base_color, bubble_radius, max_log2_o
 def draw_enrichment_grid(d, cluster_pos_start, cluster_pos_end, grid_start, cluster_stats,
                          sample_colors, bubble_radius=6, bubble_spacing=2,
                          orientation='vertical', text_color='white', draw_labels=False,
-                         sample_order=None):
+                         sample_order=None, background_color='black'):
     """Draw a grid of enrichment bubbles showing per-sample statistics.
 
     Supports both vertical (clusters as rows) and horizontal (clusters as columns) layouts.
@@ -3515,10 +3614,11 @@ def draw_enrichment_grid(d, cluster_pos_start, cluster_pos_end, grid_start, clus
             else:
                 x_center, y_center = cluster_center, sample_pos
 
+            stroke_color = '#000000' if background_color == 'white' else '#FFFFFF'
             d.append(draw.Circle(
                 x_center, y_center, radius,
                 fill=color, fill_opacity=alpha,
-                stroke='white', stroke_width=0.3
+                stroke=stroke_color, stroke_width=0.3
             ))
 
     return grid_size, sample_order
@@ -3863,7 +3963,7 @@ def draw_grid_legend_vertical(d, x_start, y_start, sample_order, sample_colors,
         r = bubble_radius * scale
         cx = x_start + 3 + swatch_size / 2
         d.append(draw.Circle(cx, current_y - swatch_size / 2, r,
-                             fill='#888888', stroke='white', stroke_width=0.3))
+                             fill='#888888', stroke=text_color, stroke_width=0.3))
         d.append(draw.Text(label, font_size=7, x=x_start + swatch_size + 6,
                            y=current_y - swatch_size / 2 + 1,
                            fill=text_color, font_family='sans-serif',
@@ -3882,7 +3982,7 @@ def draw_grid_legend_vertical(d, x_start, y_start, sample_order, sample_colors,
         cx = x_start + 3 + swatch_size / 2
         d.append(draw.Circle(cx, current_y - swatch_size / 2, bubble_radius * 0.7,
                              fill='#888888', fill_opacity=alpha,
-                             stroke='white', stroke_width=0.3))
+                             stroke=text_color, stroke_width=0.3))
         d.append(draw.Text(label, font_size=7, x=x_start + swatch_size + 6,
                            y=current_y - swatch_size / 2 + 1,
                            fill=text_color, font_family='sans-serif',
@@ -3895,7 +3995,7 @@ def draw_grid_legend_vertical(d, x_start, y_start, sample_order, sample_colors,
         fill=text_color, font_family='sans-serif', font_style='italic'
     ))
 
-    # Draw vertical diverging gradient bar: blue (top) -> white -> red (bottom)
+    # Draw vertical gradient bar: white (top, 0) -> red (bottom, 4)
     current_y += 4
     bar_width = swatch_size + 4
     bar_height = 50
@@ -3904,21 +4004,22 @@ def draw_grid_legend_vertical(d, x_start, y_start, sample_order, sample_colors,
     n_steps = 50
     step_h = bar_height / n_steps
     for i in range(n_steps):
-        t = (i / (n_steps - 1)) * 2 - 1  # -1 (blue/top) to 1 (red/bottom)
-        if t > 0:
-            r, g, b = 255, int(255 * (1 - t)), int(255 * (1 - t))
-        elif t < 0:
-            s = -t
-            r, g, b = int(255 * (1 - s)), int(255 * (1 - s)), 255
-        else:
-            r, g, b = 255, 255, 255
+        t = i / (n_steps - 1)  # 0 (white/top) to 1 (red/bottom)
+        r = 255
+        g = int(255 * (1 - t))
+        b = int(255 * (1 - t))
         d.append(draw.Rectangle(
             bar_x, bar_y + i * step_h, bar_width, step_h + 0.5,
             fill=f'rgb({r},{g},{b})', stroke='none'
         ))
+    # Border around gradient bar
+    d.append(draw.Rectangle(
+        bar_x, bar_y, bar_width, bar_height,
+        fill='none', stroke=text_color, stroke_width=0.5
+    ))
     # Tick labels on the right side
     label_x = bar_x + bar_width + 4
-    for val, yfrac in [("-4", 0.0), ("0", 0.5), ("+4", 1.0)]:
+    for val, yfrac in [("0", 0.0), ("2", 0.5), ("4", 1.0)]:
         ty = bar_y + yfrac * bar_height + 1
         d.append(draw.Text(val, font_size=7, x=label_x, y=ty,
                            fill=text_color, font_family='sans-serif',
@@ -3953,7 +4054,7 @@ def draw_enrichment_text_legend_vertical(d, x_start, y_start, enrichment_colors,
         current_y += item_height
         d.append(draw.Rectangle(
             x_start + 3, current_y - swatch_size, swatch_size, swatch_size,
-            fill=color
+            fill=color, stroke=text_color, stroke_width=0.5
         ))
         label = enrichment_display_names.get(enrichment, enrichment) if enrichment_display_names else enrichment
         d.append(draw.Text(label, font_size=7, x=x_start + swatch_size + 6,
@@ -4654,7 +4755,7 @@ def draw_color_legends_vertical(d, featuresets, featureset_colors, featureset_co
             # Color swatch
             d.append(draw.Rectangle(
                 legend_x + 3, current_y - swatch_size, swatch_size, swatch_size,
-                fill=color_hex
+                fill=color_hex, stroke=text_color, stroke_width=0.5
             ))
 
             # Label
@@ -4871,19 +4972,21 @@ def plot_structural_mode(args, matrix_data):
     margin_y = 60
     
     out_base = args.output[:-4] if args.output.endswith('.svg') else args.output
-    
-    chrom_drawings = [] # Store (drawing, height, width)
+    bg_themes = ['black', 'white'] if args.background_color == 'both' else [args.background_color]
+
     padding = 60
-    
+
     # Priority samples list
     priority_samples = []
     if getattr(args, 'priority_samples', None):
         priority_samples = [s.strip() for s in args.priority_samples.split(',')]
-        
+
+    # --- Pre-compute data for each chromosome (theme-independent) ---
+    chrom_data = []  # list of dicts with precomputed data per chromosome
     for chrom in chromosomes:
         chrom_df = reps_df[reps_df['chromosome'] == chrom]
         unique_cids = chrom_df['cluster'].unique()
-        
+
         # Helper to pick the best representative for a given cluster dataframe
         def pick_cluster_rep(cluster_subset, c_type):
             # First, check for priority samples
@@ -4892,10 +4995,10 @@ def plot_structural_mode(args, matrix_data):
                 if not match.empty: return match.iloc[0]
                 match = cluster_subset[cluster_subset['sequence'].str.startswith(ps)]
                 if not match.empty: return match.iloc[0]
-                
+
             if c_type == 'Major':
                 return cluster_subset.iloc[0]
-                
+
             # For outliers, pick the one with highest raw_divergence
             return cluster_subset.sort_values('raw_divergence', ascending=False).iloc[0]
 
@@ -4903,10 +5006,10 @@ def plot_structural_mode(args, matrix_data):
         for cid in unique_cids:
             c_data = chrom_df[chrom_df['cluster'] == cid]
             if c_data.empty: continue
-            
+
             c_type = c_data.iloc[0]['cluster_type']
             rep = pick_cluster_rep(c_data, c_type)
-            
+
             cluster_reps.append({
                 'read': rep['sequence'],
                 'cluster': cid,
@@ -4915,12 +5018,12 @@ def plot_structural_mode(args, matrix_data):
                 'raw_div': rep['raw_divergence'] if 'raw_divergence' in rep else 0.0,
                 'norm_div': rep['norm_divergence'] if 'norm_divergence' in rep else 0.0
             })
-            
+
         # Sort reps: Major first, then Outliers by raw_div descending
         cluster_reps.sort(key=lambda x: (0 if x['type'] == 'Major' else 1, -x['raw_div']))
-        
+
         selected_reads = cluster_reps
-                    
+
         if not selected_reads: continue
 
         if not getattr(args, 'show_dendrogram', False):
@@ -4930,20 +5033,10 @@ def plot_structural_mode(args, matrix_data):
         row_spacing = 40
         canvas_height = 120 + len(selected_reads) * (len(featuresets) * fs_height + row_spacing) + 120
         canvas_width = panel_width + 2 * margin_x
-        
-        d = draw.Drawing(canvas_width, canvas_height, displayInline=False)
-        bg_color = args.background_color
-        text_color = "white" if bg_color == "black" else "black"
-        d.append(draw.Rectangle(0, 0, canvas_width, canvas_height, fill=bg_color))
-        d.append(draw.Text(f"KaryoScope: {chrom} Structural Analysis", 24, canvas_width/2, 40, 
-                          fill=text_color, font_weight='bold', text_anchor='middle'))
-        
-        panel_bg = "#111111" if bg_color == "black" else "#F5F5F5"
-        d.append(draw.Rectangle(margin_x - 5, 75, panel_width + 10, canvas_height - 180, fill=panel_bg, rx=10, ry=10))
 
         reads_needed = set(r['sequence'] for r in selected_reads)
         read_bed_data = load_bed_data(sample_bed_paths, database, featuresets, args.smoothness, reads_needed)
-        
+
         # Local clustering
         local_Z = None
         if getattr(args, 'show_dendrogram', False) and len(selected_reads) > 1:
@@ -4973,7 +5066,7 @@ def plot_structural_mode(args, matrix_data):
                 for j2 in range(j1+1, len(encoded)):
                     d_val = _lev(encoded[j1], encoded[j2])
                     dm[j1, j2] = dm[j2, j1] = d_val / max(len(encoded[j1]), len(encoded[j2]), 1)
-            
+
             local_Z = sch.linkage(squareform(dm), method='ward')
             leaf_order = sch.leaves_list(local_Z)
             selected_reads = [selected_reads[idx] for idx in leaf_order]
@@ -4984,92 +5077,137 @@ def plot_structural_mode(args, matrix_data):
             if r in read_bed_data:
                 for fs in read_bed_data[r]:
                     for feat in read_bed_data[r][fs]: max_len = max(max_len, feat['stop'])
-        if max_len == 0: max_len = 10000 
-        
+        if max_len == 0: max_len = 10000
+
         show_d = getattr(args, 'show_dendrogram', False)
         dendro_w = 250 if show_d else 20
         label_w = 400 # Slightly wider for detailed labels
         bars_x_start = margin_x + (dendro_w if show_d else 0) + label_w + 20
         ratio = (panel_width - (dendro_w if show_d else 0) - label_w - 60) / max_len
-        
+
         row_y_centers = []
         for j in range(len(selected_reads)):
             row_y_centers.append(110 + j * (len(featuresets)*fs_height + row_spacing) + (len(featuresets)*fs_height)/2)
 
-        if show_d and local_Z is not None:
-            draw_mini_dendrogram(d, local_Z, margin_x + 10, 110, dendro_w - 20, 0, row_y_centers, 
-                                 color=text_color, threshold=getattr(args, 'structural_threshold', 0.25), 
-                                 show_threshold=getattr(args, 'show_threshold', False))
-            
-        for j, r_obj in enumerate(selected_reads):
-            read, ry = r_obj['sequence'], row_y_centers[j] - (len(featuresets)*fs_height)/2
-            l_color = "#888888" if r_obj['type'] == "Major" else "#FF4444"
-            
-            # Detailed label
-            sample_val = r_obj.get('sample', 'unknown')
-            if sample_val == 'pangenome' and '#' in read:
-                sample_val = read.split('#')[0]
-                
-            clean_cid = r_obj['cluster'].replace(f"{chrom}_", "")
-            raw_div = r_obj.get('raw_div', 0)
-            norm_div = r_obj.get('norm_div', 0)
-            
-            label_text = f"[{sample_val}] {clean_cid}"
-            if r_obj['type'] != "Major":
-                label_text += f" (raw:{int(raw_div)}, norm:{norm_div:.2f})"
-                
-            display_name = label_text if len(label_text) <= 65 else label_text[:35] + "..." + label_text[-25:]
-            d.append(draw.Text(display_name, 12, margin_x + (dendro_w if show_d else 10), ry + (len(featuresets)*fs_height)/2 + 4, fill=l_color, font_family='monospace'))
-            if read in read_bed_data:
-                for fs_idx, fs in enumerate(featuresets):
-                    for feat in read_bed_data[read].get(fs, []):
-                        w = max((feat['stop'] - feat['start']) * ratio, 2.5)
-                        x = bars_x_start + (feat['start'] * ratio)
-                        color, op = featureset_colors[fs].get(feat['feature'], ("#ffffff", 1.0))
-                        d.append(draw.Rectangle(x, ry + (fs_idx * fs_height), w, fs_height, fill=color, fill_opacity=op))
+        chrom_data.append({
+            'chrom': chrom, 'selected_reads': selected_reads, 'read_bed_data': read_bed_data,
+            'local_Z': local_Z, 'canvas_height': canvas_height, 'canvas_width': canvas_width,
+            'fs_height': fs_height, 'row_spacing': row_spacing, 'show_d': show_d,
+            'dendro_w': dendro_w, 'label_w': label_w, 'bars_x_start': bars_x_start,
+            'ratio': ratio, 'row_y_centers': row_y_centers,
+        })
 
-        legend_y = canvas_height - 60
-        d.append(draw.Text("Legend:", 14, margin_x, legend_y, fill=text_color, font_weight='bold'))
-        d.append(draw.Text("Major (Dominant)", 12, margin_x + 100, legend_y, fill="#888888"))
-        d.append(draw.Text("Outlier (Variant)", 12, margin_x + 300, legend_y, fill="#FF4444"))
-        if featuresets: d.append(draw.Text(f"Tracks: {', '.join(featuresets)}", 12, margin_x + 500, legend_y, fill=text_color))
-        d.save_svg(f"{out_base}.{chrom}.svg")
-        
-        # Store for combined grid
-        chrom_drawings.append((d, canvas_height, canvas_width))
+    # --- Render per theme ---
+    for bg_color in bg_themes:
+        text_color = "white" if bg_color == "black" else "black"
+        theme_suffix = f"_{bg_color}" if len(bg_themes) > 1 else ""
 
-    if chrom_drawings:
-        print(f"Generating combined structural grid plot: {out_base}.all_chromosomes.svg")
-        n_cols = 5
-        
-        # Calculate row heights
-        row_heights = []
-        for i in range(0, len(chrom_drawings), n_cols):
-            batch = chrom_drawings[i:i+n_cols]
-            row_heights.append(max(h for d, h, w in batch))
-            
-        total_width = n_cols * (canvas_width + padding) + padding
-        total_height = sum(row_heights) + (len(row_heights) + 1) * padding
-        
-        all_d = draw.Drawing(total_width, total_height, displayInline=False)
-        all_d.append(draw.Rectangle(0, 0, total_width, total_height, fill=args.background_color))
-        
-        current_y = padding
-        for r_idx in range(len(row_heights)):
-            current_x = padding
-            for c_idx in range(n_cols):
-                idx = r_idx * n_cols + c_idx
-                if idx < len(chrom_drawings):
-                    d_obj, d_h, d_w = chrom_drawings[idx]
-                    g = draw.Group(transform=f"translate({current_x},{current_y})")
-                    for elem in d_obj.elements:
-                        g.append(elem)
-                    all_d.append(g)
-                    current_x += d_w + padding
-            current_y += row_heights[r_idx] + padding
-            
-        all_d.save_svg(f"{out_base}.all_chromosomes.svg")
-        
+        chrom_drawings = [] # Store (drawing, height, width)
+        last_canvas_width = panel_width + 2 * margin_x  # fallback
+
+        for cd in chrom_data:
+            chrom = cd['chrom']
+            selected_reads = cd['selected_reads']
+            read_bed_data = cd['read_bed_data']
+            local_Z = cd['local_Z']
+            canvas_height = cd['canvas_height']
+            canvas_width = cd['canvas_width']
+            fs_height = cd['fs_height']
+            show_d = cd['show_d']
+            dendro_w = cd['dendro_w']
+            bars_x_start = cd['bars_x_start']
+            ratio = cd['ratio']
+            row_y_centers = cd['row_y_centers']
+            last_canvas_width = canvas_width
+
+            d = draw.Drawing(canvas_width, canvas_height, displayInline=False)
+            d.append(draw.Rectangle(0, 0, canvas_width, canvas_height, fill=bg_color))
+            d.append(draw.Text(f"KaryoScope: {chrom} Structural Analysis", 24, canvas_width/2, 40,
+                              fill=text_color, font_weight='bold', text_anchor='middle'))
+
+            panel_bg = "#111111" if bg_color == "black" else "#F5F5F5"
+            d.append(draw.Rectangle(margin_x - 5, 75, panel_width + 10, canvas_height - 180, fill=panel_bg, rx=10, ry=10))
+
+            if show_d and local_Z is not None:
+                draw_mini_dendrogram(d, local_Z, margin_x + 10, 110, dendro_w - 20, 0, row_y_centers,
+                                     color=text_color, threshold=getattr(args, 'structural_threshold', 0.25),
+                                     show_threshold=getattr(args, 'show_threshold', False))
+
+            for j, r_obj in enumerate(selected_reads):
+                read, ry = r_obj['sequence'], row_y_centers[j] - (len(featuresets)*fs_height)/2
+                l_color = "#888888" if r_obj['type'] == "Major" else "#FF4444"
+
+                # Detailed label
+                sample_val = r_obj.get('sample', 'unknown')
+                if sample_val == 'pangenome' and '#' in read:
+                    sample_val = read.split('#')[0]
+
+                clean_cid = r_obj['cluster'].replace(f"{chrom}_", "")
+                raw_div = r_obj.get('raw_div', 0)
+                norm_div = r_obj.get('norm_div', 0)
+
+                label_text = f"[{sample_val}] {clean_cid}"
+                if r_obj['type'] != "Major":
+                    label_text += f" (raw:{int(raw_div)}, norm:{norm_div:.2f})"
+
+                display_name = label_text if len(label_text) <= 65 else label_text[:35] + "..." + label_text[-25:]
+                d.append(draw.Text(display_name, 12, margin_x + (dendro_w if show_d else 10), ry + (len(featuresets)*fs_height)/2 + 4, fill=l_color, font_family='monospace'))
+                if read in read_bed_data:
+                    for fs_idx, fs in enumerate(featuresets):
+                        for feat in read_bed_data[read].get(fs, []):
+                            w = max((feat['stop'] - feat['start']) * ratio, 2.5)
+                            x = bars_x_start + (feat['start'] * ratio)
+                            color, op = featureset_colors[fs].get(feat['feature'], ("#ffffff", 1.0))
+                            d.append(draw.Rectangle(x, ry + (fs_idx * fs_height), w, fs_height, fill=color, fill_opacity=op))
+
+            legend_y = canvas_height - 60
+            d.append(draw.Text("Legend:", 14, margin_x, legend_y, fill=text_color, font_weight='bold'))
+            d.append(draw.Text("Major (Dominant)", 12, margin_x + 100, legend_y, fill="#888888"))
+            d.append(draw.Text("Outlier (Variant)", 12, margin_x + 300, legend_y, fill="#FF4444"))
+            if featuresets: d.append(draw.Text(f"Tracks: {', '.join(featuresets)}", 12, margin_x + 500, legend_y, fill=text_color))
+            chrom_svg = f"{out_base}{theme_suffix}.{chrom}.svg"
+            d.save_svg(chrom_svg)
+            if args.png:
+                _svg_to_png(chrom_svg)
+
+            # Store for combined grid
+            chrom_drawings.append((d, canvas_height, canvas_width))
+
+        if chrom_drawings:
+            combined_svg = f"{out_base}{theme_suffix}.all_chromosomes.svg"
+            print(f"Generating combined structural grid plot: {combined_svg}")
+            n_cols = 5
+
+            # Calculate row heights
+            row_heights = []
+            for i in range(0, len(chrom_drawings), n_cols):
+                batch = chrom_drawings[i:i+n_cols]
+                row_heights.append(max(h for d, h, w in batch))
+
+            total_width = n_cols * (last_canvas_width + padding) + padding
+            total_height = sum(row_heights) + (len(row_heights) + 1) * padding
+
+            all_d = draw.Drawing(total_width, total_height, displayInline=False)
+            all_d.append(draw.Rectangle(0, 0, total_width, total_height, fill=bg_color))
+
+            current_y = padding
+            for r_idx in range(len(row_heights)):
+                current_x = padding
+                for c_idx in range(n_cols):
+                    idx = r_idx * n_cols + c_idx
+                    if idx < len(chrom_drawings):
+                        d_obj, d_h, d_w = chrom_drawings[idx]
+                        g = draw.Group(transform=f"translate({current_x},{current_y})")
+                        for elem in d_obj.elements:
+                            g.append(elem)
+                        all_d.append(g)
+                        current_x += d_w + padding
+                current_y += row_heights[r_idx] + padding
+
+            all_d.save_svg(combined_svg)
+            if args.png:
+                _svg_to_png(combined_svg)
+
     print("Finished generating structural plots.")
     sys.exit(0)
 
@@ -5158,7 +5296,10 @@ def main():
         database = args.database
 
     # --- Setup ---
-    background_color = args.background_color
+    bg_themes = ['black', 'white'] if args.background_color == 'both' else [args.background_color]
+    out_base = args.output[:-4] if args.output.endswith('.svg') else args.output
+    # Initialize with first theme for data loading (theme-independent code)
+    background_color = bg_themes[0]
     text_color = "#000000" if background_color == "white" else "#FFFFFF"
     featuresets = [f.strip() for f in args.featuresets.split(",")]
 
@@ -5269,7 +5410,7 @@ def main():
     max_reps = args.max_reps
 
     print(f"Feature sets to plot: {featuresets}")
-    print(f"Background color: {background_color}")
+    print(f"Background color: {', '.join(bg_themes)}")
 
     # --- Load data ---
     # Load sample metadata
@@ -5277,7 +5418,7 @@ def main():
 
     # Load cluster analysis to get enrichment info, cluster priority order, stats for bubbles, and full df for features
     cluster_enrichments, cluster_order, cluster_stats, cluster_analysis_df = load_cluster_analysis(
-        cluster_analysis_file, max_qvalue=args.max_qvalue)
+        cluster_analysis_file, max_qvalue=args.max_qvalue, filter_enrichment=args.filter_enrichment)
 
     # Load custom cluster labels if provided
     cluster_labels = load_cluster_labels(args.cluster_labels, args.label_column)
@@ -5360,6 +5501,31 @@ def main():
     elif args.no_reorder:
         print("  Dendrogram reordering disabled (--no-reorder)")
 
+    # Compute dendrogram cut groups if requested
+    dendro_cut_groups = {}
+    dendro_cut_distance = None
+    if args.dendro_cut and cluster_dendro_data is not None and cluster_dendro_data.get('linkage') is not None:
+        from scipy.cluster.hierarchy import fcluster
+        cut_linkage = cluster_dendro_data['linkage']
+        cut_order = cluster_dendro_data['cluster_order']
+        cut_spec = args.dendro_cut.strip()
+        if cut_spec.startswith('n:'):
+            n_groups = int(cut_spec[2:])
+            cut_labels = fcluster(cut_linkage, n_groups, criterion='maxclust')
+            print(f"  Dendro cut: {n_groups} groups (maxclust)")
+        else:
+            if cut_spec.startswith('d:'):
+                threshold = float(cut_spec[2:])
+            else:
+                threshold = float(cut_spec)
+            dendro_cut_distance = threshold
+            cut_labels = fcluster(cut_linkage, threshold, criterion='distance')
+            n_groups = len(set(cut_labels))
+            print(f"  Dendro cut at distance {threshold}: {n_groups} groups")
+        # Map cluster_id → cut group label
+        for i, cid in enumerate(cut_order):
+            dendro_cut_groups[cid] = int(cut_labels[i])
+
     # Hide dendrogram if requested (but still use ordering)
     if args.hide_dendrogram:
         cluster_dendro_data = None
@@ -5419,7 +5585,7 @@ def main():
         else:
             bubble_space = dendrogram_to_bubble_gap + bubble_radius * 2 + bubble_to_bars_gap
 
-        left_margin = 50 + dendrogram_width + bubble_space
+        base_left_margin = 50 + dendrogram_width + bubble_space
         sample_dendro_height = 40 if args.show_matrix else 0  # Space for sample dendrogram
         top_margin = max(80, estimated_label_height + 15) + sample_dendro_height
         bar_width = args.bar_width
@@ -5440,6 +5606,24 @@ def main():
         else:
             row_spacing = args.read_spacing
             cluster_gap = args.cluster_spacing
+
+        # Pre-compute matrix block width (needed before left_margin is used)
+        cell_size = group_height + row_spacing  # Square cells matching row spacing
+        cell_width = cell_size
+        cell_height = cell_size
+        matrix_width = 0
+        row_bar_width = 0
+        meta_df = None
+        if args.show_matrix:
+            meta_df = pd.read_csv(sample_metadata_file, sep='\t')
+            n_samples = len(meta_df)
+            matrix_width = n_samples * cell_width + 15
+            row_bar_width = 60
+            print(f"  Matrix enabled: {n_samples} samples (cell size: {cell_size}px)")
+
+        matrix_block_width = (matrix_width + row_bar_width + 15) if args.show_matrix else 0
+        matrix_x_start = base_left_margin  # Matrix starts right after enrichment
+        left_margin = base_left_margin + matrix_block_width  # Feature bars start after matrix
 
         # Calculate y positions (reads stacked vertically)
         read_y_positions = {}
@@ -5472,7 +5656,15 @@ def main():
             cluster_y_end[1] = current_y - row_spacing
         else:
             # Original cluster-based ordering
+            cut_group_gap = cluster_gap * 2  # Extra gap between dendro-cut groups
+            prev_cut_group = None
             for cluster_id, data in cluster_reads.items():
+                # Add extra spacing at dendro-cut group boundaries
+                if dendro_cut_groups and cluster_id in dendro_cut_groups:
+                    cur_cut_group = dendro_cut_groups[cluster_id]
+                    if prev_cut_group is not None and cur_cut_group != prev_cut_group:
+                        current_y += cut_group_gap
+                    prev_cut_group = cur_cut_group
                 cluster_y_start[cluster_id] = current_y
                 for read, sample in data['reads']:
                     read_y_positions[read] = current_y
@@ -5558,6 +5750,18 @@ def main():
             bar_length = floor(read_length * ratio)
             read_positions_vertical[read] = (left_margin, y_pos, bar_length)
 
+        # Build per-cluster bar end x positions (for label placement next to bar ends)
+        cluster_bar_end_x = {}
+        for cluster_id, data in cluster_reads.items():
+            if cluster_id == 'all':
+                continue
+            max_end = 0
+            for read, sample in data['reads']:
+                if read in read_positions_vertical:
+                    x_s, _, bl = read_positions_vertical[read]
+                    max_end = max(max_end, x_s + bl)
+            cluster_bar_end_x[cluster_id] = max_end
+
         # Calculate feature bar width (changes in column mode)
         if args.column_tracks:
             # In column mode: total width = num_featuresets * (max_bar_length + spacing)
@@ -5565,21 +5769,6 @@ def main():
         else:
             # In row mode: total width = max_bar_length
             feature_bars_width = max_bar_length
-
-        # Calculate matrix parameters if enabled
-        matrix_width = 0
-        matrix_x_start = left_margin + feature_bars_width + 15  # After feature bars
-        # Square cells: size matches the row height (group_height)
-        cell_size = group_height + row_spacing  # Square cells matching row spacing
-        cell_width = cell_size
-        cell_height = cell_size
-
-        if args.show_matrix:
-            # Load sample metadata for matrix
-            meta_df = pd.read_csv(sample_metadata_file, sep='\t')
-            n_samples = len(meta_df)
-            matrix_width = n_samples * cell_width + 15  # Small padding
-            print(f"  Matrix enabled: {n_samples} samples × {len(cluster_y_start)} clusters (cell size: {cell_size}px)")
 
         # Image dimensions
         # Reduce label width and skip bubble legend when using full dendrogram
@@ -5600,8 +5789,7 @@ def main():
         right_legend_width = 170  # Space for vertical color legend on right
         right_legend_gap = 15  # Gap between cluster labels and right legend
         bar_plot_height = 100 if args.show_matrix else 0  # Space for bar plot below matrix
-        row_bar_width = 60 if args.show_matrix else 0  # Space for row barplot to right of matrix
-        image_width = left_margin + feature_bars_width + 20 + matrix_width + row_bar_width + label_width + right_legend_gap + right_legend_width
+        image_width = left_margin + feature_bars_width + 20 + label_width + right_legend_gap + right_legend_width
         image_height = current_y + 50 + bar_plot_height + bubble_legend_height
 
         if args.column_tracks:
@@ -5609,203 +5797,221 @@ def main():
         else:
             print(f"\nVertical mode image dimensions: {image_width} x {image_height}")
 
-        # Create drawing
-        d = draw.Drawing(image_width, image_height)
-        d.append(draw.Rectangle(0, 0, image_width, image_height, fill=background_color))
-
-        # Draw vertical dendrogram on left
-        if full_dendro_data is not None:
-            # Full dendrogram showing all individual reads
-            read_names_displayed = [read for cluster_id, data in cluster_reads.items()
-                                    for read, sample in data['reads']]
-            draw_full_dendrogram(d, full_dendro_data, read_y_positions, read_names_displayed,
-                                 left_margin, dendrogram_width, background_color)
-        elif cluster_dendro_data is not None:
-            draw_cluster_dendrogram_vertical(d, cluster_dendro_data, cluster_y_start, cluster_y_end,
-                                             left_margin, dendrogram_width, background_color)
-
-        # Draw scale bar above first featureset column (for column_tracks or show_matrix modes)
-        if args.column_tracks or args.show_matrix:
-            scale_bar_y = min(cluster_y_start.values()) - 15  # Position above first cluster
-            draw_scale_bar(d, left_margin, scale_bar_y, ratio, text_color)
-
-        # Draw feature bars
-        if args.column_tracks:
-            # Column mode: each featureset in its own column
-            draw_feature_bars_column_mode(d, drawing_data_vertical, featuresets, bar_width,
-                                          read_y_positions, left_margin, max_bar_length,
-                                          column_spacing, background_color)
-        else:
-            # Row mode (default): featuresets stacked as rows within each read
-            draw_feature_bars_vertical(d, drawing_data_vertical, featuresets, bar_width,
-                                       read_positions_vertical, num_fs, args.bar_spacing, background_color)
-
-        # Draw read index labels (1, 2, 3, ...) after feature bars (if enabled)
-        if args.show_read_indices:
-            read_index_x = left_margin + feature_bars_width + 5
-            draw_read_index_labels(d, cluster_reads, read_y_positions, read_index_x, bar_width, text_color)
-
-        # Draw read name labels with cluster colors when using full dendrogram
-        if full_dendro_data is not None and 'read_order' in full_dendro_data:
-            # Build reverse mapping: read -> cluster_id
-            read_to_cluster = {}
-            for cluster_id, data in cluster_reads.items():
-                for read, sample in data['reads']:
-                    read_to_cluster[read] = cluster_id
-
-            # Define cluster colors (cycle through a palette)
-            cluster_palette = ['#40D392', '#60A5FA', '#F07167', '#FBBF24', '#C4A9E8',
-                              '#10B981', '#3B82F6', '#EF4444', '#F59E0B', '#8B5CF6']
-            cluster_ids_sorted = sorted(set(read_to_cluster.values()))
-            cluster_color_map = {cid: cluster_palette[i % len(cluster_palette)]
-                                for i, cid in enumerate(cluster_ids_sorted)}
-
-            label_x = left_margin + feature_bars_width + 8
-            for read in full_dendro_data['read_order']:
-                if read not in read_y_positions:
-                    continue
-                y_pos = read_y_positions[read] + group_height / 2
-                cluster_id = read_to_cluster.get(read, 0)
-                cluster_color = cluster_color_map.get(cluster_id, text_color)
-
-                # Draw small cluster color indicator
-                d.append(draw.Circle(label_x + 4, y_pos, 3, fill=cluster_color))
-
-                # Draw read name (abbreviated)
-                short_name = abbreviate_read_name(read)
-                d.append(draw.Text(
-                    short_name, font_size=8, x=label_x + 12, y=y_pos + 3,
-                    fill=text_color, font_family='monospace', text_anchor='start'
-                ))
-
-        # Draw sample matrix if enabled
-        matrix_data = None
-        if args.show_matrix:
-            cluster_ids = list(cluster_y_start.keys())
-            matrix_data = draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, meta_df,
-                              representatives_file, matrix_x_start, cell_width, cell_height,
-                              text_color, background_color,
-                              sample_display_names=sample_display_names)
-
-            # Draw sample dendrogram just above sample labels (only if > 2 samples)
-            n_samples = len(matrix_data.get('all_samples', []))
-            if n_samples > 2:
-                header_y = min(cluster_y_start.values()) - 5
-                dendro_bottom = header_y - max(estimated_label_height + 5, 30)
-                draw_sample_dendrogram(d, matrix_data, matrix_x_start, dendro_bottom, sample_dendro_height,
-                                       line_color=text_color)
-
-            # Draw bar plot below matrix (column sums)
-            bar_plot_y = max(cluster_y_end.values()) + cell_height / 2 + 5
-            draw_sample_bar_plot(d, matrix_data, cluster_ids, cluster_enrichments, matrix_x_start, bar_plot_y,
-                                cell_width, 40, text_color, background_color, sample_colors=sample_colors)
-
-            # Draw row bar plot to right of matrix (row sums)
-            row_bar_x_start = matrix_x_start + matrix_width + 5
-            draw_cluster_bar_plot(d, matrix_data, cluster_ids, cluster_y_start, cluster_y_end,
-                                 cluster_enrichments, row_bar_x_start, row_bar_width - 10,
-                                 text_color, background_color, sample_colors=sample_colors)
-
-        # Draw enrichment bubbles/grid (to the RIGHT of dendrogram tips, before feature bars)
-        # Dendrogram tips are at 50 + dendrogram_width (consistent with draw_cluster_dendrogram_vertical)
-        dendro_tip_x = 50 + dendrogram_width
-
-        # Skip enrichment bubbles and cluster labels when using full dendrogram (individual read view)
-        if full_dendro_data is None:
-            if use_enrichment_grid and grid_sample_names:
-                # Sync grid sample order with matrix clustering when matrix is present
-                if matrix_data and 'all_samples' in matrix_data:
-                    grid_sample_names = matrix_data['all_samples']
-
-                # Grid mode: draw a column of bubbles for each sample
-                grid_x_start = dendro_tip_x + dendrogram_to_bubble_gap
-
-                # Draw grid header (sample names)
-                header_y = min(cluster_y_start.values()) - 10
-                draw_enrichment_grid_header(d, grid_x_start, header_y, grid_sample_names, sample_colors,
-                                            bubble_radius=grid_bubble_radius, bubble_spacing=grid_bubble_spacing,
-                                            text_color=text_color, sample_display_names=sample_display_names)
-
-                # Draw faint gray connecting lines from dendrogram tips to grid start
-                connector_color = '#555555'
-                for cluster_id in cluster_y_start:
-                    y_start_pos = cluster_y_start[cluster_id]
-                    y_end_pos = cluster_y_end[cluster_id]
-                    y_center = (y_start_pos + y_end_pos) / 2
-                    d.append(draw.Line(
-                        dendro_tip_x, y_center,
-                        grid_x_start, y_center,
-                        stroke=connector_color, stroke_width=0.5
-                    ))
-
-                # Draw the enrichment grid
-                draw_enrichment_grid(d, cluster_y_start, cluster_y_end, grid_x_start, cluster_stats,
-                                    sample_colors, bubble_radius=grid_bubble_radius, bubble_spacing=grid_bubble_spacing,
-                                    sample_order=grid_sample_names)
+        # Render for each background theme
+        for background_color in bg_themes:
+            text_color = "#000000" if background_color == "white" else "#FFFFFF"
+            if len(bg_themes) > 1:
+                svg_path = f"{out_base}_{background_color}.svg"
             else:
-                # Single bubble mode (original behavior)
-                bubble_x = dendro_tip_x + dendrogram_to_bubble_gap + bubble_radius
+                svg_path = args.output
 
-                # Draw faint gray connecting lines from dendrogram tips to bubble centers
-                connector_color = '#555555'
-                for cluster_id in cluster_y_start:
-                    y_start_pos = cluster_y_start[cluster_id]
-                    y_end_pos = cluster_y_end[cluster_id]
-                    y_center = (y_start_pos + y_end_pos) / 2
-                    d.append(draw.Line(
-                        dendro_tip_x, y_center,
-                        bubble_x, y_center,
-                        stroke=connector_color, stroke_width=0.5
+            # Create drawing
+            d = draw.Drawing(image_width, image_height)
+            d.append(draw.Rectangle(0, 0, image_width, image_height, fill=background_color))
+
+            # Shared header baseline for all top-edge elements
+            header_baseline_y = min(cluster_y_start.values()) - 5
+
+            # Draw vertical dendrogram on left
+            if full_dendro_data is not None:
+                # Full dendrogram showing all individual reads
+                read_names_displayed = [read for cluster_id, data in cluster_reads.items()
+                                        for read, sample in data['reads']]
+                draw_full_dendrogram(d, full_dendro_data, read_y_positions, read_names_displayed,
+                                     left_margin, dendrogram_width, background_color)
+            elif cluster_dendro_data is not None:
+                dendro_result = draw_cluster_dendrogram_vertical(
+                    d, cluster_dendro_data, cluster_y_start, cluster_y_end,
+                    left_margin, dendrogram_width, background_color,
+                    cut_distance=dendro_cut_distance)
+                if dendro_result is not None:
+                    d_max_dist, d_base_x, d_width = dendro_result
+                    draw_dendrogram_scale_axis(d, d_max_dist, d_base_x, d_width,
+                                               header_baseline_y, background_color)
+
+            # Draw scale bar above first featureset column (for column_tracks or show_matrix modes)
+            if args.column_tracks or args.show_matrix:
+                draw_scale_bar(d, left_margin, header_baseline_y, ratio, text_color)
+
+            # Draw feature bars
+            if args.column_tracks:
+                # Column mode: each featureset in its own column
+                draw_feature_bars_column_mode(d, drawing_data_vertical, featuresets, bar_width,
+                                              read_y_positions, left_margin, max_bar_length,
+                                              column_spacing, background_color)
+            else:
+                # Row mode (default): featuresets stacked as rows within each read
+                draw_feature_bars_vertical(d, drawing_data_vertical, featuresets, bar_width,
+                                           read_positions_vertical, num_fs, args.bar_spacing, background_color)
+
+            # Draw read index labels (1, 2, 3, ...) after feature bars (if enabled)
+            if args.show_read_indices:
+                read_index_x = left_margin + feature_bars_width + 5
+                draw_read_index_labels(d, cluster_reads, read_y_positions, read_index_x, bar_width, text_color)
+
+            # Draw read name labels with cluster colors when using full dendrogram
+            if full_dendro_data is not None and 'read_order' in full_dendro_data:
+                # Build reverse mapping: read -> cluster_id
+                read_to_cluster = {}
+                for cluster_id, data in cluster_reads.items():
+                    for read, sample in data['reads']:
+                        read_to_cluster[read] = cluster_id
+
+                # Define cluster colors (cycle through a palette)
+                cluster_palette = ['#40D392', '#60A5FA', '#F07167', '#FBBF24', '#C4A9E8',
+                                  '#10B981', '#3B82F6', '#EF4444', '#F59E0B', '#8B5CF6']
+                cluster_ids_sorted = sorted(set(read_to_cluster.values()))
+                cluster_color_map = {cid: cluster_palette[i % len(cluster_palette)]
+                                    for i, cid in enumerate(cluster_ids_sorted)}
+
+                label_x = left_margin + feature_bars_width + 8
+                for read in full_dendro_data['read_order']:
+                    if read not in read_y_positions:
+                        continue
+                    y_pos = read_y_positions[read] + group_height / 2
+                    cluster_id = read_to_cluster.get(read, 0)
+                    cluster_color = cluster_color_map.get(cluster_id, text_color)
+
+                    # Draw small cluster color indicator
+                    d.append(draw.Circle(label_x + 4, y_pos, 3, fill=cluster_color))
+
+                    # Draw read name (abbreviated)
+                    short_name = abbreviate_read_name(read)
+                    d.append(draw.Text(
+                        short_name, font_size=8, x=label_x + 12, y=y_pos + 3,
+                        fill=text_color, font_family='monospace', text_anchor='start'
                     ))
 
-                # Draw bubbles on top of connector lines
-                draw_enrichment_bubbles(d, cluster_y_start, cluster_y_end, bubble_x, cluster_stats,
-                                        max_radius=bubble_radius, min_radius=2)
+            # Draw sample matrix if enabled
+            matrix_data = None
+            if args.show_matrix:
+                cluster_ids = list(cluster_y_start.keys())
+                matrix_data = draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, meta_df,
+                                  representatives_file, matrix_x_start, cell_width, cell_height,
+                                  text_color, background_color,
+                                  sample_display_names=sample_display_names,
+                                  header_y=header_baseline_y)
 
-            # Draw cluster labels on right (after feature bars and read indices)
-            if not args.hide_brackets:
-                if args.show_matrix:
-                    label_x = matrix_x_start + matrix_width + row_bar_width + 10
+                # Draw sample dendrogram just above sample labels (only if > 2 samples)
+                n_samples = len(matrix_data.get('all_samples', []))
+                if n_samples > 2:
+                    dendro_bottom = header_baseline_y - max(estimated_label_height + 5, 30)
+                    draw_sample_dendrogram(d, matrix_data, matrix_x_start, dendro_bottom, sample_dendro_height,
+                                           line_color=text_color)
+
+                # Draw bar plot below matrix (column sums)
+                bar_plot_y = max(cluster_y_end.values()) + cell_height / 2 + 5
+                draw_sample_bar_plot(d, matrix_data, cluster_ids, cluster_enrichments, matrix_x_start, bar_plot_y,
+                                    cell_width, 40, text_color, background_color, sample_colors=sample_colors)
+
+                # Draw row bar plot to right of matrix (row sums)
+                row_bar_x_start = matrix_x_start + matrix_width + 5
+                draw_cluster_bar_plot(d, matrix_data, cluster_ids, cluster_y_start, cluster_y_end,
+                                     cluster_enrichments, row_bar_x_start, row_bar_width - 10,
+                                     text_color, background_color, sample_colors=sample_colors,
+                                     axis_y=header_baseline_y)
+
+            # Draw enrichment bubbles/grid (to the RIGHT of dendrogram tips, before feature bars)
+            # Dendrogram tips are at 50 + dendrogram_width (consistent with draw_cluster_dendrogram_vertical)
+            dendro_tip_x = 50 + dendrogram_width
+
+            # Skip enrichment bubbles and cluster labels when using full dendrogram (individual read view)
+            if full_dendro_data is None:
+                if use_enrichment_grid and grid_sample_names:
+                    # Sync grid sample order with matrix clustering when matrix is present
+                    if matrix_data and 'all_samples' in matrix_data:
+                        grid_sample_names = matrix_data['all_samples']
+
+                    # Grid mode: draw a column of bubbles for each sample
+                    grid_x_start = dendro_tip_x + dendrogram_to_bubble_gap
+
+                    # Draw grid header (sample names)
+                    draw_enrichment_grid_header(d, grid_x_start, header_baseline_y, grid_sample_names, sample_colors,
+                                                bubble_radius=grid_bubble_radius, bubble_spacing=grid_bubble_spacing,
+                                                text_color=text_color, sample_display_names=sample_display_names)
+
+                    # Draw faint gray connecting lines from dendrogram tips to grid start
+                    connector_color = '#555555'
+                    for cluster_id in cluster_y_start:
+                        y_start_pos = cluster_y_start[cluster_id]
+                        y_end_pos = cluster_y_end[cluster_id]
+                        y_center = (y_start_pos + y_end_pos) / 2
+                        d.append(draw.Line(
+                            dendro_tip_x, y_center,
+                            grid_x_start, y_center,
+                            stroke=connector_color, stroke_width=0.5
+                        ))
+
+                    # Draw the enrichment grid
+                    draw_enrichment_grid(d, cluster_y_start, cluster_y_end, grid_x_start, cluster_stats,
+                                        sample_colors, bubble_radius=grid_bubble_radius, bubble_spacing=grid_bubble_spacing,
+                                        sample_order=grid_sample_names, background_color=background_color)
                 else:
-                    label_x = left_margin + feature_bars_width + 20  # Extra space for read index labels
-                # Build cluster_enrichments dict for coloring labels
-                cluster_enrichments_dict = {cid: data['enrichment'] for cid, data in cluster_reads.items() if cid != 'all'}
-                draw_cluster_labels_vertical(d, cluster_y_start, cluster_y_end, label_x, text_color,
-                                             cluster_labels=cluster_labels,
-                                             enrichment_colors=enrichment_colors,
-                                             cluster_enrichments=cluster_enrichments_dict,
-                                             enrichment_display_names=enrichment_display_names)
+                    # Single bubble mode (original behavior)
+                    bubble_x = dendro_tip_x + dendrogram_to_bubble_gap + bubble_radius
 
-        # Draw all legends vertically stacked on the right side
-        color_legend_x = image_width - right_legend_width + 10
-        color_legend_y_start = top_margin
-        legend_height = draw_color_legends_vertical(d, featuresets, featureset_colors, featureset_color_order,
-                                    fs_display_names, color_legend_x, color_legend_y_start, text_color,
-                                    displayed_features=displayed_features)
-        right_legend_current_y = color_legend_y_start + legend_height + 18
+                    # Draw faint gray connecting lines from dendrogram tips to bubble centers
+                    connector_color = '#555555'
+                    for cluster_id in cluster_y_start:
+                        y_start_pos = cluster_y_start[cluster_id]
+                        y_end_pos = cluster_y_end[cluster_id]
+                        y_center = (y_start_pos + y_end_pos) / 2
+                        d.append(draw.Line(
+                            dendro_tip_x, y_center,
+                            bubble_x, y_center,
+                            stroke=connector_color, stroke_width=0.5
+                        ))
 
-        # Matrix legend directly below color legend
-        if args.show_matrix and matrix_data:
-            draw_matrix_legend(d, color_legend_x, right_legend_current_y, matrix_data['max_count'],
-                              text_color, background_color)
-            right_legend_current_y += 45
+                    # Draw bubbles on top of connector lines
+                    draw_enrichment_bubbles(d, cluster_y_start, cluster_y_end, bubble_x, cluster_stats,
+                                            max_radius=bubble_radius, min_radius=2,
+                                            background_color=background_color)
 
-        # Grid/bubble legend below matrix legend
-        if use_enrichment_grid and grid_sample_names:
-            right_legend_current_y = draw_grid_legend_vertical(
-                d, color_legend_x, right_legend_current_y, grid_sample_names, sample_colors,
-                text_color=text_color, bubble_radius=grid_bubble_radius,
-                sample_display_names=sample_display_names)
+                # Draw cluster labels on right (after feature bars and read indices)
+                if not args.hide_brackets:
+                    label_x = left_margin + feature_bars_width + 20
+                    # Build cluster_enrichments dict for coloring labels
+                    cluster_enrichments_dict = {cid: data['enrichment'] for cid, data in cluster_reads.items() if cid != 'all'}
+                    draw_cluster_labels_vertical(d, cluster_y_start, cluster_y_end, label_x, text_color,
+                                                 cluster_labels=cluster_labels,
+                                                 enrichment_colors=enrichment_colors,
+                                                 cluster_enrichments=cluster_enrichments_dict,
+                                                 enrichment_display_names=enrichment_display_names,
+                                                 cluster_bar_end_x=cluster_bar_end_x)
 
-        # Enrichment text legend at bottom of right column
-        draw_enrichment_text_legend_vertical(d, color_legend_x, right_legend_current_y,
-                                            enrichment_colors, text_color,
-                                            enrichment_display_names=enrichment_display_names)
+            # Draw all legends vertically stacked on the right side
+            color_legend_x = image_width - right_legend_width + 10
+            color_legend_y_start = top_margin
+            legend_height = draw_color_legends_vertical(d, featuresets, featureset_colors, featureset_color_order,
+                                        fs_display_names, color_legend_x, color_legend_y_start, text_color,
+                                        displayed_features=displayed_features)
+            right_legend_current_y = color_legend_y_start + legend_height + 18
 
-        # Save vertical plot
-        d.save_svg(args.output)
+            # Matrix legend directly below color legend
+            if args.show_matrix and matrix_data:
+                draw_matrix_legend(d, color_legend_x, right_legend_current_y, matrix_data['max_count'],
+                                  text_color, background_color)
+                right_legend_current_y += 45
 
-        # Report warnings
+            # Grid/bubble legend below matrix legend
+            if use_enrichment_grid and grid_sample_names:
+                right_legend_current_y = draw_grid_legend_vertical(
+                    d, color_legend_x, right_legend_current_y, grid_sample_names, sample_colors,
+                    text_color=text_color, bubble_radius=grid_bubble_radius,
+                    sample_display_names=sample_display_names)
+
+            # Enrichment text legend at bottom of right column
+            draw_enrichment_text_legend_vertical(d, color_legend_x, right_legend_current_y,
+                                                enrichment_colors, text_color,
+                                                enrichment_display_names=enrichment_display_names)
+
+            # Save vertical plot
+            d.save_svg(svg_path)
+            if args.png:
+                _svg_to_png(svg_path)
+            print(f"\n✅ Saved to {svg_path}")
+
+        # Report warnings (once, outside theme loop)
         for fs in featuresets:
             if uncolored_features[fs]:
                 sys.stderr.write(f"Warning: {fs} - features not in colors file:\n")
@@ -5817,7 +6023,6 @@ def main():
         print(f"Clusters plotted: {original_cluster_count}")
         total_reads = sum(len(data['reads']) for data in cluster_reads.values())
         print(f"Total reads plotted: {total_reads}")
-        print(f"\n✅ Saved to {args.output}")
 
         _print_params_and_command(args, database, featuresets, background_color)
 
@@ -6138,117 +6343,129 @@ def main():
 
     print(f"\nImage dimensions: {image_width} x {image_height}")
 
-    # --- Create drawing ---
-    d = draw.Drawing(image_width, image_height)
-    d.append(draw.Rectangle(0, 0, image_width, image_height, fill=background_color))
-
-    # --- Draw components ---
-    # Calculate dendrogram top margin for grid positioning
-    dendro_top_margin = 100 + dendrogram_height + bracket_height  # Without grid height
-
-    # Dendrogram header - either full (all reads) or cluster-level
-    if full_dendro_data is not None:
-        # Draw full dendrogram showing all individual reads
-        draw_full_dendrogram_header(d, full_dendro_data, read_x_positions, group_width,
-                                    top_margin, dendrogram_height, background_color)
-    elif cluster_dendro_data is not None:
-        draw_cluster_dendrogram(d, cluster_dendro_data, cluster_x_start, cluster_x_end,
-                                dendro_top_margin, dendrogram_height, background_color)
-
-    # Enrichment grid (horizontal mode) - below dendrogram, above brackets
-    if use_enrichment_grid_horiz and grid_sample_names_horiz:
-        # Position grid just below the dendrogram base (dendro_base_y = dendro_top_margin + 20)
-        grid_y_start = dendro_top_margin + 25  # Just below dendrogram leaves
-        draw_enrichment_grid(d, cluster_x_start, cluster_x_end, grid_y_start,
-                             cluster_stats, sample_colors,
-                             bubble_radius=grid_bubble_radius_horiz,
-                             bubble_spacing=grid_bubble_spacing_horiz,
-                             orientation='horizontal',
-                             text_color=text_color,
-                             draw_labels=True)
-
-    # Cluster brackets - positioned below feature labels per cluster
-    # Calculate label height: longest featureset name × font_size (~4.5px per char for font_size=6)
-    longest_label = max((len(fs_display_names.get(fs, fs)) for fs in featuresets), default=10)
-    label_height = longest_label * 4.5  # font_size=6, tight fit
-    # Skip cluster brackets when using full dendrogram (individual read view)
-    if not args.hide_brackets and full_dendro_data is None:
-        draw_cluster_brackets(d, cluster_reads, cluster_x_start, cluster_x_end,
-                             enrichment_colors, read_heights, label_height, text_color,
-                             cluster_labels=cluster_labels)
-
-    # Annotation bars
-    draw_annotation_bars(d, cluster_reads, read_x_positions, read_to_original_cluster,
-                        read_to_original_enrichment, sample_colors, cluster_colors,
-                        enrichment_colors, group_width, top_margin, left_margin, text_color)
-
-    # Feature bars
-    draw_feature_bars(d, drawing_data, featuresets, args.bar_width, read_heights, num_featuresets,
-                      density_line_data=density_line_data,
-                      rect_plot_data=rect_plot_data if rect_plot_featuresets else None,
-                      background_color=background_color)
-
-    # Read labels (can be hidden with --hide-read-labels)
-    if not args.hide_read_labels:
-        draw_read_labels(d, cluster_reads, read_x_positions, group_width, top_margin, text_color)
-
-    # Labels below each read's bars
-    for read, (min_y, max_y, x_start, total_width) in read_heights.items():
-        if read not in read_x_positions:
-            continue
-
-        base_x = read_x_positions[read]
-        label_base_y = max_y + 5  # Just below this read's bars
-
-        if args.show_cluster_numbers:
-            # Show cluster number instead of featureset names
-            cluster_id = read_to_original_cluster.get(read, "?")
-            # Center the cluster number under the read
-            label_x = base_x + (group_width / 2)
-            d.append(draw.Text(
-                str(cluster_id), font_size=8, x=label_x, y=label_base_y + 5,
-                fill=text_color, font_family=args.font_family,
-                text_anchor='middle', dominant_baseline='hanging'
-            ))
+    # --- Render for each background theme ---
+    for background_color in bg_themes:
+        text_color = "#000000" if background_color == "white" else "#FFFFFF"
+        if len(bg_themes) > 1:
+            svg_path = f"{out_base}_{background_color}.svg"
         else:
-            # Original: featureset labels
-            for fs_idx, fs in enumerate(featuresets):
-                x_offset = fs_idx * (args.bar_width + args.bar_spacing)
-                display_name = fs_display_names.get(fs, fs)
-                label_x = base_x + x_offset + args.bar_width / 2
+            svg_path = args.output
 
+        # --- Create drawing ---
+        d = draw.Drawing(image_width, image_height)
+        d.append(draw.Rectangle(0, 0, image_width, image_height, fill=background_color))
+
+        # --- Draw components ---
+        # Calculate dendrogram top margin for grid positioning
+        dendro_top_margin = 100 + dendrogram_height + bracket_height  # Without grid height
+
+        # Dendrogram header - either full (all reads) or cluster-level
+        if full_dendro_data is not None:
+            # Draw full dendrogram showing all individual reads
+            draw_full_dendrogram_header(d, full_dendro_data, read_x_positions, group_width,
+                                        top_margin, dendrogram_height, background_color)
+        elif cluster_dendro_data is not None:
+            draw_cluster_dendrogram(d, cluster_dendro_data, cluster_x_start, cluster_x_end,
+                                    dendro_top_margin, dendrogram_height, background_color)
+
+        # Enrichment grid (horizontal mode) - below dendrogram, above brackets
+        if use_enrichment_grid_horiz and grid_sample_names_horiz:
+            # Position grid just below the dendrogram base (dendro_base_y = dendro_top_margin + 20)
+            grid_y_start = dendro_top_margin + 25  # Just below dendrogram leaves
+            draw_enrichment_grid(d, cluster_x_start, cluster_x_end, grid_y_start,
+                                 cluster_stats, sample_colors,
+                                 bubble_radius=grid_bubble_radius_horiz,
+                                 bubble_spacing=grid_bubble_spacing_horiz,
+                                 orientation='horizontal',
+                                 text_color=text_color,
+                                 draw_labels=True,
+                                 background_color=background_color)
+
+        # Cluster brackets - positioned below feature labels per cluster
+        # Calculate label height: longest featureset name × font_size (~4.5px per char for font_size=6)
+        longest_label = max((len(fs_display_names.get(fs, fs)) for fs in featuresets), default=10)
+        label_height = longest_label * 4.5  # font_size=6, tight fit
+        # Skip cluster brackets when using full dendrogram (individual read view)
+        if not args.hide_brackets and full_dendro_data is None:
+            draw_cluster_brackets(d, cluster_reads, cluster_x_start, cluster_x_end,
+                                 enrichment_colors, read_heights, label_height, text_color,
+                                 cluster_labels=cluster_labels)
+
+        # Annotation bars
+        draw_annotation_bars(d, cluster_reads, read_x_positions, read_to_original_cluster,
+                            read_to_original_enrichment, sample_colors, cluster_colors,
+                            enrichment_colors, group_width, top_margin, left_margin, text_color)
+
+        # Feature bars
+        draw_feature_bars(d, drawing_data, featuresets, args.bar_width, read_heights, num_featuresets,
+                          density_line_data=density_line_data,
+                          rect_plot_data=rect_plot_data if rect_plot_featuresets else None,
+                          background_color=background_color)
+
+        # Read labels (can be hidden with --hide-read-labels)
+        if not args.hide_read_labels:
+            draw_read_labels(d, cluster_reads, read_x_positions, group_width, top_margin, text_color)
+
+        # Labels below each read's bars
+        for read, (min_y, max_y, x_start, total_width) in read_heights.items():
+            if read not in read_x_positions:
+                continue
+
+            base_x = read_x_positions[read]
+            label_base_y = max_y + 5  # Just below this read's bars
+
+            if args.show_cluster_numbers:
+                # Show cluster number instead of featureset names
+                cluster_id = read_to_original_cluster.get(read, "?")
+                # Center the cluster number under the read
+                label_x = base_x + (group_width / 2)
                 d.append(draw.Text(
-                    display_name, font_size=6, x=label_x, y=label_base_y,
+                    str(cluster_id), font_size=8, x=label_x, y=label_base_y + 5,
                     fill=text_color, font_family=args.font_family,
-                    text_anchor='start', dominant_baseline='middle',
-                    transform=f"rotate(90 {label_x} {label_base_y})"
+                    text_anchor='middle', dominant_baseline='hanging'
                 ))
+            else:
+                # Original: featureset labels
+                for fs_idx, fs in enumerate(featuresets):
+                    x_offset = fs_idx * (args.bar_width + args.bar_spacing)
+                    display_name = fs_display_names.get(fs, fs)
+                    label_x = base_x + x_offset + args.bar_width / 2
 
-    # --- Draw legends ---
-    legend_y = 20
-    legend_x = left_margin
+                    d.append(draw.Text(
+                        display_name, font_size=6, x=label_x, y=label_base_y,
+                        fill=text_color, font_family=args.font_family,
+                        text_anchor='start', dominant_baseline='middle',
+                        transform=f"rotate(90 {label_x} {label_base_y})"
+                    ))
 
-    # Sample, Cluster, Enrichment legends (stacked vertically)
-    draw_top_legends(d, sample_colors, cluster_colors, read_to_original_cluster,
-                     read_to_original_enrichment, enrichment_colors,
-                     legend_x, legend_y, text_color)
+        # --- Draw legends ---
+        legend_y = 20
+        legend_x = left_margin
 
-    # Density line / Rect plot legend (row 4, if applicable)
-    if density_line_colors or rect_plot_colors:
-        density_legend_y = legend_y + 60  # After sample, cluster, enrichment rows
-        draw_density_line_legend(d, density_line_colors,
-                                 rect_plot_colors if rect_plot_featuresets else None,
-                                 legend_x, density_legend_y, text_color)
+        # Sample, Cluster, Enrichment legends (stacked vertically)
+        draw_top_legends(d, sample_colors, cluster_colors, read_to_original_cluster,
+                         read_to_original_enrichment, enrichment_colors,
+                         legend_x, legend_y, text_color)
 
-    # Color legends at bottom (exclude density_line since it has its own legend)
-    color_legend_y_start = max_stop_y + 130
-    bottom_legend_featuresets = [fs for fs in featuresets if fs != density_line_plot_name]
-    draw_color_legends(d, bottom_legend_featuresets, featureset_colors, featureset_color_order,
-                      fs_display_names, color_legend_y_start, left_margin, text_color,
-                      displayed_features=displayed_features)
+        # Density line / Rect plot legend (row 4, if applicable)
+        if density_line_colors or rect_plot_colors:
+            density_legend_y = legend_y + 60  # After sample, cluster, enrichment rows
+            draw_density_line_legend(d, density_line_colors,
+                                     rect_plot_colors if rect_plot_featuresets else None,
+                                     legend_x, density_legend_y, text_color)
 
-    # --- Save ---
-    d.save_svg(args.output)
+        # Color legends at bottom (exclude density_line since it has its own legend)
+        color_legend_y_start = max_stop_y + 130
+        bottom_legend_featuresets = [fs for fs in featuresets if fs != density_line_plot_name]
+        draw_color_legends(d, bottom_legend_featuresets, featureset_colors, featureset_color_order,
+                          fs_display_names, color_legend_y_start, left_margin, text_color,
+                          displayed_features=displayed_features)
+
+        # --- Save ---
+        d.save_svg(svg_path)
+        if args.png:
+            _svg_to_png(svg_path)
+        print(f"\n✅ Saved to {svg_path}")
 
     # --- Report warnings ---
     for fs in featuresets:
@@ -6263,7 +6480,6 @@ def main():
     print(f"Clusters plotted: {original_cluster_count}")
     total_reads = sum(len(data['reads']) for data in cluster_reads.values())
     print(f"Total reads plotted: {total_reads}")
-    print(f"\n✅ Saved to {args.output}")
 
     _print_params_and_command(args, database, featuresets, background_color)
 
