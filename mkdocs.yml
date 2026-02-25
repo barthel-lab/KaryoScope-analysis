@@ -24,6 +24,8 @@ nav:
   - Quick Start: Quick_Start.md
   - Technical Guide: Comprehensive_Technical_Guide.md
   - Preprocessing: KaryoScope_Preprocessing.md
+  - Cluster Annotation: Cluster_Annotation.md
+  - Cluster Plot: Cluster_Plot.md
 
 plugins:
   - search
