@@ -24,6 +24,7 @@ nav:
   - Quick Start: Quick_Start.md
   - Technical Guide: Comprehensive_Technical_Guide.md
   - Preprocessing: KaryoScope_Preprocessing.md
+  - Sequence Annotation: Sequence_Annotation.md
   - Cluster Annotation: Cluster_Annotation.md
   - Cluster Plot: Cluster_Plot.md
 
@@ -39,6 +40,7 @@ plugins:
 
 markdown_extensions:
   - admonition
+  - attr_list
   - codehilite
   - pymdownx.superfences
   - pymdownx.tabbed:

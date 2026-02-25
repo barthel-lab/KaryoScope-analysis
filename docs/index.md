@@ -4,7 +4,7 @@ Welcome to the KaryoScope Analysis documentation. This repository contains compr
 
 ## Getting Started
 
-For a complete technical explanation of the KaryoScope clustering algorithm, see the [Comprehensive Technical Guide](comprehensive-guide.md).
+For a complete technical explanation of the KaryoScope clustering algorithm, see the [Comprehensive Technical Guide](Comprehensive_Technical_Guide.md).
 
 ## About KaryoScope
 
@@ -12,9 +12,10 @@ KaryoScope is a graph-based method for analyzing long-read sequencing data that 
 
 ## Documentation Contents
 
-- **[Comprehensive Technical Guide](comprehensive-guide.md)**: Detailed technical documentation covering the complete clustering pipeline, from input data structure to final enrichment calls.
+- **[Comprehensive Technical Guide](Comprehensive_Technical_Guide.md)**: Detailed technical documentation covering the complete clustering pipeline, from input data structure to final enrichment calls.
 - **[Quick Start Guide](Quick_Start.md)**: Step-by-step walkthrough of the Core-4 example dataset.
 - **[Cluster Plot Guide](Cluster_Plot.md)**: Complete reference for `KaryoScope_cluster_plot.py` — layout modes, parameter reference, feature rendering, dendrograms, enrichment visualization, and advanced examples.
+- **[Sequence Annotation Guide](Sequence_Annotation.md)**: Per-read feature annotation from BED files (upstream of cluster annotation).
 - **[Cluster Annotation Guide](Cluster_Annotation.md)**: Annotating and curating cluster labels.
 - **[Preprocessing Guide](KaryoScope_Preprocessing.md)**: Preparing input data from Telogator2 and other sources.
 
