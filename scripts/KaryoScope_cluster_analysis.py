@@ -34,6 +34,7 @@ from scipy.spatial.distance import pdist, squareform
 from scipy.stats import fisher_exact, chi2_contingency, false_discovery_control
 from sklearn.metrics import silhouette_score, calinski_harabasz_score
 from sklearn.decomposition import TruncatedSVD
+from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 import matplotlib
 import matplotlib.colors as mcolors
@@ -90,12 +91,15 @@ parser.add_argument("--exclude-features", dest="exclude_features", default="nove
 parser.add_argument("--linkage-method", dest="linkage_method", default="ward",
                     help="Linkage method for hierarchical clustering (default: ward)")
 parser.add_argument("--matrix-type", dest="matrix_type", default="length_weighted",
-                    choices=["binary", "count", "length_weighted", "count_log1p"],
+                    choices=["binary", "count", "length_weighted", "count_log1p",
+                             "count_log1p_zscore", "count_log1p_zscore_blockweight"],
                     help="Type of adjacency matrix (controls both edges and abundance):\n"
                          "  binary: 0/1 presence/absence\n"
                          "  count: raw transition counts / raw feature bp totals\n"
                          "  length_weighted: feature-length proportions (default)\n"
-                         "  count_log1p: log(count+1), compresses dynamic range for rare features")
+                         "  count_log1p: log(count+1), compresses dynamic range for rare features\n"
+                         "  count_log1p_zscore: log(count+1) with per-column z-score normalization\n"
+                         "  count_log1p_zscore_blockweight: log(count+1) with z-score + block reweighting for equal edge/abundance contribution")
 parser.add_argument("--edges", dest="edge_mode", default="symmetric",
                     choices=["directional", "symmetric"],
                     help="Edge counting mode:\n"
@@ -1040,7 +1044,7 @@ def build_layer_matrix(seq_names, seq_feature_data, seq_length_dict, layer_idx, 
                 if pair_name in pair_to_idx:
                     edge_matrix[i, pair_to_idx[pair_name]] = 1
 
-        elif matrix_type in ("count", "count_log1p"):
+        elif matrix_type in ("count", "count_log1p", "count_log1p_zscore", "count_log1p_zscore_blockweight"):
             edges = get_edges([f for f, _ in layer_data], edge_mode=edge_mode)
             for from_feat, to_feat in edges:
                 pair_name = f"{from_feat}->{to_feat}"
@@ -1054,7 +1058,7 @@ def build_layer_matrix(seq_names, seq_feature_data, seq_length_dict, layer_idx, 
                 if pair_name in pair_to_idx:
                     edge_matrix[i, pair_to_idx[pair_name]] += weight / read_len
 
-    if matrix_type == "count_log1p":
+    if matrix_type in ("count_log1p", "count_log1p_zscore", "count_log1p_zscore_blockweight"):
         edge_matrix = np.log1p(edge_matrix)
 
     n_edge_cols = len(layer_pairs)
@@ -1073,7 +1077,7 @@ def build_layer_matrix(seq_names, seq_feature_data, seq_length_dict, layer_idx, 
                     if feat in feature_to_idx:
                         abundance_matrix[i, feature_to_idx[feat]] = 1
 
-            elif matrix_type in ("count", "count_log1p"):
+            elif matrix_type in ("count", "count_log1p", "count_log1p_zscore", "count_log1p_zscore_blockweight"):
                 # Raw total bp per feature (length-based, not occurrence-based)
                 feature_lengths = defaultdict(float)
                 for feat, length in layer_data:
@@ -1090,12 +1094,34 @@ def build_layer_matrix(seq_names, seq_feature_data, seq_length_dict, layer_idx, 
                     if feat in feature_to_idx:
                         abundance_matrix[i, feature_to_idx[feat]] = total_len / read_len
 
-        if matrix_type == "count_log1p":
+        if matrix_type in ("count_log1p", "count_log1p_zscore", "count_log1p_zscore_blockweight"):
             abundance_matrix = np.log1p(abundance_matrix)
+
+        if matrix_type in ("count_log1p_zscore", "count_log1p_zscore_blockweight"):
+            scaler_e = StandardScaler()
+            edge_matrix = scaler_e.fit_transform(edge_matrix)
+
+            scaler_a = StandardScaler()
+            abundance_matrix = scaler_a.fit_transform(abundance_matrix)
+
+            print(f"  Applied z-score normalization to all columns")
+
+            if matrix_type == "count_log1p_zscore_blockweight":
+                n_edge = edge_matrix.shape[1]
+                n_abund = abundance_matrix.shape[1]
+                if n_abund > 0:
+                    scale_factor = np.sqrt(n_edge / n_abund)
+                    abundance_matrix *= scale_factor
+                    print(f"  Applied block reweighting: abundance scaled by {scale_factor:.2f}x for equal variance contribution")
 
         matrix = np.hstack([edge_matrix, abundance_matrix])
         n_abundance_cols = len(layer_features)
     else:
+        if matrix_type in ("count_log1p_zscore", "count_log1p_zscore_blockweight"):
+            scaler_e = StandardScaler()
+            edge_matrix = scaler_e.fit_transform(edge_matrix)
+            print(f"  Applied z-score normalization to all columns")
+
         matrix = edge_matrix
         n_abundance_cols = 0
 
@@ -1143,7 +1169,7 @@ def build_combined_matrix(seq_names, seq_feature_data, seq_length_dict, all_feat
                 if pair_name in pair_to_idx:
                     edge_matrix[i, pair_to_idx[pair_name]] = 1
 
-        elif matrix_type in ("count", "count_log1p"):
+        elif matrix_type in ("count", "count_log1p", "count_log1p_zscore", "count_log1p_zscore_blockweight"):
             edges = get_edges([f for f, _ in feat_data], edge_mode=edge_mode)
             for from_feat, to_feat in edges:
                 pair_name = f"{from_feat}->{to_feat}"
@@ -1157,7 +1183,7 @@ def build_combined_matrix(seq_names, seq_feature_data, seq_length_dict, all_feat
                 if pair_name in pair_to_idx:
                     edge_matrix[i, pair_to_idx[pair_name]] += weight / read_len
 
-    if matrix_type == "count_log1p":
+    if matrix_type in ("count_log1p", "count_log1p_zscore", "count_log1p_zscore_blockweight"):
         edge_matrix = np.log1p(edge_matrix)
 
     n_edge_cols = len(all_pairs)
@@ -1176,7 +1202,7 @@ def build_combined_matrix(seq_names, seq_feature_data, seq_length_dict, all_feat
                     if feat in feature_to_idx:
                         abundance_matrix[i, feature_to_idx[feat]] = 1
 
-            elif matrix_type in ("count", "count_log1p"):
+            elif matrix_type in ("count", "count_log1p", "count_log1p_zscore", "count_log1p_zscore_blockweight"):
                 # Raw total bp per feature (length-based, not occurrence-based)
                 feature_lengths = defaultdict(float)
                 for feat, length in feat_data:
@@ -1193,12 +1219,34 @@ def build_combined_matrix(seq_names, seq_feature_data, seq_length_dict, all_feat
                     if feat in feature_to_idx:
                         abundance_matrix[i, feature_to_idx[feat]] = total_len / read_len
 
-        if matrix_type == "count_log1p":
+        if matrix_type in ("count_log1p", "count_log1p_zscore", "count_log1p_zscore_blockweight"):
             abundance_matrix = np.log1p(abundance_matrix)
+
+        if matrix_type in ("count_log1p_zscore", "count_log1p_zscore_blockweight"):
+            scaler_e = StandardScaler()
+            edge_matrix = scaler_e.fit_transform(edge_matrix)
+
+            scaler_a = StandardScaler()
+            abundance_matrix = scaler_a.fit_transform(abundance_matrix)
+
+            print(f"  Applied z-score normalization to all columns")
+
+            if matrix_type == "count_log1p_zscore_blockweight":
+                n_edge = edge_matrix.shape[1]
+                n_abund = abundance_matrix.shape[1]
+                if n_abund > 0:
+                    scale_factor = np.sqrt(n_edge / n_abund)
+                    abundance_matrix *= scale_factor
+                    print(f"  Applied block reweighting: abundance scaled by {scale_factor:.2f}x for equal variance contribution")
 
         matrix = np.hstack([edge_matrix, abundance_matrix])
         n_abundance_cols = len(all_features)
     else:
+        if matrix_type in ("count_log1p_zscore", "count_log1p_zscore_blockweight"):
+            scaler_e = StandardScaler()
+            edge_matrix = scaler_e.fit_transform(edge_matrix)
+            print(f"  Applied z-score normalization to all columns")
+
         matrix = edge_matrix
         n_abundance_cols = 0
 
