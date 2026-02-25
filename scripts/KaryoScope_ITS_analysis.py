@@ -47,7 +47,8 @@ import matplotlib.font_manager as fm
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from scipy.stats import mannwhitneyu, spearmanr, linregress
+from scipy.stats import mannwhitneyu, spearmanr, linregress, kruskal
+from itertools import combinations
 from pathlib import Path
 
 # Register Basic Sans font
@@ -59,10 +60,45 @@ if FONT_DIR.exists():
     plt.rcParams['font.size'] = 10
     # Use DejaVu Sans for math text (Greek letters, etc.)
     plt.rcParams['mathtext.fontset'] = 'dejavusans'
-plt.rcParams['svg.fonttype'] = 'none'
 
 # Capture original command line for logging
 _original_command = ' '.join(sys.argv)
+
+# --- Dynamic color palette for multi-group analysis ---
+# Default colors for up to 6 groups (using Barthel palette)
+DEFAULT_GROUP_COLORS = [
+    '#40D392',  # Green (NORMAL)
+    '#F07167',  # Coral (ALT)
+    '#60A5FA',  # Blue (TEL)
+    '#FBBF24',  # Yellow
+    '#C4A9E8',  # Lavender
+    '#10B981',  # Emerald
+]
+
+def get_group_colors(groups: list, sample_metadata_colors: dict = None) -> dict:
+    """Get color mapping for groups.
+
+    If sample_metadata has colors, use the first sample's color for each group.
+    Otherwise, use the default palette.
+    """
+    if sample_metadata_colors:
+        # Use colors from metadata if available
+        return {g: sample_metadata_colors.get(g, DEFAULT_GROUP_COLORS[i % len(DEFAULT_GROUP_COLORS)])
+                for i, g in enumerate(sorted(groups))}
+    return {g: DEFAULT_GROUP_COLORS[i % len(DEFAULT_GROUP_COLORS)]
+            for i, g in enumerate(sorted(groups))}
+
+def get_enrichment_colors(enrichments: list) -> dict:
+    """Get color mapping for enrichment labels (e.g., 'NORMAL-enriched', 'ALT-enriched')."""
+    # Extract base group name from enrichment label
+    colors = {}
+    for i, enr in enumerate(sorted(enrichments)):
+        if enr == 'mixed':
+            colors[enr] = '#888888'
+        else:
+            # Use corresponding group color
+            colors[enr] = DEFAULT_GROUP_COLORS[i % len(DEFAULT_GROUP_COLORS)]
+    return colors
 
 
 # --- TeeLogger for console + file logging ---
@@ -280,12 +316,6 @@ def parse_args():
     parser.add_argument("--figsize", default="12,8",
                         help="Figure size as 'width,height' in inches (default: 12,8)")
 
-    # Enrichment mapping
-    parser.add_argument("--enrichment-mapping", dest="enrichment_mapping", default=None,
-                        help="JSON file mapping enrichment labels to standard Normal/Tumor terminology.\n"
-                             "Format: {\"primary-enriched\": \"Normal-enriched\", \"E6E7-enriched\": \"Tumor-enriched\", ...}\n"
-                             "When not provided, auto-detects from data using built-in heuristics.")
-
     # Logging
     parser.add_argument("--log-file", dest="log_file",
                         action=argparse.BooleanOptionalAction, default=True,
@@ -400,40 +430,25 @@ def load_read_assignments(prefix: str) -> pd.DataFrame:
     return df
 
 
-def load_cluster_analysis(prefix: str, enrichment_mapping: Optional[Dict[str, str]] = None) -> pd.DataFrame:
-    """Load cluster analysis results.
-
-    Args:
-        prefix: Path prefix for cluster analysis files.
-        enrichment_mapping: Optional dict mapping enrichment labels to standard
-            Normal/Tumor terminology. When None, uses built-in heuristics to
-            auto-detect from data.
-    """
+def load_cluster_analysis(prefix: str) -> pd.DataFrame:
+    """Load cluster analysis results."""
     path = f"{prefix}.cluster_analysis.tsv"
     df = pd.read_csv(path, sep='\t')
     print(f"  Loaded {len(df)} clusters from {path}")
 
-    if enrichment_mapping is None:
-        # Auto-detect: map common group naming conventions to Normal/Tumor
-        enrichment_mapping = {}
-        if 'enrichment' in df.columns:
-            unique_labels = df['enrichment'].unique()
-            for label in unique_labels:
-                lower = label.lower()
-                if lower in ('normal-enriched', 'primary-enriched', 'control-enriched'):
-                    enrichment_mapping[label] = 'Normal-enriched'
-                elif lower in ('tumor-enriched', 'tumour-enriched', 'case-enriched'):
-                    enrichment_mapping[label] = 'Tumor-enriched'
-                elif lower.endswith('-enriched'):
-                    # Heuristic: if only two groups, first alphabetically is Normal
-                    enriched_labels = [l for l in unique_labels if l.lower().endswith('-enriched')]
-                    if len(enriched_labels) == 2:
-                        sorted_labels = sorted(enriched_labels)
-                        enrichment_mapping[sorted_labels[0]] = 'Normal-enriched'
-                        enrichment_mapping[sorted_labels[1]] = 'Tumor-enriched'
-                    break
-
-    if 'enrichment' in df.columns and enrichment_mapping:
+    # Map enrichment labels to standard Normal/Tumor terminology
+    # This allows the script to work with different group naming conventions
+    enrichment_mapping = {
+        'primary-enriched': 'Normal-enriched',
+        'Primary-enriched': 'Normal-enriched',
+        'normal-enriched': 'Normal-enriched',
+        'E6E7-enriched': 'Tumor-enriched',
+        'e6e7-enriched': 'Tumor-enriched',
+        'tumor-enriched': 'Tumor-enriched',
+        'Tumor-enriched': 'Tumor-enriched',
+        'Normal-enriched': 'Normal-enriched',
+    }
+    if 'enrichment' in df.columns:
         original_enrichments = df['enrichment'].value_counts().to_dict()
         df['enrichment'] = df['enrichment'].map(lambda x: enrichment_mapping.get(x, x))
         new_enrichments = df['enrichment'].value_counts().to_dict()
@@ -2682,7 +2697,7 @@ def calculate_sample_stats(all_features: Dict[str, Dict[str, ReadFeatures]],
 
 
 def perform_sample_comparison(sample_stats: List[SampleStats]) -> Tuple[pd.DataFrame, Dict]:
-    """Perform statistical comparison between groups."""
+    """Perform statistical comparison between groups (supports 2+ groups)."""
     df = pd.DataFrame([{
         'sample': s.sample,
         'group': s.group,
@@ -2705,26 +2720,63 @@ def perform_sample_comparison(sample_stats: List[SampleStats]) -> Tuple[pd.DataF
     # Statistical tests between groups
     stats_results = {}
     groups = sorted(df['group'].unique())
-    if len(groups) == 2:
-        g1, g2 = groups
-        metrics = ['its_per_mb', 'tar1_per_mb', 'its_bp_per_kb', 'pct_reads_with_its', 'pct_reads_with_tar1']
+    metrics = ['its_per_mb', 'tar1_per_mb', 'its_bp_per_kb', 'pct_reads_with_its', 'pct_reads_with_tar1']
 
-        print(f"\n  Statistical comparison: {g1} vs {g2}")
+    if len(groups) >= 2:
+        print(f"\n  Statistical comparison across {len(groups)} groups: {', '.join(groups)}")
+
         for metric in metrics:
-            v1 = df[df['group'] == g1][metric].values
-            v2 = df[df['group'] == g2][metric].values
-            if len(v1) >= 1 and len(v2) >= 1:
-                try:
-                    stat, pval = mannwhitneyu(v1, v2, alternative='two-sided')
-                    stats_results[metric] = {
-                        f'{g1}_mean': v1.mean(),
-                        f'{g2}_mean': v2.mean(),
-                        'p_value': pval,
-                        'fold_change': v1.mean() / v2.mean() if v2.mean() > 0 else np.nan
-                    }
-                    print(f"    {metric}: {g1}={v1.mean():.2f}, {g2}={v2.mean():.2f}, p={pval:.4f}")
-                except ValueError:
-                    pass
+            # Get values for each group
+            group_values = {g: df[df['group'] == g][metric].values for g in groups}
+
+            # Store means for each group
+            metric_result = {f'{g}_mean': group_values[g].mean() if len(group_values[g]) > 0 else np.nan
+                           for g in groups}
+
+            # For 2 groups: Mann-Whitney U test
+            if len(groups) == 2:
+                g1, g2 = groups
+                v1, v2 = group_values[g1], group_values[g2]
+                if len(v1) >= 1 and len(v2) >= 1:
+                    try:
+                        stat, pval = mannwhitneyu(v1, v2, alternative='two-sided')
+                        metric_result['p_value'] = pval
+                        metric_result['fold_change'] = v1.mean() / v2.mean() if v2.mean() > 0 else np.nan
+                        print(f"    {metric}: {g1}={v1.mean():.2f}, {g2}={v2.mean():.2f}, p={pval:.4f}")
+                    except ValueError:
+                        pass
+
+            # For 3+ groups: Kruskal-Wallis test + pairwise Mann-Whitney
+            else:
+                valid_groups = [g for g in groups if len(group_values[g]) >= 1]
+                if len(valid_groups) >= 2:
+                    try:
+                        # Kruskal-Wallis omnibus test
+                        kw_stat, kw_pval = kruskal(*[group_values[g] for g in valid_groups])
+                        metric_result['kruskal_wallis_p'] = kw_pval
+
+                        means_str = ", ".join([f"{g}={group_values[g].mean():.2f}" for g in valid_groups])
+                        print(f"    {metric}: {means_str}")
+                        print(f"      Kruskal-Wallis p={kw_pval:.4f}")
+
+                        # Pairwise Mann-Whitney tests
+                        pairwise_results = {}
+                        for g1, g2 in combinations(valid_groups, 2):
+                            v1, v2 = group_values[g1], group_values[g2]
+                            if len(v1) >= 1 and len(v2) >= 1:
+                                try:
+                                    _, pw_pval = mannwhitneyu(v1, v2, alternative='two-sided')
+                                    pairwise_results[f'{g1}_vs_{g2}_p'] = pw_pval
+                                    fc = v1.mean() / v2.mean() if v2.mean() > 0 else np.nan
+                                    pairwise_results[f'{g1}_vs_{g2}_fc'] = fc
+                                    print(f"      {g1} vs {g2}: p={pw_pval:.4f}, FC={fc:.2f}")
+                                except ValueError:
+                                    pass
+                        metric_result['pairwise'] = pairwise_results
+                    except ValueError:
+                        pass
+
+            stats_results[metric] = metric_result
 
     return df, stats_results
 
@@ -2780,13 +2832,15 @@ def analyze_chromosome_specificity(all_features: Dict[str, Dict[str, ReadFeature
     return df
 
 
-def calculate_chromosome_fold_changes(chr_df: pd.DataFrame) -> pd.DataFrame:
-    """Calculate log2 fold changes per chromosome arm."""
-    groups = sorted(chr_df['group'].unique())
-    if len(groups) != 2:
-        return pd.DataFrame()
+def calculate_chromosome_fold_changes(chr_df: pd.DataFrame, reference_group: str = None) -> pd.DataFrame:
+    """Calculate log2 fold changes per chromosome arm (supports 2+ groups).
 
-    control, treatment = groups[0], groups[1]
+    For 2 groups: calculates treatment vs control fold changes
+    For 3+ groups: calculates each group vs reference_group (default: first group alphabetically)
+    """
+    groups = sorted(chr_df['group'].unique())
+    if len(groups) < 2:
+        return pd.DataFrame()
 
     # Pivot to compare groups
     pivot = chr_df.pivot_table(
@@ -2799,24 +2853,39 @@ def calculate_chromosome_fold_changes(chr_df: pd.DataFrame) -> pd.DataFrame:
     # Flatten column names
     pivot.columns = ['_'.join(col).strip() for col in pivot.columns.values]
 
-    # Calculate fold changes
-    its_ctrl = pivot[f'its_per_read_{control}'].replace(0, 0.001)
-    its_treat = pivot[f'its_per_read_{treatment}'].replace(0, 0.001)
-    pivot['its_log2_fc'] = np.log2(its_treat / its_ctrl)
+    # Determine reference group (for fold change calculations)
+    if reference_group is None:
+        reference_group = groups[0]  # First alphabetically (e.g., 'NORMAL' comes before 'TEL')
 
-    tar1_ctrl = pivot[f'tar1_per_read_{control}'].replace(0, 0.001)
-    tar1_treat = pivot[f'tar1_per_read_{treatment}'].replace(0, 0.001)
-    pivot['tar1_log2_fc'] = np.log2(tar1_treat / tar1_ctrl)
+    print(f"\n  Reference group for fold changes: {reference_group}")
+
+    # Calculate fold changes for each group vs reference
+    for group in groups:
+        if group == reference_group:
+            continue
+
+        ref_its = pivot[f'its_per_read_{reference_group}'].replace(0, 0.001)
+        grp_its = pivot[f'its_per_read_{group}'].replace(0, 0.001)
+        pivot[f'its_log2_fc_{group}_vs_{reference_group}'] = np.log2(grp_its / ref_its)
+
+        ref_tar1 = pivot[f'tar1_per_read_{reference_group}'].replace(0, 0.001)
+        grp_tar1 = pivot[f'tar1_per_read_{group}'].replace(0, 0.001)
+        pivot[f'tar1_log2_fc_{group}_vs_{reference_group}'] = np.log2(grp_tar1 / ref_tar1)
 
     # Reset index
     pivot = pivot.reset_index()
 
-    # Sort by ITS log2 fold change
-    pivot = pivot.sort_values('its_log2_fc')
-
-    print(f"\n  Chromosome arms with greatest ITS loss ({treatment} vs {control}):")
-    for _, row in pivot.head(10).iterrows():
-        print(f"    {row['chr_arm']}: ITS log2FC={row['its_log2_fc']:.2f}")
+    # Print summary for each comparison
+    for group in groups:
+        if group == reference_group:
+            continue
+        fc_col = f'its_log2_fc_{group}_vs_{reference_group}'
+        if fc_col in pivot.columns:
+            sorted_df = pivot.sort_values(fc_col)
+            print(f"\n  Chromosome arms with greatest ITS change ({group} vs {reference_group}):")
+            # Show top 5 with ITS loss
+            for _, row in sorted_df.head(5).iterrows():
+                print(f"    {row['chr_arm']}: ITS log2FC={row[fc_col]:.2f}")
 
     return pivot
 
@@ -2841,7 +2910,7 @@ def plot_distance_distribution(pairs: List[ITSTar1Pair],
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
     groups = sorted(df['group'].unique())
-    colors = {'Normal': '#3b82f6', 'Tumor': '#ef4444'}
+    colors = get_group_colors(groups)
 
     # Histogram by group
     ax1 = axes[0]
@@ -2891,7 +2960,8 @@ def plot_sample_abundance(sample_stats: List[SampleStats],
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
-    colors = {'Normal': '#3b82f6', 'Tumor': '#ef4444'}
+    groups = sorted(df['group'].unique())
+    colors = get_group_colors(groups)
     bar_colors = [colors.get(g, '#999999') for g in df['group']]
 
     # ITS intervals per Mb
@@ -2940,7 +3010,7 @@ def plot_sample_abundance(sample_stats: List[SampleStats],
 
 def plot_chromosome_heatmap(chr_fc_df: pd.DataFrame, output_path: str,
                             dark_mode: bool = False):
-    """Heatmap of ITS depletion per chromosome arm."""
+    """Heatmap of ITS depletion per chromosome arm (supports multi-group fold changes)."""
     if chr_fc_df.empty:
         print("  No chromosome data to plot")
         return
@@ -2962,33 +3032,58 @@ def plot_chromosome_heatmap(chr_fc_df: pd.DataFrame, output_path: str,
     chr_fc_df['sort_key'] = chr_fc_df['chr_arm'].apply(chr_sort_key)
     chr_fc_df = chr_fc_df.sort_values('sort_key')
 
-    fig, axes = plt.subplots(1, 2, figsize=(10, 12))
+    # Find ITS log2FC columns (multi-group format: its_log2_fc_{group}_vs_{ref})
+    its_fc_cols = [c for c in chr_fc_df.columns if c.startswith('its_log2_fc_')]
+    tar1_fc_cols = [c for c in chr_fc_df.columns if c.startswith('tar1_log2_fc_')]
+
+    # Handle both old format (its_log2_fc) and new format (its_log2_fc_{group}_vs_{ref})
+    if not its_fc_cols and 'its_log2_fc' in chr_fc_df.columns:
+        its_fc_cols = ['its_log2_fc']
+    if not tar1_fc_cols and 'tar1_log2_fc' in chr_fc_df.columns:
+        tar1_fc_cols = ['tar1_log2_fc']
+
+    n_comparisons = len(its_fc_cols)
+    if n_comparisons == 0:
+        print("  No fold change columns found")
+        return
+
+    fig, axes = plt.subplots(1, n_comparisons * 2, figsize=(5 * n_comparisons, 12))
+    if n_comparisons == 1:
+        axes = np.array(axes).reshape(1, -1)  # Ensure 2D array
 
     cmap = 'RdBu_r'
 
-    # ITS heatmap
-    ax = axes[0]
-    its_data = chr_fc_df['its_log2_fc'].values.reshape(-1, 1)
-    vmax = max(abs(np.nanmin(its_data)), abs(np.nanmax(its_data)), 1)
-    im1 = ax.imshow(its_data, cmap=cmap, aspect='auto', vmin=-vmax, vmax=vmax)
-    ax.set_yticks(range(len(chr_fc_df)))
-    ax.set_yticklabels(chr_fc_df['chr_arm'])
-    ax.set_xticks([0])
-    ax.set_xticklabels(['ITS log2FC'])
-    ax.set_title('ITS Enrichment\n(red = loss in Tumor)')
-    plt.colorbar(im1, ax=ax, label='log2 fold change')
+    # Plot each comparison
+    for i, (its_col, tar1_col) in enumerate(zip(its_fc_cols, tar1_fc_cols)):
+        # Extract comparison name from column
+        if '_vs_' in its_col:
+            comparison = its_col.replace('its_log2_fc_', '').replace('_', ' ')
+        else:
+            comparison = 'Treatment vs Control'
 
-    # TAR1 heatmap
-    ax = axes[1]
-    tar1_data = chr_fc_df['tar1_log2_fc'].values.reshape(-1, 1)
-    vmax = max(abs(np.nanmin(tar1_data)), abs(np.nanmax(tar1_data)), 1)
-    im2 = ax.imshow(tar1_data, cmap=cmap, aspect='auto', vmin=-vmax, vmax=vmax)
-    ax.set_yticks(range(len(chr_fc_df)))
-    ax.set_yticklabels(chr_fc_df['chr_arm'])
-    ax.set_xticks([0])
-    ax.set_xticklabels(['TAR1 log2FC'])
-    ax.set_title('TAR1 Enrichment\n(blue = gain in Tumor)')
-    plt.colorbar(im2, ax=ax, label='log2 fold change')
+        # ITS heatmap
+        ax = axes[i * 2] if n_comparisons == 1 else axes[0, i * 2] if len(axes.shape) > 1 else axes[i * 2]
+        its_data = chr_fc_df[its_col].values.reshape(-1, 1)
+        vmax = max(abs(np.nanmin(its_data)), abs(np.nanmax(its_data)), 1)
+        im1 = ax.imshow(its_data, cmap=cmap, aspect='auto', vmin=-vmax, vmax=vmax)
+        ax.set_yticks(range(len(chr_fc_df)))
+        ax.set_yticklabels(chr_fc_df['chr_arm'])
+        ax.set_xticks([0])
+        ax.set_xticklabels(['ITS'])
+        ax.set_title(f'ITS\n{comparison}')
+        plt.colorbar(im1, ax=ax, label='log2FC')
+
+        # TAR1 heatmap
+        ax = axes[i * 2 + 1] if n_comparisons == 1 else axes[0, i * 2 + 1] if len(axes.shape) > 1 else axes[i * 2 + 1]
+        tar1_data = chr_fc_df[tar1_col].values.reshape(-1, 1)
+        vmax = max(abs(np.nanmin(tar1_data)), abs(np.nanmax(tar1_data)), 1)
+        im2 = ax.imshow(tar1_data, cmap=cmap, aspect='auto', vmin=-vmax, vmax=vmax)
+        ax.set_yticks(range(len(chr_fc_df)))
+        ax.set_yticklabels(chr_fc_df['chr_arm'])
+        ax.set_xticks([0])
+        ax.set_xticklabels(['TAR1'])
+        ax.set_title(f'TAR1\n{comparison}')
+        plt.colorbar(im2, ax=ax, label='log2FC')
 
     plt.tight_layout()
     fig.savefig(output_path, dpi=150, bbox_inches='tight')
@@ -3893,20 +3988,10 @@ def main():
     # =========================================================================
     # CLUSTER MODE - Analyze only clustered reads
     # =========================================================================
-    # Load enrichment mapping if provided
-    enrichment_mapping = None
-    if args.enrichment_mapping:
-        import json
-        with open(args.enrichment_mapping) as f:
-            enrichment_mapping = json.load(f)
-        print(f"\nLoaded enrichment mapping from: {args.enrichment_mapping}")
-        for k, v in enrichment_mapping.items():
-            print(f"  {k} -> {v}")
-
     if cluster_mode:
         print("\n--- Loading cluster analysis data ---")
         read_assignments = load_read_assignments(args.cluster_prefix)
-        cluster_analysis = load_cluster_analysis(args.cluster_prefix, enrichment_mapping=enrichment_mapping)
+        cluster_analysis = load_cluster_analysis(args.cluster_prefix)
 
         # Build sample to group mapping from read assignments
         sample_to_group = dict(zip(read_assignments['sample'], read_assignments['group']))
