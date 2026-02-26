@@ -1496,11 +1496,14 @@ if args.n_clusters is None:
         if k > 1:
             if n_samples > args.silhouette_sample_size:
                 silhouette = silhouette_score(adj_matrix, labels, sample_size=args.silhouette_sample_size)
+                cosine_silhouette = silhouette_score(adj_matrix, labels, metric='cosine', sample_size=args.silhouette_sample_size)
             else:
                 silhouette = silhouette_score(adj_matrix, labels)
+                cosine_silhouette = silhouette_score(adj_matrix, labels, metric='cosine')
             calinski_harabasz = calinski_harabasz_score(adj_matrix, labels)
         else:
             silhouette = 0
+            cosine_silhouette = 0
             calinski_harabasz = 0
 
         # Count clusters meeting minimum size
@@ -1561,6 +1564,7 @@ if args.n_clusters is None:
         stats = {
             'k': k,
             'silhouette': silhouette,
+            'cosine_silhouette': cosine_silhouette,
             'calinski_harabasz': calinski_harabasz,
             'valid_clusters': valid_clusters,
             'any_enriched': any_enriched,
@@ -1606,15 +1610,18 @@ if args.n_clusters is None:
         for ax in axes.flat:
             ax.set_facecolor(style['bg_color'])
 
-        # 1. Silhouette score (higher is better)
+        # 1. Silhouette scores (higher is better)
         ax1 = axes[0, 0]
-        ax1.plot(stats_df['k'], stats_df['silhouette'], 'b-o', markersize=3)
+        ax1.plot(stats_df['k'], stats_df['silhouette'], '-o', markersize=3, color='#60A5FA', label='Euclidean')
+        ax1.plot(stats_df['k'], stats_df['cosine_silhouette'], '-o', markersize=3, color='#F07167', label='Cosine')
         ax1.set_xlabel('Number of clusters (k)')
         ax1.set_ylabel('Silhouette Score')
         ax1.set_title('Silhouette Score (higher = better)')
         best_silhouette_k = int(stats_df.loc[stats_df['silhouette'].idxmax(), 'k'])
-        ax1.axvline(x=best_silhouette_k, color='g', linestyle='--', alpha=0.5, label=f'Best k={best_silhouette_k}')
-        ax1.legend()
+        best_cosine_k = int(stats_df.loc[stats_df['cosine_silhouette'].idxmax(), 'k'])
+        ax1.axvline(x=best_silhouette_k, color='#60A5FA', linestyle='--', alpha=0.5, label=f'Best Euclidean k={best_silhouette_k}')
+        ax1.axvline(x=best_cosine_k, color='#F07167', linestyle='--', alpha=0.5, label=f'Best Cosine k={best_cosine_k}')
+        ax1.legend(fontsize=7)
 
         # 2. Calinski-Harabasz index (higher is better)
         ax2 = axes[0, 1]
@@ -1794,6 +1801,7 @@ if args.n_clusters is None:
     # Find best k by each metric
     print(f"\n  Optimal k by metric:")
     print(f"    Silhouette:        k={best_silhouette_k} (score={stats_df['silhouette'].max():.4f})")
+    print(f"    Cosine Silhouette: k={best_cosine_k} (score={stats_df['cosine_silhouette'].max():.4f})")
     print(f"    Calinski-Harabasz: k={best_ch_k} (score={stats_df['calinski_harabasz'].max():.1f})")
     print(f"    Composite:         k={best_composite_k} (score={stats_df['composite_score'].max():.4f})")
     print(f"    Composite-knee:    k={best_knee_raw_k} (raw), k={best_knee_k} (smoothed, window={window_size})")
