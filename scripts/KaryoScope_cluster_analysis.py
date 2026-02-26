@@ -16,7 +16,6 @@
 #
 # Comparison modes:
 #   two-group: Fisher's exact test between control and treatment groups
-#   multi-group: Chi-square test across all groups
 #   per-sample: Each sample vs all others (no groups required)
 
 import argparse
@@ -29,9 +28,9 @@ import pandas as pd
 # Capture original command line for logging
 _original_command = ' '.join(sys.argv)
 from collections import defaultdict, Counter
-from scipy.cluster.hierarchy import linkage, dendrogram, leaves_list, fcluster, cut_tree
+from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
 from scipy.spatial.distance import pdist, squareform
-from scipy.stats import fisher_exact, chi2_contingency, false_discovery_control
+from scipy.stats import fisher_exact, false_discovery_control
 from sklearn.metrics import silhouette_score, calinski_harabasz_score
 from sklearn.decomposition import TruncatedSVD
 from sklearn.preprocessing import StandardScaler
@@ -990,181 +989,46 @@ def get_weighted_edges(features_with_lengths, edge_mode="directional"):
     for i in range(len(features_with_lengths) - 1):
         from_feat, from_len = features_with_lengths[i]
         to_feat, to_len = features_with_lengths[i + 1]
-        avg_len = (from_len + to_len) / 2
 
         if edge_mode == "directional":
             edges.append((from_feat, to_feat, from_len))
         elif edge_mode == "symmetric":
+            avg_len = (from_len + to_len) / 2
             sorted_pair = tuple(sorted([from_feat, to_feat]))
             edges.append((sorted_pair[0], sorted_pair[1], avg_len))
     return edges
 
 
-def build_layer_matrix(seq_names, seq_feature_data, seq_length_dict, layer_idx, n_layers,
-                       edge_mode, matrix_type, include_abundance, include_edges=True):
-    """Build edge and abundance matrices for a single layer.
+def _build_matrix_from_features(seq_names, read_feature_data, seq_length_dict, feature_list,
+                                edge_mode, matrix_type, include_abundance, include_edges=True):
+    """Shared matrix builder used by both build_layer_matrix and build_combined_matrix.
+
+    Args:
+        seq_names: Sorted list of read names (row order).
+        read_feature_data: dict of read_name -> [(feature, length), ...].
+        seq_length_dict: dict of read_name -> total read length.
+        feature_list: Sorted list of unique features (column vocabulary).
+        edge_mode: "directional" or "symmetric".
+        matrix_type: One of "binary", "count", "count_log1p", "count_log1p_zscore",
+                     "count_log1p_zscore_blockweight", "length_weighted".
+        include_abundance: Whether to build the abundance block.
+        include_edges: Whether to build the edge block.
 
     Returns:
-        matrix: Combined edge + abundance matrix for this layer
-        n_edge_cols: Number of edge columns
-        n_abundance_cols: Number of abundance columns
-        layer_features: List of unique features in this layer
-    """
-    # Extract layer-specific features for each read
-    layer_read_data = {}
-    for read_name, feat_data in seq_feature_data.items():
-        layer_read_data[read_name] = get_layer_features(feat_data, layer_idx, n_layers)
-
-    # Get unique features for this layer
-    layer_features_set = set()
-    for feat_data in layer_read_data.values():
-        for feat, _ in feat_data:
-            layer_features_set.add(feat)
-    layer_features = sorted(layer_features_set)
-
-    # Build edge matrix if requested
-    if include_edges:
-        layer_pairs = []
-        if edge_mode == "symmetric":
-            for i, f1 in enumerate(layer_features):
-                for f2 in layer_features[i+1:]:
-                    layer_pairs.append(f"{f1}->{f2}")
-        else:
-            for f1 in layer_features:
-                for f2 in layer_features:
-                    if f1 != f2:
-                        layer_pairs.append(f"{f1}->{f2}")
-
-        pair_to_idx = {pair: i for i, pair in enumerate(layer_pairs)}
-        edge_matrix = np.zeros((len(seq_names), len(layer_pairs)), dtype=np.float32)
-
-        for i, read_name in enumerate(seq_names):
-            layer_data = layer_read_data[read_name]
-            read_len = seq_length_dict.get(read_name, 1)
-
-            if matrix_type == "binary":
-                edges = get_edges([f for f, _ in layer_data], edge_mode=edge_mode)
-                for from_feat, to_feat in edges:
-                    pair_name = f"{from_feat}->{to_feat}"
-                    if pair_name in pair_to_idx:
-                        edge_matrix[i, pair_to_idx[pair_name]] = 1
-
-            elif matrix_type in ("count", "count_log1p", "count_log1p_zscore", "count_log1p_zscore_blockweight"):
-                edges = get_edges([f for f, _ in layer_data], edge_mode=edge_mode)
-                for from_feat, to_feat in edges:
-                    pair_name = f"{from_feat}->{to_feat}"
-                    if pair_name in pair_to_idx:
-                        edge_matrix[i, pair_to_idx[pair_name]] += 1
-
-            elif matrix_type == "length_weighted":
-                edges = get_weighted_edges(layer_data, edge_mode=edge_mode)
-                for from_feat, to_feat, weight in edges:
-                    pair_name = f"{from_feat}->{to_feat}"
-                    if pair_name in pair_to_idx:
-                        edge_matrix[i, pair_to_idx[pair_name]] += weight / read_len
-
-        if matrix_type in ("count_log1p", "count_log1p_zscore", "count_log1p_zscore_blockweight"):
-            edge_matrix = np.log1p(edge_matrix)
-
-        n_edge_cols = len(layer_pairs)
-    else:
-        edge_matrix = None
-        n_edge_cols = 0
-
-    # Build abundance matrix if requested
-    if include_abundance:
-        feature_to_idx = {f: i for i, f in enumerate(layer_features)}
-        abundance_matrix = np.zeros((len(seq_names), len(layer_features)), dtype=np.float32)
-
-        for i, read_name in enumerate(seq_names):
-            read_len = seq_length_dict.get(read_name, 1)
-            layer_data = layer_read_data[read_name]
-
-            if matrix_type == "binary":
-                for feat, _length in layer_data:
-                    if feat in feature_to_idx:
-                        abundance_matrix[i, feature_to_idx[feat]] = 1
-
-            elif matrix_type in ("count", "count_log1p", "count_log1p_zscore", "count_log1p_zscore_blockweight"):
-                # Raw total bp per feature (length-based, not occurrence-based)
-                feature_lengths = defaultdict(float)
-                for feat, length in layer_data:
-                    feature_lengths[feat] += length
-                for feat, total_len in feature_lengths.items():
-                    if feat in feature_to_idx:
-                        abundance_matrix[i, feature_to_idx[feat]] = total_len
-
-            else:  # length_weighted
-                feature_lengths = defaultdict(float)
-                for feat, length in layer_data:
-                    feature_lengths[feat] += length
-                for feat, total_len in feature_lengths.items():
-                    if feat in feature_to_idx:
-                        abundance_matrix[i, feature_to_idx[feat]] = total_len / read_len
-
-        if matrix_type in ("count_log1p", "count_log1p_zscore", "count_log1p_zscore_blockweight"):
-            abundance_matrix = np.log1p(abundance_matrix)
-
-        if matrix_type in ("count_log1p_zscore", "count_log1p_zscore_blockweight"):
-            if edge_matrix is not None:
-                scaler_e = StandardScaler()
-                edge_matrix = scaler_e.fit_transform(edge_matrix)
-
-            scaler_a = StandardScaler()
-            abundance_matrix = scaler_a.fit_transform(abundance_matrix)
-
-            print(f"  Applied z-score normalization to all columns")
-
-            if matrix_type == "count_log1p_zscore_blockweight" and edge_matrix is not None:
-                n_edge = edge_matrix.shape[1]
-                n_abund = abundance_matrix.shape[1]
-                if n_abund > 0:
-                    scale_factor = np.sqrt(n_edge / n_abund)
-                    abundance_matrix *= scale_factor
-                    print(f"  Applied block reweighting: abundance scaled by {scale_factor:.2f}x for equal variance contribution")
-
-        if edge_matrix is not None:
-            matrix = np.hstack([edge_matrix, abundance_matrix])
-        else:
-            matrix = abundance_matrix
-        n_abundance_cols = len(layer_features)
-    elif include_edges:
-        if matrix_type in ("count_log1p_zscore", "count_log1p_zscore_blockweight"):
-            scaler_e = StandardScaler()
-            edge_matrix = scaler_e.fit_transform(edge_matrix)
-            print(f"  Applied z-score normalization to all columns")
-
-        matrix = edge_matrix
-        n_abundance_cols = 0
-    else:
-        raise ValueError("At least one of include_edges or include_abundance must be True")
-
-    return matrix, n_edge_cols, n_abundance_cols, layer_features
-
-
-def build_combined_matrix(seq_names, seq_feature_data, seq_length_dict, all_features,
-                          edge_mode, matrix_type, include_abundance, include_edges=True):
-    """Build edge and abundance matrices treating features as atomic (original approach).
-
-    This treats merged features like "chr7:p_arm:nonsubtelomeric" as single atomic features,
-    rather than splitting them into layers. Results in higher dimensionality but preserves
-    the original feature combinations.
-
-    Returns:
-        matrix: Combined edge + abundance matrix
-        n_edge_cols: Number of edge columns
-        n_abundance_cols: Number of abundance columns
+        matrix: Combined (edge + abundance) or single-block matrix.
+        n_edge_cols: Number of edge columns.
+        n_abundance_cols: Number of abundance columns.
     """
     # Build edge matrix if requested
     if include_edges:
         all_pairs = []
         if edge_mode == "symmetric":
-            for i, f1 in enumerate(all_features):
-                for f2 in all_features[i+1:]:
+            for i, f1 in enumerate(feature_list):
+                for f2 in feature_list[i+1:]:
                     all_pairs.append(f"{f1}->{f2}")
         else:
-            for f1 in all_features:
-                for f2 in all_features:
+            for f1 in feature_list:
+                for f2 in feature_list:
                     if f1 != f2:
                         all_pairs.append(f"{f1}->{f2}")
 
@@ -1172,7 +1036,7 @@ def build_combined_matrix(seq_names, seq_feature_data, seq_length_dict, all_feat
         edge_matrix = np.zeros((len(seq_names), len(all_pairs)), dtype=np.float32)
 
         for i, read_name in enumerate(seq_names):
-            feat_data = seq_feature_data[read_name]
+            feat_data = read_feature_data[read_name]
             read_len = seq_length_dict.get(read_name, 1)
 
             if matrix_type == "binary":
@@ -1206,12 +1070,12 @@ def build_combined_matrix(seq_names, seq_feature_data, seq_length_dict, all_feat
 
     # Build abundance matrix if requested
     if include_abundance:
-        feature_to_idx = {f: i for i, f in enumerate(all_features)}
-        abundance_matrix = np.zeros((len(seq_names), len(all_features)), dtype=np.float32)
+        feature_to_idx = {f: i for i, f in enumerate(feature_list)}
+        abundance_matrix = np.zeros((len(seq_names), len(feature_list)), dtype=np.float32)
 
         for i, read_name in enumerate(seq_names):
             read_len = seq_length_dict.get(read_name, 1)
-            feat_data = seq_feature_data[read_name]
+            feat_data = read_feature_data[read_name]
 
             if matrix_type == "binary":
                 for feat, _length in feat_data:
@@ -1248,24 +1112,29 @@ def build_combined_matrix(seq_names, seq_feature_data, seq_length_dict, all_feat
 
             print(f"  Applied z-score normalization to all columns")
 
-            if matrix_type == "count_log1p_zscore_blockweight" and edge_matrix is not None:
-                n_edge = edge_matrix.shape[1]
-                n_abund = abundance_matrix.shape[1]
-                if n_abund > 0:
-                    scale_factor = np.sqrt(n_edge / n_abund)
-                    abundance_matrix *= scale_factor
-                    print(f"  Applied block reweighting: abundance scaled by {scale_factor:.2f}x for equal variance contribution")
+            if matrix_type == "count_log1p_zscore_blockweight":
+                if edge_matrix is not None:
+                    n_edge = edge_matrix.shape[1]
+                    n_abund = abundance_matrix.shape[1]
+                    if n_abund > 0:
+                        scale_factor = np.sqrt(n_edge / n_abund)
+                        abundance_matrix *= scale_factor
+                        print(f"  Applied block reweighting: abundance scaled by {scale_factor:.2f}x for equal variance contribution")
+                else:
+                    print(f"  Skipping block reweighting (only one feature block present)")
 
         if edge_matrix is not None:
             matrix = np.hstack([edge_matrix, abundance_matrix])
         else:
             matrix = abundance_matrix
-        n_abundance_cols = len(all_features)
+        n_abundance_cols = len(feature_list)
     elif include_edges:
         if matrix_type in ("count_log1p_zscore", "count_log1p_zscore_blockweight"):
             scaler_e = StandardScaler()
             edge_matrix = scaler_e.fit_transform(edge_matrix)
             print(f"  Applied z-score normalization to all columns")
+            if matrix_type == "count_log1p_zscore_blockweight":
+                print(f"  Skipping block reweighting (only one feature block present)")
 
         matrix = edge_matrix
         n_abundance_cols = 0
@@ -1273,6 +1142,53 @@ def build_combined_matrix(seq_names, seq_feature_data, seq_length_dict, all_feat
         raise ValueError("At least one of include_edges or include_abundance must be True")
 
     return matrix, n_edge_cols, n_abundance_cols
+
+
+def build_layer_matrix(seq_names, seq_feature_data, seq_length_dict, layer_idx, n_layers,
+                       edge_mode, matrix_type, include_abundance, include_edges=True):
+    """Build edge and abundance matrices for a single layer.
+
+    Returns:
+        matrix: Combined edge + abundance matrix for this layer
+        n_edge_cols: Number of edge columns
+        n_abundance_cols: Number of abundance columns
+        layer_features: List of unique features in this layer
+    """
+    # Extract layer-specific features for each read
+    layer_read_data = {}
+    for read_name, feat_data in seq_feature_data.items():
+        layer_read_data[read_name] = get_layer_features(feat_data, layer_idx, n_layers)
+
+    # Get unique features for this layer
+    layer_features_set = set()
+    for feat_data in layer_read_data.values():
+        for feat, _ in feat_data:
+            layer_features_set.add(feat)
+    layer_features = sorted(layer_features_set)
+
+    matrix, n_edge_cols, n_abundance_cols = _build_matrix_from_features(
+        seq_names, layer_read_data, seq_length_dict, layer_features,
+        edge_mode, matrix_type, include_abundance, include_edges)
+
+    return matrix, n_edge_cols, n_abundance_cols, layer_features
+
+
+def build_combined_matrix(seq_names, seq_feature_data, seq_length_dict, all_features,
+                          edge_mode, matrix_type, include_abundance, include_edges=True):
+    """Build edge and abundance matrices treating features as atomic (original approach).
+
+    This treats merged features like "chr7:p_arm:nonsubtelomeric" as single atomic features,
+    rather than splitting them into layers. Results in higher dimensionality but preserves
+    the original feature combinations.
+
+    Returns:
+        matrix: Combined edge + abundance matrix
+        n_edge_cols: Number of edge columns
+        n_abundance_cols: Number of abundance columns
+    """
+    return _build_matrix_from_features(
+        seq_names, seq_feature_data, seq_length_dict, all_features,
+        edge_mode, matrix_type, include_abundance, include_edges)
 
 
 # Build matrix based on selected mode
@@ -1520,11 +1436,11 @@ if args.n_clusters is None:
         # Calculate standard clustering metrics
         if k > 1:
             if n_samples > args.silhouette_sample_size:
-                silhouette = silhouette_score(adj_matrix, labels, sample_size=args.silhouette_sample_size)
-                cosine_silhouette = silhouette_score(adj_matrix, labels, metric='cosine', sample_size=args.silhouette_sample_size)
+                silhouette = silhouette_score(adj_matrix, labels, sample_size=args.silhouette_sample_size, random_state=42)
+                cosine_silhouette = silhouette_score(adj_matrix, labels, metric='cosine', sample_size=args.silhouette_sample_size, random_state=42)
             else:
-                silhouette = silhouette_score(adj_matrix, labels)
-                cosine_silhouette = silhouette_score(adj_matrix, labels, metric='cosine')
+                silhouette = silhouette_score(adj_matrix, labels, random_state=42)
+                cosine_silhouette = silhouette_score(adj_matrix, labels, metric='cosine', random_state=42)
             calinski_harabasz = calinski_harabasz_score(adj_matrix, labels)
         else:
             silhouette = 0
@@ -1580,7 +1496,8 @@ if args.n_clusters is None:
         strong_sequences_pct = (strong_sequences / total_sequences * 100) if total_sequences > 0 else 0
         any_enriched_sequences_pct = (any_enriched_sequences / total_sequences * 100) if total_sequences > 0 else 0
 
-        # Composite score: 50% silhouette, 10% any enriched ratio, 40% perfect ratio
+        # Composite: 50% cluster quality (silhouette), 10% any enrichment, 40% perfect purity
+        # Weights favor biologically pure clusters over moderate enrichment
         silhouette_norm = (silhouette + 1) / 2  # normalize from [-1,1] to [0,1]
         composite_score = (0.5 * silhouette_norm +
                           0.1 * enriched_ratio +
@@ -1650,19 +1567,19 @@ if args.n_clusters is None:
 
         # 2. Calinski-Harabasz index (higher is better)
         ax2 = axes[0, 1]
-        ax2.plot(stats_df['k'], stats_df['calinski_harabasz'], 'b-o', markersize=3)
+        ax2.plot(stats_df['k'], stats_df['calinski_harabasz'], '-o', markersize=3, color='#60A5FA')
         ax2.set_xlabel('Number of clusters (k)')
         ax2.set_ylabel('Calinski-Harabasz Index')
         ax2.set_title('Calinski-Harabasz (higher = better)')
         best_ch_k = int(stats_df.loc[stats_df['calinski_harabasz'].idxmax(), 'k'])
-        ax2.axvline(x=best_ch_k, color='g', linestyle='--', alpha=0.5, label=f'Best k={best_ch_k}')
+        ax2.axvline(x=best_ch_k, color='#40D392', linestyle='--', alpha=0.5, label=f'Best k={best_ch_k}')
         ax2.legend()
 
         # 3. Enrichment ratios
         ax3 = axes[0, 2]
-        ax3.plot(stats_df['k'], stats_df['enriched_ratio'], '-o', markersize=3, label='Any enriched', color='blue')
-        ax3.plot(stats_df['k'], stats_df['strong_ratio'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
-        ax3.plot(stats_df['k'], stats_df['perfect_ratio'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='red')
+        ax3.plot(stats_df['k'], stats_df['enriched_ratio'], '-o', markersize=3, label='Any enriched', color='#60A5FA')
+        ax3.plot(stats_df['k'], stats_df['strong_ratio'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='#FBBF24')
+        ax3.plot(stats_df['k'], stats_df['perfect_ratio'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='#F07167')
         ax3.set_xlabel('Number of clusters (k)')
         ax3.set_ylabel('Ratio (enriched / valid clusters)')
         ax3.set_title('Enrichment Ratios')
@@ -1671,9 +1588,9 @@ if args.n_clusters is None:
 
         # 4. Enrichment counts (absolute)
         ax4 = axes[0, 3]
-        ax4.plot(stats_df['k'], stats_df['any_enriched'], '-o', markersize=3, label='Any enriched', color='blue')
-        ax4.plot(stats_df['k'], stats_df['strong_enriched'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
-        ax4.plot(stats_df['k'], stats_df['perfect_enriched'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='red')
+        ax4.plot(stats_df['k'], stats_df['any_enriched'], '-o', markersize=3, label='Any enriched', color='#60A5FA')
+        ax4.plot(stats_df['k'], stats_df['strong_enriched'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='#FBBF24')
+        ax4.plot(stats_df['k'], stats_df['perfect_enriched'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='#F07167')
         ax4.set_xlabel('Number of clusters (k)')
         ax4.set_ylabel('Number of clusters')
         ax4.set_title('Enrichment Counts (absolute)')
@@ -1685,7 +1602,7 @@ if args.n_clusters is None:
             col = f'{g}_enriched'
             if col in stats_df.columns:
                 ax5.plot(stats_df['k'], stats_df[col], '-o', markersize=3, label=f'{g}-enriched', color=group_colors.get(g, None))
-        ax5.plot(stats_df['k'], stats_df['mixed'], '-o', markersize=3, label='Mixed', color='gray')
+        ax5.plot(stats_df['k'], stats_df['mixed'], '-o', markersize=3, label='Mixed', color='#545454')
         ax5.set_xlabel('Number of clusters (k)')
         ax5.set_ylabel('Number of clusters')
         ax5.set_title('Enrichment by Group')
@@ -1693,9 +1610,9 @@ if args.n_clusters is None:
 
         # 6. Reads in enriched clusters (absolute counts) - log scale
         ax6 = axes[1, 1]
-        ax6.plot(stats_df['k'], stats_df['any_enriched_sequences'], '-o', markersize=3, label='Any enriched', color='blue')
-        ax6.plot(stats_df['k'], stats_df['strong_sequences'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
-        ax6.plot(stats_df['k'], stats_df['perfect_sequences'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='red')
+        ax6.plot(stats_df['k'], stats_df['any_enriched_sequences'], '-o', markersize=3, label='Any enriched', color='#60A5FA')
+        ax6.plot(stats_df['k'], stats_df['strong_sequences'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='#FBBF24')
+        ax6.plot(stats_df['k'], stats_df['perfect_sequences'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='#F07167')
         ax6.set_xlabel('Number of clusters (k)')
         ax6.set_ylabel('Number of reads')
         ax6.set_title('Reads in Enriched Clusters (count)')
@@ -1704,9 +1621,9 @@ if args.n_clusters is None:
 
         # 7. Reads in enriched clusters (percentages)
         ax7 = axes[1, 2]
-        ax7.plot(stats_df['k'], stats_df['any_enriched_sequences_pct'], '-o', markersize=3, label='Any enriched', color='blue')
-        ax7.plot(stats_df['k'], stats_df['strong_sequences_pct'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='orange')
-        ax7.plot(stats_df['k'], stats_df['perfect_sequences_pct'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='red')
+        ax7.plot(stats_df['k'], stats_df['any_enriched_sequences_pct'], '-o', markersize=3, label='Any enriched', color='#60A5FA')
+        ax7.plot(stats_df['k'], stats_df['strong_sequences_pct'], '-o', markersize=3, label=f'Strong (>={int(args.strong_threshold*100)}%)', color='#FBBF24')
+        ax7.plot(stats_df['k'], stats_df['perfect_sequences_pct'], '-o', markersize=3, label=f'Perfect (>={int(args.perfect_threshold*100)}%)', color='#F07167')
         ax7.set_xlabel('Number of clusters (k)')
         ax7.set_ylabel('Percent of reads')
         ax7.set_title('Reads in Enriched Clusters (%)')
@@ -1715,13 +1632,13 @@ if args.n_clusters is None:
 
         # 8. Composite score (our recommended metric) - last position
         ax8 = axes[1, 3]
-        ax8.plot(stats_df['k'], stats_df['composite_score'], 'b-o', markersize=3)
+        ax8.plot(stats_df['k'], stats_df['composite_score'], '-o', markersize=3, color='#60A5FA')
         ax8.set_xlabel('Number of clusters (k)')
         ax8.set_ylabel('Composite Score')
         ax8.set_title('Composite Score (silhouette + enrichment)')
         best_composite_k = int(stats_df.loc[stats_df['composite_score'].idxmax(), 'k'])
-        ax8.axvline(x=best_composite_k, color='g', linestyle='--', alpha=0.5, label=f'Best k={best_composite_k}')
-        ax8.axhline(y=stats_df['composite_score'].max(), color='r', linestyle='--', alpha=0.3)
+        ax8.axvline(x=best_composite_k, color='#40D392', linestyle='--', alpha=0.5, label=f'Best k={best_composite_k}')
+        ax8.axhline(y=stats_df['composite_score'].max(), color='#F07167', linestyle='--', alpha=0.3)
         ax8.legend()
 
         plt.tight_layout()
@@ -2983,6 +2900,13 @@ print(fmt_param('circular-dendrogram', args.plot_circular_dendrogram, 'plot_circ
 print(fmt_param('perfect-threshold', args.perfect_threshold))
 print(fmt_param('strong-threshold', args.strong_threshold))
 print(fmt_param('early-stopping', args.early_stopping))
+print(fmt_param('sequence-list', args.sequence_list))
+print(fmt_param('silhouette-sample-size', args.silhouette_sample_size))
+print(fmt_param('fdr-threshold', args.fdr_threshold))
+print(fmt_param('fdr-method', args.fdr_method))
+print(fmt_param('analysis-mode', args.analysis_mode))
+print(fmt_param('structural-threshold', args.structural_threshold))
+print(fmt_param('umap-html', args.umap_html))
 print(fmt_param('background', args.background))
 print(fmt_param('log-file', args.log_file))
 
