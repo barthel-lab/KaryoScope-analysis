@@ -89,16 +89,16 @@ parser.add_argument("--exclude-features", dest="exclude_features", default="nove
                     help="Comma-separated list of features to exclude, supports wildcards (* and ?) (default: 'novel,canonical_telomere*')")
 parser.add_argument("--linkage-method", dest="linkage_method", default="ward",
                     help="Linkage method for hierarchical clustering (default: ward)")
-parser.add_argument("--matrix-type", dest="matrix_type", default="length_weighted",
+parser.add_argument("--matrix-type", dest="matrix_type", default="count_log1p_zscore_blockweight",
                     choices=["binary", "count", "length_weighted", "count_log1p",
                              "count_log1p_zscore", "count_log1p_zscore_blockweight"],
                     help="Type of adjacency matrix (controls both edges and abundance):\n"
                          "  binary: 0/1 presence/absence\n"
                          "  count: raw transition counts / raw feature bp totals\n"
-                         "  length_weighted: feature-length proportions (default)\n"
+                         "  length_weighted: feature-length proportions\n"
                          "  count_log1p: log(count+1), compresses dynamic range for rare features\n"
                          "  count_log1p_zscore: log(count+1) with per-column z-score normalization\n"
-                         "  count_log1p_zscore_blockweight: log(count+1) with z-score + block reweighting for equal edge/abundance contribution")
+                         "  count_log1p_zscore_blockweight: log(count+1) with z-score + block reweighting for equal edge/abundance contribution (default)")
 parser.add_argument("--edges", dest="edge_mode", default="symmetric",
                     choices=["directional", "symmetric"],
                     help="Edge counting mode:\n"
