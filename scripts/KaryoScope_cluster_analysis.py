@@ -110,6 +110,9 @@ parser.add_argument("--matrix-mode", dest="matrix_mode", default="combined",
                     help="Matrix building mode for merged featuresets:\n"
                          "  layered: split colon-separated features into layers, build matrices per layer\n"
                          "  combined: treat merged features as atomic (default, higher dimensionality)")
+parser.add_argument("--include-edges", dest="include_edges",
+                    action=argparse.BooleanOptionalAction, default=True,
+                    help="Include edge (transition) dimensions (default: True)")
 parser.add_argument("--abundance", dest="include_abundance",
                     action=argparse.BooleanOptionalAction, default=True,
                     help="Include feature abundance dimensions (default: True)")
@@ -182,6 +185,9 @@ class TeeLogger:
 
     def close(self):
         self.log.close()
+
+if not args.include_edges and not args.include_abundance:
+    parser.error("At least one of --edges or --abundance must be enabled")
 
 if args.log_file:
     log_path = f"{args.output_prefix}.log"
@@ -995,7 +1001,7 @@ def get_weighted_edges(features_with_lengths, edge_mode="directional"):
 
 
 def build_layer_matrix(seq_names, seq_feature_data, seq_length_dict, layer_idx, n_layers,
-                       edge_mode, matrix_type, include_abundance):
+                       edge_mode, matrix_type, include_abundance, include_edges=True):
     """Build edge and abundance matrices for a single layer.
 
     Returns:
@@ -1016,52 +1022,54 @@ def build_layer_matrix(seq_names, seq_feature_data, seq_length_dict, layer_idx, 
             layer_features_set.add(feat)
     layer_features = sorted(layer_features_set)
 
-    # Build edge pairs for this layer
-    layer_pairs = []
-    if edge_mode == "symmetric":
-        for i, f1 in enumerate(layer_features):
-            for f2 in layer_features[i+1:]:
-                layer_pairs.append(f"{f1}->{f2}")
-    else:
-        for f1 in layer_features:
-            for f2 in layer_features:
-                if f1 != f2:
+    # Build edge matrix if requested
+    if include_edges:
+        layer_pairs = []
+        if edge_mode == "symmetric":
+            for i, f1 in enumerate(layer_features):
+                for f2 in layer_features[i+1:]:
                     layer_pairs.append(f"{f1}->{f2}")
+        else:
+            for f1 in layer_features:
+                for f2 in layer_features:
+                    if f1 != f2:
+                        layer_pairs.append(f"{f1}->{f2}")
 
-    pair_to_idx = {pair: i for i, pair in enumerate(layer_pairs)}
+        pair_to_idx = {pair: i for i, pair in enumerate(layer_pairs)}
+        edge_matrix = np.zeros((len(seq_names), len(layer_pairs)), dtype=np.float32)
 
-    # Build edge matrix
-    edge_matrix = np.zeros((len(seq_names), len(layer_pairs)), dtype=np.float32)
+        for i, read_name in enumerate(seq_names):
+            layer_data = layer_read_data[read_name]
+            read_len = seq_length_dict.get(read_name, 1)
 
-    for i, read_name in enumerate(seq_names):
-        layer_data = layer_read_data[read_name]
-        read_len = seq_length_dict.get(read_name, 1)
+            if matrix_type == "binary":
+                edges = get_edges([f for f, _ in layer_data], edge_mode=edge_mode)
+                for from_feat, to_feat in edges:
+                    pair_name = f"{from_feat}->{to_feat}"
+                    if pair_name in pair_to_idx:
+                        edge_matrix[i, pair_to_idx[pair_name]] = 1
 
-        if matrix_type == "binary":
-            edges = get_edges([f for f, _ in layer_data], edge_mode=edge_mode)
-            for from_feat, to_feat in edges:
-                pair_name = f"{from_feat}->{to_feat}"
-                if pair_name in pair_to_idx:
-                    edge_matrix[i, pair_to_idx[pair_name]] = 1
+            elif matrix_type in ("count", "count_log1p", "count_log1p_zscore", "count_log1p_zscore_blockweight"):
+                edges = get_edges([f for f, _ in layer_data], edge_mode=edge_mode)
+                for from_feat, to_feat in edges:
+                    pair_name = f"{from_feat}->{to_feat}"
+                    if pair_name in pair_to_idx:
+                        edge_matrix[i, pair_to_idx[pair_name]] += 1
 
-        elif matrix_type in ("count", "count_log1p", "count_log1p_zscore", "count_log1p_zscore_blockweight"):
-            edges = get_edges([f for f, _ in layer_data], edge_mode=edge_mode)
-            for from_feat, to_feat in edges:
-                pair_name = f"{from_feat}->{to_feat}"
-                if pair_name in pair_to_idx:
-                    edge_matrix[i, pair_to_idx[pair_name]] += 1
+            elif matrix_type == "length_weighted":
+                edges = get_weighted_edges(layer_data, edge_mode=edge_mode)
+                for from_feat, to_feat, weight in edges:
+                    pair_name = f"{from_feat}->{to_feat}"
+                    if pair_name in pair_to_idx:
+                        edge_matrix[i, pair_to_idx[pair_name]] += weight / read_len
 
-        elif matrix_type == "length_weighted":
-            edges = get_weighted_edges(layer_data, edge_mode=edge_mode)
-            for from_feat, to_feat, weight in edges:
-                pair_name = f"{from_feat}->{to_feat}"
-                if pair_name in pair_to_idx:
-                    edge_matrix[i, pair_to_idx[pair_name]] += weight / read_len
+        if matrix_type in ("count_log1p", "count_log1p_zscore", "count_log1p_zscore_blockweight"):
+            edge_matrix = np.log1p(edge_matrix)
 
-    if matrix_type in ("count_log1p", "count_log1p_zscore", "count_log1p_zscore_blockweight"):
-        edge_matrix = np.log1p(edge_matrix)
-
-    n_edge_cols = len(layer_pairs)
+        n_edge_cols = len(layer_pairs)
+    else:
+        edge_matrix = None
+        n_edge_cols = 0
 
     # Build abundance matrix if requested
     if include_abundance:
@@ -1098,15 +1106,16 @@ def build_layer_matrix(seq_names, seq_feature_data, seq_length_dict, layer_idx, 
             abundance_matrix = np.log1p(abundance_matrix)
 
         if matrix_type in ("count_log1p_zscore", "count_log1p_zscore_blockweight"):
-            scaler_e = StandardScaler()
-            edge_matrix = scaler_e.fit_transform(edge_matrix)
+            if edge_matrix is not None:
+                scaler_e = StandardScaler()
+                edge_matrix = scaler_e.fit_transform(edge_matrix)
 
             scaler_a = StandardScaler()
             abundance_matrix = scaler_a.fit_transform(abundance_matrix)
 
             print(f"  Applied z-score normalization to all columns")
 
-            if matrix_type == "count_log1p_zscore_blockweight":
+            if matrix_type == "count_log1p_zscore_blockweight" and edge_matrix is not None:
                 n_edge = edge_matrix.shape[1]
                 n_abund = abundance_matrix.shape[1]
                 if n_abund > 0:
@@ -1114,9 +1123,12 @@ def build_layer_matrix(seq_names, seq_feature_data, seq_length_dict, layer_idx, 
                     abundance_matrix *= scale_factor
                     print(f"  Applied block reweighting: abundance scaled by {scale_factor:.2f}x for equal variance contribution")
 
-        matrix = np.hstack([edge_matrix, abundance_matrix])
+        if edge_matrix is not None:
+            matrix = np.hstack([edge_matrix, abundance_matrix])
+        else:
+            matrix = abundance_matrix
         n_abundance_cols = len(layer_features)
-    else:
+    elif include_edges:
         if matrix_type in ("count_log1p_zscore", "count_log1p_zscore_blockweight"):
             scaler_e = StandardScaler()
             edge_matrix = scaler_e.fit_transform(edge_matrix)
@@ -1124,12 +1136,14 @@ def build_layer_matrix(seq_names, seq_feature_data, seq_length_dict, layer_idx, 
 
         matrix = edge_matrix
         n_abundance_cols = 0
+    else:
+        raise ValueError("At least one of include_edges or include_abundance must be True")
 
     return matrix, n_edge_cols, n_abundance_cols, layer_features
 
 
 def build_combined_matrix(seq_names, seq_feature_data, seq_length_dict, all_features,
-                          edge_mode, matrix_type, include_abundance):
+                          edge_mode, matrix_type, include_abundance, include_edges=True):
     """Build edge and abundance matrices treating features as atomic (original approach).
 
     This treats merged features like "chr7:p_arm:nonsubtelomeric" as single atomic features,
@@ -1141,52 +1155,54 @@ def build_combined_matrix(seq_names, seq_feature_data, seq_length_dict, all_feat
         n_edge_cols: Number of edge columns
         n_abundance_cols: Number of abundance columns
     """
-    # Build edge pairs
-    all_pairs = []
-    if edge_mode == "symmetric":
-        for i, f1 in enumerate(all_features):
-            for f2 in all_features[i+1:]:
-                all_pairs.append(f"{f1}->{f2}")
-    else:
-        for f1 in all_features:
-            for f2 in all_features:
-                if f1 != f2:
+    # Build edge matrix if requested
+    if include_edges:
+        all_pairs = []
+        if edge_mode == "symmetric":
+            for i, f1 in enumerate(all_features):
+                for f2 in all_features[i+1:]:
                     all_pairs.append(f"{f1}->{f2}")
+        else:
+            for f1 in all_features:
+                for f2 in all_features:
+                    if f1 != f2:
+                        all_pairs.append(f"{f1}->{f2}")
 
-    pair_to_idx = {pair: i for i, pair in enumerate(all_pairs)}
+        pair_to_idx = {pair: i for i, pair in enumerate(all_pairs)}
+        edge_matrix = np.zeros((len(seq_names), len(all_pairs)), dtype=np.float32)
 
-    # Build edge matrix
-    edge_matrix = np.zeros((len(seq_names), len(all_pairs)), dtype=np.float32)
+        for i, read_name in enumerate(seq_names):
+            feat_data = seq_feature_data[read_name]
+            read_len = seq_length_dict.get(read_name, 1)
 
-    for i, read_name in enumerate(seq_names):
-        feat_data = seq_feature_data[read_name]
-        read_len = seq_length_dict.get(read_name, 1)
+            if matrix_type == "binary":
+                edges = get_edges([f for f, _ in feat_data], edge_mode=edge_mode)
+                for from_feat, to_feat in edges:
+                    pair_name = f"{from_feat}->{to_feat}"
+                    if pair_name in pair_to_idx:
+                        edge_matrix[i, pair_to_idx[pair_name]] = 1
 
-        if matrix_type == "binary":
-            edges = get_edges([f for f, _ in feat_data], edge_mode=edge_mode)
-            for from_feat, to_feat in edges:
-                pair_name = f"{from_feat}->{to_feat}"
-                if pair_name in pair_to_idx:
-                    edge_matrix[i, pair_to_idx[pair_name]] = 1
+            elif matrix_type in ("count", "count_log1p", "count_log1p_zscore", "count_log1p_zscore_blockweight"):
+                edges = get_edges([f for f, _ in feat_data], edge_mode=edge_mode)
+                for from_feat, to_feat in edges:
+                    pair_name = f"{from_feat}->{to_feat}"
+                    if pair_name in pair_to_idx:
+                        edge_matrix[i, pair_to_idx[pair_name]] += 1
 
-        elif matrix_type in ("count", "count_log1p", "count_log1p_zscore", "count_log1p_zscore_blockweight"):
-            edges = get_edges([f for f, _ in feat_data], edge_mode=edge_mode)
-            for from_feat, to_feat in edges:
-                pair_name = f"{from_feat}->{to_feat}"
-                if pair_name in pair_to_idx:
-                    edge_matrix[i, pair_to_idx[pair_name]] += 1
+            elif matrix_type == "length_weighted":
+                edges = get_weighted_edges(feat_data, edge_mode=edge_mode)
+                for from_feat, to_feat, weight in edges:
+                    pair_name = f"{from_feat}->{to_feat}"
+                    if pair_name in pair_to_idx:
+                        edge_matrix[i, pair_to_idx[pair_name]] += weight / read_len
 
-        elif matrix_type == "length_weighted":
-            edges = get_weighted_edges(feat_data, edge_mode=edge_mode)
-            for from_feat, to_feat, weight in edges:
-                pair_name = f"{from_feat}->{to_feat}"
-                if pair_name in pair_to_idx:
-                    edge_matrix[i, pair_to_idx[pair_name]] += weight / read_len
+        if matrix_type in ("count_log1p", "count_log1p_zscore", "count_log1p_zscore_blockweight"):
+            edge_matrix = np.log1p(edge_matrix)
 
-    if matrix_type in ("count_log1p", "count_log1p_zscore", "count_log1p_zscore_blockweight"):
-        edge_matrix = np.log1p(edge_matrix)
-
-    n_edge_cols = len(all_pairs)
+        n_edge_cols = len(all_pairs)
+    else:
+        edge_matrix = None
+        n_edge_cols = 0
 
     # Build abundance matrix if requested
     if include_abundance:
@@ -1223,15 +1239,16 @@ def build_combined_matrix(seq_names, seq_feature_data, seq_length_dict, all_feat
             abundance_matrix = np.log1p(abundance_matrix)
 
         if matrix_type in ("count_log1p_zscore", "count_log1p_zscore_blockweight"):
-            scaler_e = StandardScaler()
-            edge_matrix = scaler_e.fit_transform(edge_matrix)
+            if edge_matrix is not None:
+                scaler_e = StandardScaler()
+                edge_matrix = scaler_e.fit_transform(edge_matrix)
 
             scaler_a = StandardScaler()
             abundance_matrix = scaler_a.fit_transform(abundance_matrix)
 
             print(f"  Applied z-score normalization to all columns")
 
-            if matrix_type == "count_log1p_zscore_blockweight":
+            if matrix_type == "count_log1p_zscore_blockweight" and edge_matrix is not None:
                 n_edge = edge_matrix.shape[1]
                 n_abund = abundance_matrix.shape[1]
                 if n_abund > 0:
@@ -1239,9 +1256,12 @@ def build_combined_matrix(seq_names, seq_feature_data, seq_length_dict, all_feat
                     abundance_matrix *= scale_factor
                     print(f"  Applied block reweighting: abundance scaled by {scale_factor:.2f}x for equal variance contribution")
 
-        matrix = np.hstack([edge_matrix, abundance_matrix])
+        if edge_matrix is not None:
+            matrix = np.hstack([edge_matrix, abundance_matrix])
+        else:
+            matrix = abundance_matrix
         n_abundance_cols = len(all_features)
-    else:
+    elif include_edges:
         if matrix_type in ("count_log1p_zscore", "count_log1p_zscore_blockweight"):
             scaler_e = StandardScaler()
             edge_matrix = scaler_e.fit_transform(edge_matrix)
@@ -1249,6 +1269,8 @@ def build_combined_matrix(seq_names, seq_feature_data, seq_length_dict, all_feat
 
         matrix = edge_matrix
         n_abundance_cols = 0
+    else:
+        raise ValueError("At least one of include_edges or include_abundance must be True")
 
     return matrix, n_edge_cols, n_abundance_cols
 
@@ -1265,7 +1287,7 @@ if args.matrix_mode == "layered" and n_layers > 1:
     for layer_idx in range(n_layers):
         layer_matrix, n_edge, n_abund, layer_feats = build_layer_matrix(
             seq_names, seq_feature_data, seq_length_dict, layer_idx, n_layers,
-            args.edge_mode, args.matrix_type, args.include_abundance
+            args.edge_mode, args.matrix_type, args.include_abundance, args.include_edges
         )
         all_layer_matrices.append(layer_matrix)
         total_edge_cols += n_edge
@@ -1286,30 +1308,33 @@ else:
 
     adj_matrix, total_edge_cols, total_abundance_cols = build_combined_matrix(
         seq_names, seq_feature_data, seq_length_dict, all_features,
-        args.edge_mode, args.matrix_type, args.include_abundance
+        args.edge_mode, args.matrix_type, args.include_abundance, args.include_edges
     )
 
     # Build feature name list matching exact column order of combined matrix
     svd_feature_name_list = []
-    if args.edge_mode == "symmetric":
-        for i, f1 in enumerate(all_features):
-            for f2 in all_features[i+1:]:
-                svd_feature_name_list.append(f"edge:{f1}->{f2}")
-    else:
-        for f1 in all_features:
-            for f2 in all_features:
-                if f1 != f2:
+    if args.include_edges:
+        if args.edge_mode == "symmetric":
+            for i, f1 in enumerate(all_features):
+                for f2 in all_features[i+1:]:
                     svd_feature_name_list.append(f"edge:{f1}->{f2}")
+        else:
+            for f1 in all_features:
+                for f2 in all_features:
+                    if f1 != f2:
+                        svd_feature_name_list.append(f"edge:{f1}->{f2}")
     if args.include_abundance:
         for f in all_features:
             svd_feature_name_list.append(f"abundance:{f}")
 
     print(f"  Unique features: {len(all_features)}")
-    print(f"  Edge columns: {total_edge_cols}")
+    if args.include_edges:
+        print(f"  Edge columns: {total_edge_cols}")
     if args.include_abundance:
         print(f"  Abundance columns: {total_abundance_cols}")
 
-print(f"\nTotal edge dimensions: {total_edge_cols}")
+if args.include_edges:
+    print(f"\nTotal edge dimensions: {total_edge_cols}")
 if args.include_abundance:
     print(f"Total abundance dimensions: {total_abundance_cols}")
 print(f"Final matrix shape: {adj_matrix.shape}")
@@ -2946,7 +2971,8 @@ print(fmt_param('max-sequence-length', args.max_sequence_length))
 print(fmt_param('exclude-features', args.exclude_features))
 print(fmt_param('linkage-method', args.linkage_method))
 print(fmt_param('matrix-type', args.matrix_type))
-print(fmt_param('edges', args.edge_mode, 'edge_mode'))
+print(fmt_param('include-edges', args.include_edges, 'include_edges'))
+print(fmt_param('edge-mode', args.edge_mode, 'edge_mode'))
 print(fmt_param('matrix-mode', args.matrix_mode))
 print(fmt_param('abundance', args.include_abundance, 'include_abundance'))
 print(fmt_param('reduce-dims', args.reduce_dims))
