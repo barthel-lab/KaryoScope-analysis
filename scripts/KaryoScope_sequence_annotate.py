@@ -29,24 +29,27 @@ Optional alignment stats (when --readnames-dir provided):
   total_align_len, total_align_fraction
 
 Usage:
+  # Auto-detect featuresets from filenames (glob-friendly)
   python KaryoScope_sequence_annotate.py \\
-    --prefix analysis_output_prefix \\
-    --bed-dir results \\
-    --output sequence_annotations.tsv
+    --bed results/raw_bed/*.bed.gz \\
+    --output annotations.tsv.gz
 
-  # With alignment stats:
+  # Explicit featureset labels
   python KaryoScope_sequence_annotate.py \\
-    --prefix analysis_output_prefix \\
-    --bed-dir results \\
+    --bed region:sample1.bed.gz subtelomeric:sample2.bed.gz \\
+    --output annotations.tsv.gz
+
+  # With alignment stats
+  python KaryoScope_sequence_annotate.py \\
+    --bed results/raw_bed/*.bed.gz \\
     --readnames-dir /path/to/samples \\
-    --output sequence_annotations.tsv
+    --output annotations.tsv.gz
 """
 
 import argparse
-import fnmatch
 import gzip
-import math
 import os
+import re
 import sys
 
 # Capture original command line for logging
@@ -59,7 +62,7 @@ _argparse_defaults = None
 
 
 # ---------------------------------------------------------------------------
-# BED loading / discovery (from KaryoScope_cluster_annotate.py)
+# BED loading
 # ---------------------------------------------------------------------------
 
 def load_bed_file(filepath):
@@ -87,44 +90,57 @@ def load_bed_file(filepath):
     return pd.DataFrame(records)
 
 
-def find_featureset_beds(bed_dirs, samples, featuresets, database="KS_human_CHM13", smoothness="smoothed"):
-    """Find BED files for each featureset for each sample, searching multiple directories."""
-    beds_by_featureset = {fs: [] for fs in featuresets}
+# ---------------------------------------------------------------------------
+# Featureset auto-detection from BED filenames
+# ---------------------------------------------------------------------------
 
-    for sample in samples:
-        for fs in featuresets:
-            found = False
-            for bed_dir in bed_dirs:
-                base_path = f"{bed_dir}/{sample}/telogator/1/KaryoScope/{database}"
+# Standard: {sample}.telogator.1.{database}.{featureset}.smoothed.*.bed[.gz]
+# rDNA:     {sample}.rDNA_filtered.1.{database}.{featureset}.smoothed.*.bed[.gz]
+_STANDARD_PATTERN = re.compile(
+    r'^.+\.(?:telogator|rDNA_filtered)\.\d+\.[^.]+\.([^.]+)\.smoothed\.'
+)
+# Short: {sample}.{featureset}.merged.bed[.gz]
+_SHORT_PATTERN = re.compile(
+    r'^[^.]+\.([^.]+)\.merged\.bed'
+)
 
-                # Try different naming patterns (nested directory structure)
-                patterns = [
-                    f"{base_path}/{sample}.telogator.1.{database}.{fs}.{smoothness}.KaryoScope.bed",
-                    f"{base_path}/{sample}.telogator.1.{database}.{fs}.{smoothness}.bed",
-                    f"{base_path}/{sample}.telogator.1.{database}.{fs}.{smoothness}.features.bed",
-                    f"{base_path}/{sample}.telogator.1.{database}.{fs}.{smoothness}.merged.bed",
-                ]
-                # Also try flat directory (files directly in bed_dir)
-                patterns += [
-                    f"{bed_dir}/{sample}.telogator.1.{database}.{fs}.{smoothness}.KaryoScope.bed",
-                    f"{bed_dir}/{sample}.telogator.1.{database}.{fs}.{smoothness}.bed",
-                    f"{bed_dir}/{sample}.telogator.1.{database}.{fs}.{smoothness}.features.bed",
-                    f"{bed_dir}/{sample}.telogator.1.{database}.{fs}.{smoothness}.merged.bed",
-                ]
 
-                for pattern in patterns:
-                    if os.path.exists(pattern):
-                        beds_by_featureset[fs].append(pattern)
-                        found = True
-                        break
-                    elif os.path.exists(pattern + '.gz'):
-                        beds_by_featureset[fs].append(pattern + '.gz')
-                        found = True
-                        break
-                if found:
-                    break
+def detect_featureset(filepath):
+    """Auto-detect featureset name from a BED filename.
 
-    return beds_by_featureset
+    Handles patterns:
+      - {sample}.telogator.1.{db}.{featureset}.smoothed.*.bed[.gz]
+      - {sample}.rDNA_filtered.1.{db}.{featureset}.smoothed.*.bed[.gz]
+      - {sample}.{featureset}.merged.bed[.gz]
+
+    Returns the featureset string or raises ValueError.
+    """
+    basename = os.path.basename(filepath)
+    m = _STANDARD_PATTERN.match(basename)
+    if m:
+        return m.group(1)
+    m = _SHORT_PATTERN.match(basename)
+    if m:
+        return m.group(1)
+    raise ValueError(
+        f"Cannot auto-detect featureset from filename: {basename}\n"
+        f"  Use label:path syntax, e.g.: region:{filepath}"
+    )
+
+
+def extract_sample_name(filepath):
+    """Extract sample name from a BED filename.
+
+    Returns the first field before '.telogator' or '.rDNA_filtered',
+    or the first field before the first dot for short-form names.
+    """
+    basename = os.path.basename(filepath)
+    for marker in ('.telogator', '.rDNA_filtered'):
+        idx = basename.find(marker)
+        if idx > 0:
+            return basename[:idx]
+    # Fallback: first field before first dot
+    return basename.split('.')[0]
 
 
 # ---------------------------------------------------------------------------
@@ -582,6 +598,19 @@ class TeeLogger:
 
 
 # ---------------------------------------------------------------------------
+# Output path helpers
+# ---------------------------------------------------------------------------
+
+def _strip_tsv_extension(path):
+    """Strip .tsv or .tsv.gz extension from a path for deriving sibling files."""
+    if path.endswith('.tsv.gz'):
+        return path[:-7]
+    if path.endswith('.tsv'):
+        return path[:-4]
+    return path
+
+
+# ---------------------------------------------------------------------------
 # Parameter printing
 # ---------------------------------------------------------------------------
 
@@ -601,15 +630,15 @@ def _print_params_and_command(args):
             s += " (default)"
         return s
 
+    bed_summary = f"{len(args.bed)} file(s)"
+
     params = [
-        ("prefix", str(args.prefix), None),
+        ("bed", bed_summary, None),
         ("output", str(args.output), None),
-        ("bed-dir", str(args.bed_dir), None),
         ("featuresets", _fmt(args.featuresets, "featuresets"), None),
-        ("database", _fmt(args.database, "database"), None),
-        ("smoothness", _fmt(args.smoothness, "smoothness"), None),
         ("window-size", _fmt(args.window_size, "window_size"), None),
         ("readnames-dir", _fmt(args.readnames_dir, "readnames_dir"), None),
+        ("samples", _fmt(args.samples, "samples"), None),
         ("reference", _fmt(args.reference, "reference"), None),
         ("log-file", _fmt(args.log_file, "log_file"), None),
     ]
@@ -638,22 +667,20 @@ def main():
         formatter_class=argparse.RawTextHelpFormatter
     )
 
-    parser.add_argument("--prefix", required=True,
-                        help="Analysis prefix (finds {prefix}.read_assignments.tsv)")
-    parser.add_argument("--bed-dir", dest="bed_dir", required=True,
-                        help="Comma-separated BED directories")
+    parser.add_argument("--bed", nargs='+', required=True,
+                        help="BED/BED.gz files. Featureset is auto-detected from filename\n"
+                             "or specified via label:path syntax (e.g. region:sample.bed.gz)")
     parser.add_argument("--output", "-o", required=True,
-                        help="Output TSV path")
-    parser.add_argument("--featuresets", default="region,subtelomeric,chromosome,acrocentric,repeat,gene",
-                        help="Comma-separated featuresets (default: region,subtelomeric,chromosome,acrocentric,repeat,gene)")
-    parser.add_argument("--database", default="KS_human_CHM13",
-                        help="Database name (default: KS_human_CHM13)")
-    parser.add_argument("--smoothness", default="smoothed",
-                        help="BED smoothness (default: smoothed)")
+                        help="Output TSV path (supports .tsv.gz for gzipped output)")
+    parser.add_argument("--featuresets", default=None,
+                        help="Comma-separated featuresets to include (default: all detected)")
     parser.add_argument("--window-size", dest="window_size", type=int, default=1000,
                         help="Window size in bp (default: 1000)")
     parser.add_argument("--readnames-dir", dest="readnames_dir", default=None,
                         help="Base directory for readnames.txt + stats.tsv (enables alignment stats)")
+    parser.add_argument("--samples", default=None,
+                        help="Comma-separated sample names for --readnames-dir lookup\n"
+                             "(default: auto-extracted from BED filenames)")
     parser.add_argument("--reference", default="CHM13",
                         help="Reference genome name for stats.tsv files (default: CHM13)")
     parser.add_argument("--log-file", dest="log_file", default=True,
@@ -669,11 +696,9 @@ def main():
     args = parser.parse_args()
 
     # 1. Set up logging
+    output_prefix = _strip_tsv_extension(args.output)
     if args.log_file:
-        if args.output.endswith('.tsv'):
-            log_path = args.output[:-4] + '.log'
-        else:
-            log_path = args.output + '.log'
+        log_path = output_prefix + '.log'
         sys.stdout = TeeLogger(log_path)
 
     print("=" * 60)
@@ -681,40 +706,58 @@ def main():
     print("=" * 60)
     _print_params_and_command(args)
 
-    # 2. Load read assignments -> get read IDs and sample names
-    read_assignments_file = f"{args.prefix}.read_assignments.tsv"
-    if not os.path.exists(read_assignments_file):
-        read_assignments_file = f"{args.prefix}.sequence_assignments.tsv"
+    # 2. Parse --bed args: split on ':' for label:path, else auto-detect featureset
+    # Group files by featureset into {featureset: [paths]} dict
+    beds_by_featureset = {}
+    for bed_arg in args.bed:
+        if ':' in bed_arg and not os.path.exists(bed_arg):
+            # label:path syntax
+            label, path = bed_arg.split(':', 1)
+            featureset = label
+        elif ':' in bed_arg:
+            # Path exists with colon in name — try auto-detect first
+            try:
+                featureset = detect_featureset(bed_arg)
+                path = bed_arg
+            except ValueError:
+                # Maybe it's label:path after all
+                label, path = bed_arg.split(':', 1)
+                featureset = label
+        else:
+            path = bed_arg
+            featureset = detect_featureset(path)
 
-    if not os.path.exists(read_assignments_file):
-        print(f"ERROR: No read/sequence assignments file found for prefix: {args.prefix}")
+        if not os.path.exists(path):
+            print(f"ERROR: BED file not found: {path}")
+            sys.exit(1)
+
+        beds_by_featureset.setdefault(featureset, []).append(path)
+
+    # Filter by --featuresets if provided
+    if args.featuresets:
+        requested = {fs.strip() for fs in args.featuresets.split(',')}
+        unknown = requested - set(beds_by_featureset.keys())
+        if unknown:
+            print(f"  WARNING: Requested featuresets not found in BED files: {unknown}")
+        beds_by_featureset = {fs: paths for fs, paths in beds_by_featureset.items() if fs in requested}
+
+    if not beds_by_featureset:
+        print("ERROR: No BED files matched after filtering")
         sys.exit(1)
 
-    print(f"\nLoading read assignments: {read_assignments_file}")
-    assignments = pd.read_csv(read_assignments_file, sep='\t')
+    # Determine featureset processing order (sorted for reproducibility)
+    featuresets = sorted(beds_by_featureset.keys())
 
-    if 'sequence' not in assignments.columns and 'read' in assignments.columns:
-        assignments.rename(columns={'read': 'sequence'}, inplace=True)
+    print(f"\nDetected featuresets: {featuresets}")
+    for fs in featuresets:
+        print(f"  {fs}: {len(beds_by_featureset[fs])} file(s)")
+        for p in beds_by_featureset[fs]:
+            print(f"    {p}")
 
-    all_read_ids = set(assignments['sequence'].tolist())
-    samples = assignments['sample'].unique().tolist()
-    print(f"  Total reads: {len(all_read_ids)}")
-    print(f"  Samples: {len(samples)}")
-
-    # 3. Find and load BED files per featureset (same logic as cluster_annotate)
-    featuresets = [fs.strip() for fs in args.featuresets.split(',')]
-    bed_dirs = [d.strip() for d in args.bed_dir.split(',')]
-
-    print(f"\nFeaturesets: {featuresets}")
-    print(f"Finding BED files in: {bed_dirs}")
-    beds_by_featureset = find_featureset_beds(bed_dirs, samples, featuresets, args.database, args.smoothness)
-
+    # 3. Load BED files per featureset
     bed_data = {}
     for fs in featuresets:
         bed_files = beds_by_featureset[fs]
-        if not bed_files:
-            print(f"  WARNING: No BED files found for featureset '{fs}'")
-            continue
         print(f"\n  Loading {fs}: {len(bed_files)} files")
         all_dfs = []
         for bf in bed_files:
@@ -726,6 +769,12 @@ def main():
     if not bed_data:
         print("ERROR: No BED data loaded")
         sys.exit(1)
+
+    # Extract all_read_ids as union of 'read' column across all loaded BED DataFrames
+    all_read_ids = set()
+    for fs, df in bed_data.items():
+        all_read_ids.update(df['read'].unique())
+    print(f"\n  Total unique reads across all BED files: {len(all_read_ids)}")
 
     # 4. For each featureset, compute per-read metrics
     # Build columns per featureset, then concat all at the end to avoid fragmentation
@@ -856,6 +905,18 @@ def main():
         print("Loading alignment statistics")
         print(f"{'=' * 40}")
 
+        # Determine sample names for readnames/stats file lookup
+        if args.samples:
+            samples = [s.strip() for s in args.samples.split(',')]
+        else:
+            # Auto-extract from BED filenames
+            sample_set = set()
+            for fs_paths in beds_by_featureset.values():
+                for p in fs_paths:
+                    sample_set.add(extract_sample_name(p))
+            samples = sorted(sample_set)
+        print(f"  Samples for alignment stats: {samples}")
+
         print(f"\nLoading readnames files from: {args.readnames_dir}")
         readnames = load_readnames(args.readnames_dir, samples)
         print(f"  Total reads in readnames: {len(readnames)}")
@@ -884,10 +945,9 @@ def main():
         print(f"\n  Reads with alignment stats: {n_with_approach}/{len(master)}")
 
     # 7. Save outputs
-    output_prefix = args.output[:-4] if args.output.endswith('.tsv') else args.output
-
-    # Main TSV
-    master.to_csv(args.output, sep='\t', index=False)
+    # Main TSV (support .tsv.gz)
+    compression = 'gzip' if args.output.endswith('.gz') else None
+    master.to_csv(args.output, sep='\t', index=False, compression=compression)
     print(f"\nSaved sequence annotations to: {args.output}")
     print(f"  Rows: {len(master)}")
     print(f"  Columns: {len(master.columns)}")
