@@ -16,9 +16,13 @@
 #   --bed pre.merged.bed.gz post.merged.bed.gz ...
 
 import argparse
+import atexit
+import datetime
 import gzip
 import pandas as pd
 import sys
+
+_original_command = ' '.join(sys.argv)
 
 parser = argparse.ArgumentParser(
     description="Merge multiple BED featuresets by position overlay.",
@@ -66,8 +70,38 @@ parser.add_argument("--collapse-non-acrocentric", dest="collapse_non_acrocentric
                          "Ambiguous labels (autosome_multigroup1, categorized, etc.) are preserved.\n"
                          "E.g., chr7 -> non_acrocentric, so merge produces non_acrocentric:rDNA.\n"
                          "Acrocentric chromosomes (chr13-15, chr21-22) are preserved.")
+parser.add_argument("--log", default=None,
+                    help="Path to log file. When provided, all console output is also written to this file.")
 
 args = parser.parse_args()
+
+
+# --- TeeLogger: duplicate stdout to log file ---
+class TeeLogger:
+    """Write to both stdout and a log file."""
+    def __init__(self, log_path):
+        self.terminal = sys.stdout
+        self.log = open(log_path, 'w')
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        self.log.flush()
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+
+    def close(self):
+        self.log.close()
+
+if args.log:
+    sys.stdout = TeeLogger(args.log)
+    atexit.register(lambda: sys.stdout.close() if isinstance(sys.stdout, TeeLogger) else None)
+    print(f"KaryoScope_merge_beds.py")
+    print(f"  Timestamp: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  Command: {_original_command}")
+    print()
 
 if len(args.bed) < 2:
     print("Error: At least 2 BED files required for merging", file=sys.stderr)
