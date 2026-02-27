@@ -166,6 +166,24 @@ parser.add_argument("--structural-threshold", "--st", dest="structural_threshold
 
 args = parser.parse_args()
 
+# Track which arguments were explicitly set by the user (vs defaults)
+_user_set_args = set()
+for action in parser._actions:
+    if action.dest in ('help',):
+        continue
+    if action.option_strings:
+        for opt in action.option_strings:
+            if opt in sys.argv:
+                _user_set_args.add(action.dest)
+                break
+
+# Override defaults for structure mode
+if args.analysis_mode == 'structure':
+    if 'min_k' not in _user_set_args:
+        args.min_k = 2
+    if 'max_k' not in _user_set_args:
+        args.max_k = 10
+
 # --- Set up logging ---
 class TeeLogger:
     """Write to both stdout and a log file."""
@@ -194,205 +212,317 @@ if args.log_file:
 
 
 # =============================================================================
-# Structural Analysis Mode (Additive)
+# Structural Analysis Mode (Feature-Matrix Based)
 # =============================================================================
 
-def run_structure_mode(in_data, args):
-    """Run the structure-based analysis workflow (per-chromosome clustering)."""
+def run_structure_mode(in_data, args, seq_feature_data, seq_length_dict,
+                       all_features, n_layers):
+    """Run the structure-based analysis workflow (per-chromosome clustering).
+
+    Builds per-chromosome feature matrices using the shared matrix infrastructure,
+    then clusters each chromosome independently using Ward linkage.
+
+    Args:
+        in_data: DataFrame with BED data (sequence, chromosome, feature, etc.)
+        args: Parsed command-line arguments
+        seq_feature_data: dict of read_name -> [(feature, length), ...]
+        seq_length_dict: dict of read_name -> total annotated length
+        all_features: Sorted list of all unique features
+        n_layers: Number of detected feature layers
+    """
     print("=" * 60)
-    print("Mode: Structural Analysis (Per-Chromosome)")
+    print("Mode: Structural Analysis (Per-Chromosome, Feature Matrix)")
+    print(f"  Matrix type: {args.matrix_type}")
+    if args.n_clusters:
+        print(f"  Fixed k: {args.n_clusters}")
+    else:
+        print(f"  k-selection: {args.k_selection} (range {args.min_k}-{args.max_k})")
     print("=" * 60)
-    
+
     # Identify chromosomes
     chromosomes = sorted(in_data['chromosome'].unique())
-    chromosomes = [c for c in chromosomes if c != 'unknown'] # Filter unknown
-    
+    chromosomes = [c for c in chromosomes if c != 'unknown']
+
     print(f"Found {len(chromosomes)} chromosomes: {', '.join(chromosomes)}")
-    
+
+    # Build read -> sample map from in_data
+    read_sample_map = dict(zip(in_data['sequence'], in_data['sample']))
+
     all_cluster_assignments = []
     chromosome_linkages = {}
-    
-    # Standard hierarchical clustering imports
-    from scipy.cluster.hierarchy import linkage, fcluster
-    from scipy.spatial.distance import squareform
-    
-    # Simple pure-python Levenshtein implementation
-    def levenshtein_distance(s1, s2):
-        if len(s1) < len(s2):
-            return levenshtein_distance(s2, s1)
-        if len(s2) == 0:
-            return len(s1)
-        previous_row = range(len(s2) + 1)
-        for i, c1 in enumerate(s1):
-            current_row = [i + 1]
-            for j, c2 in enumerate(s2):
-                insertions = previous_row[j + 1] + 1
-                deletions = current_row[j] + 1
-                substitutions = previous_row[j] + (c1 != c2)
-                current_row.append(min(insertions, deletions, substitutions))
-            previous_row = current_row
-        return previous_row[-1]
+    chrom_k_diagnostics = {}  # Collect per-chrom k-selection stats for consolidated PDF
 
     for chrom in chromosomes:
         print(f"\n--- Processing {chrom} ---")
-        chrom_data = in_data[in_data['chromosome'] == chrom].copy()
-        
-        # Pre-calculate sequence -> sample map for speed
-        read_sample_map = dict(zip(chrom_data['sequence'], chrom_data['sample']))
+        chrom_data = in_data[in_data['chromosome'] == chrom]
+        chrom_read_names = sorted(chrom_data['sequence'].unique())
 
-        # Create "sequence strings" for distance calculation
-        seq_strings = {}
-        for read, group in chrom_data.groupby('sequence'):
-            # Sort by coordinate
-            sorted_group = group.sort_values('start')
-            # Create feature string
-            feat_list = sorted_group['feature'].tolist()
-            seq_strings[read] = feat_list
-            
-        seq_names = sorted(seq_strings.keys())
-        n_reads = len(seq_names)
-        
+        # Filter to reads that have feature data
+        chrom_read_names = [r for r in chrom_read_names if r in seq_feature_data]
+
+        n_reads = len(chrom_read_names)
+        print(f"  {n_reads} reads")
+
         if n_reads < 2:
-            print(f"  Skipping {chrom} (only {n_reads} sample)")
-            for r in seq_names:
+            print(f"  Skipping {chrom} (only {n_reads} read)")
+            for r in chrom_read_names:
                 all_cluster_assignments.append({
-                    'read': r, 'chromosome': chrom, 
-                    'cluster_id': f"{chrom}_Major", 'cluster_type': 'Major',
-                    'enrichment': 'Major', 
-                    'sample': read_sample_map[r]
+                    'read': r, 'chromosome': chrom,
+                    'cluster': f"{chrom}_Major", 'cluster_type': 'Major',
+                    'norm_divergence': 0.0, 'raw_divergence': 0.0,
+                    'enrichment': 'Major', 'sample': read_sample_map.get(r, 'unknown')
                 })
             continue
 
-        # Optimization: Deduplicate sequences based on feature content
-        unique_feats = sorted(list(set(f for r in seq_names for f in seq_strings[r])))
-        feat_map = {f: chr(i+200) for i, f in enumerate(unique_feats)} 
-        
-        unique_structures = {} 
-        for r in seq_names:
-            encoded = "".join([feat_map[f] for f in seq_strings[r]])
-            if encoded not in unique_structures:
-                unique_structures[encoded] = []
-            unique_structures[encoded].append(r)
-            
-        unique_structure_list = sorted(unique_structures.keys())
-        n_unique = len(unique_structure_list)
-        print(f"  {n_reads} sequences -> {n_unique} unique structures")
-        
-        if n_unique > 1:
-            print(f"  Computing distances for {n_unique} unique structures...")
-            dist_matrix = np.zeros((n_unique, n_unique))
-            raw_dist_matrix = np.zeros((n_unique, n_unique))
-            for i in range(n_unique):
-                for j in range(i + 1, n_unique):
-                    raw_d = levenshtein_distance(unique_structure_list[i], unique_structure_list[j])
-                    max_len = max(len(unique_structure_list[i]), len(unique_structure_list[j]))
-                    raw_dist_matrix[i, j] = raw_dist_matrix[j, i] = raw_d
-                    if max_len > 0:
-                        dist_matrix[i, j] = dist_matrix[j, i] = raw_d / max_len
+        # Build per-chromosome feature matrix (z-score normalized within chromosome)
+        chrom_feature_data = {r: seq_feature_data[r] for r in chrom_read_names}
+        chrom_length_dict = {r: seq_length_dict.get(r, 1) for r in chrom_read_names}
 
-            # Clustering (still using normalized distance for Ward linkage)
-            Z = linkage(squareform(dist_matrix), method='ward')
-            chromosome_linkages[chrom] = Z
-            
-            # Use user-defined threshold
-            threshold = args.structural_threshold
-            clusters = fcluster(Z, t=threshold, criterion='distance')
-            
-            # Report diagnostics
-            d_vals = dist_matrix[np.triu_indices(n_unique, k=1)]
-            print(f"  Distance Stats (n={len(d_vals)}): min={np.min(d_vals):.3f}, med={np.median(d_vals):.3f}, max={np.max(d_vals):.3f}")
-            print(f"  Clustering with threshold={threshold} -> {len(set(clusters))} clusters")
+        if args.matrix_mode == "layered" and n_layers > 1:
+            layer_matrices = []
+            for layer_idx in range(n_layers):
+                lm, _, _, _ = build_layer_matrix(
+                    chrom_read_names, chrom_feature_data, chrom_length_dict,
+                    layer_idx, n_layers, args.edge_mode, args.matrix_type,
+                    args.include_abundance, args.include_edges)
+                layer_matrices.append(lm)
+            chrom_matrix = np.hstack(layer_matrices)
         else:
-            clusters = [1] * n_unique
-            chromosome_linkages[chrom] = None
+            chrom_matrix, _, _ = build_combined_matrix(
+                chrom_read_names, chrom_feature_data, chrom_length_dict,
+                all_features, args.edge_mode, args.matrix_type,
+                args.include_abundance, args.include_edges)
 
-        # Determine Major Cluster
-        cluster_read_counts = defaultdict(int)
-        structure_to_cluster = {s: c for s, c in zip(unique_structure_list, clusters)}
-        
-        # Track which structure is most abundant in the major cluster
-        major_cluster_struct_counts = defaultdict(int)
-        
-        for s, reads in unique_structures.items():
-            cid = structure_to_cluster[s]
-            cluster_read_counts[cid] += len(reads)
-            
-        major_cluster_id = max(cluster_read_counts, key=cluster_read_counts.get)
-        
-        # Find the most abundant structure in the Major cluster to use as consensus
-        major_structs = []
-        for s, reads in unique_structures.items():
-            if structure_to_cluster[s] == major_cluster_id:
-                major_structs.append((s, len(reads)))
-        
-        # Sort by count desc
-        major_structs.sort(key=lambda x: (-x[1], x[0]))
-        major_consensus_s = major_structs[0][0]
-        major_consensus_idx = unique_structure_list.index(major_consensus_s)
-        
-        # Pre-calculate lengths per feature for the length-weighted metric
-        read_feature_lengths = chrom_data.groupby(['read', 'feature'])['length'].sum().unstack(fill_value=0)
-        consensus_read = unique_structures[major_consensus_s][0]
-        consensus_lengths = read_feature_lengths.loc[consensus_read]
-        consensus_feat_set = set(major_consensus_s)
+        print(f"  Matrix shape: {chrom_matrix.shape}")
 
-        # Assign with divergence score
-        for s, reads in unique_structures.items():
-            cid = structure_to_cluster[s]
+        # Compute pairwise distance and linkage
+        chrom_dist = pdist(chrom_matrix, metric='euclidean')
+        Z = linkage(chrom_dist, method=args.linkage_method)
+        chromosome_linkages[chrom] = Z
+
+        # --- k-selection ---
+        if args.n_clusters is not None:
+            selected_k = args.n_clusters
+            print(f"  Using fixed k={selected_k}")
+        else:
+            # Auto-select k per chromosome
+            max_k_limit = min(args.max_k + 1, n_reads // 2)  # need at least 2 reads per cluster
+            min_k = max(2, args.min_k)
+            k_range = list(range(min_k, max_k_limit))
+
+            if not k_range:
+                print(f"  k-range empty (min_k={min_k}, max_k_limit={max_k_limit}), using k=1")
+                selected_k = 1
+            else:
+                chrom_stats = []
+                for k in k_range:
+                    labels = fcluster(Z, k, criterion='maxclust')
+
+                    if k > 1 and len(set(labels)) > 1:
+                        if n_reads > args.silhouette_sample_size:
+                            sil = silhouette_score(chrom_matrix, labels,
+                                                   sample_size=args.silhouette_sample_size, random_state=42)
+                        else:
+                            sil = silhouette_score(chrom_matrix, labels, random_state=42)
+                        ch = calinski_harabasz_score(chrom_matrix, labels)
+                    else:
+                        sil = 0.0
+                        ch = 0.0
+
+                    # Structure mode composite = silhouette only (no enrichment component)
+                    sil_norm = (sil + 1) / 2
+                    composite = sil_norm
+
+                    chrom_stats.append({
+                        'k': k, 'silhouette': sil, 'calinski_harabasz': ch,
+                        'composite_score': composite
+                    })
+
+                stats_df = pd.DataFrame(chrom_stats)
+
+                # Select k based on chosen metric
+                if args.k_selection == "silhouette":
+                    selected_k = int(stats_df.loc[stats_df['silhouette'].idxmax(), 'k'])
+                elif args.k_selection == "calinski":
+                    selected_k = int(stats_df.loc[stats_df['calinski_harabasz'].idxmax(), 'k'])
+                elif args.k_selection == "composite-knee":
+                    # Knee detection on silhouette-based composite
+                    k_values = stats_df['k'].values
+                    scores = stats_df['composite_score'].values
+                    k_min_obs, k_max_obs = k_values.min(), k_values.max()
+                    score_min, score_max = scores.min(), scores.max()
+
+                    k_norm = (k_values - k_min_obs) / (k_max_obs - k_min_obs) if k_max_obs > k_min_obs else np.zeros_like(k_values)
+                    score_norm = (scores - score_min) / (score_max - score_min) if score_max > score_min else np.zeros_like(scores)
+
+                    knee_distance = score_norm - k_norm
+                    k_range_span = k_max_obs - k_min_obs
+                    window_size = max(3, int(k_range_span * 0.2))
+                    knee_smooth = pd.Series(knee_distance).rolling(window_size, center=True, min_periods=1).mean().values
+                    selected_k = int(k_values[np.argmax(knee_smooth)])
+                else:  # composite
+                    selected_k = int(stats_df.loc[stats_df['composite_score'].idxmax(), 'k'])
+
+                # Store stats for consolidated PDF later
+                chrom_k_diagnostics[chrom] = {
+                    'stats_df': stats_df,
+                    'selected_k': selected_k,
+                    'n_reads': n_reads,
+                }
+
+                # Report k-selection results
+                best_sil_k = int(stats_df.loc[stats_df['silhouette'].idxmax(), 'k'])
+                best_ch_k = int(stats_df.loc[stats_df['calinski_harabasz'].idxmax(), 'k'])
+                best_comp_k = int(stats_df.loc[stats_df['composite_score'].idxmax(), 'k'])
+                print(f"  k-selection results:")
+                print(f"    Silhouette best:    k={best_sil_k} (score={stats_df['silhouette'].max():.4f})")
+                print(f"    Calinski-Harabasz:  k={best_ch_k} (score={stats_df['calinski_harabasz'].max():.1f})")
+                print(f"    Composite best:     k={best_comp_k} (score={stats_df['composite_score'].max():.4f})")
+                print(f"    Selected:           k={selected_k} (method={args.k_selection})")
+
+        # Ensure selected_k is valid
+        selected_k = max(1, min(selected_k, n_reads))
+
+        # Cut tree
+        if selected_k > 1:
+            clusters = fcluster(Z, selected_k, criterion='maxclust')
+        else:
+            clusters = np.ones(n_reads, dtype=int)
+
+        # Determine Major cluster (largest)
+        cluster_counts = Counter(clusters)
+        major_cluster_id = max(cluster_counts, key=cluster_counts.get)
+        n_clusters_found = len(cluster_counts)
+
+        print(f"  Clusters: {n_clusters_found} (Major={major_cluster_id} with {cluster_counts[major_cluster_id]} reads)")
+
+        # Compute Major centroid
+        major_mask = np.array(clusters) == major_cluster_id
+        major_centroid = chrom_matrix[major_mask].mean(axis=0)
+
+        # Compute divergence for all reads
+        raw_divergences = np.linalg.norm(chrom_matrix - major_centroid, axis=1)
+        max_div = raw_divergences.max()
+        norm_divergences = raw_divergences / max_div if max_div > 0 else np.zeros_like(raw_divergences)
+
+        # Assign reads with labels and divergence
+        # Track outlier cluster numbering
+        outlier_counter = 0
+        outlier_id_map = {}
+        for cid in sorted(cluster_counts.keys()):
+            if cid != major_cluster_id:
+                outlier_counter += 1
+                outlier_id_map[cid] = outlier_counter
+
+        for i, r in enumerate(chrom_read_names):
+            cid = clusters[i]
             is_major = (cid == major_cluster_id)
             c_type = "Major" if is_major else "Outlier"
             full_cluster_id = f"{chrom}_{c_type}"
             if not is_major:
-                full_cluster_id += f"_{cid}"
-            
-            # Relative to the major consensus structure
-            s_idx = unique_structure_list.index(s)
-            
-            if n_unique > 1:
-                norm_div = dist_matrix[s_idx, major_consensus_idx]
-                raw_div = raw_dist_matrix[s_idx, major_consensus_idx]
-            else:
-                norm_div = 0.0
-                raw_div = 0.0
-            
-            # Binary Metric: Symmetric difference of feature types present
-            read_feat_set = set(s)
-            binary_div = len(consensus_feat_set ^ read_feat_set)
-                
-            for r in reads:
-                # Length-Weighted Metric: Sum of absolute differences in bp per feature type
-                r_lengths = read_feature_lengths.loc[r]
-                # Ensure we handle features present in either the read or the consensus
-                all_feats = sorted(list(set(consensus_lengths.index) | set(r_lengths.index)))
-                l_div = 0.0
-                for f in all_feats:
-                    v_cons = consensus_lengths.get(f, 0.0)
-                    v_read = r_lengths.get(f, 0.0)
-                    l_div += abs(v_cons - v_read)
+                full_cluster_id += f"_{outlier_id_map[cid]}"
 
-                all_cluster_assignments.append({
-                    'read': r, 'chromosome': chrom, 
-                    'cluster': full_cluster_id, 'cluster_type': c_type,
-                    'norm_divergence': norm_div,
-                    'raw_divergence': raw_div,
-                    'binary_divergence': float(binary_div),
-                    'length_weighted_divergence': float(l_div),
-                    'enrichment': c_type, 'sample': read_sample_map[r]
-                })
+            all_cluster_assignments.append({
+                'read': r, 'chromosome': chrom,
+                'cluster': full_cluster_id, 'cluster_type': c_type,
+                'norm_divergence': float(norm_divergences[i]),
+                'raw_divergence': float(raw_divergences[i]),
+                'enrichment': c_type,
+                'sample': read_sample_map.get(r, 'unknown')
+            })
 
-    # Save
+    # --- Generate consolidated k-selection diagnostic PDF ---
+    if chrom_k_diagnostics:
+        diag_chroms = sorted(chrom_k_diagnostics.keys())
+        n_chroms = len(diag_chroms)
+
+        # Determine which metric column to plot based on --k-selection
+        if args.k_selection == "silhouette":
+            metric_col = 'silhouette'
+            metric_label = 'Silhouette Score'
+        elif args.k_selection == "calinski":
+            metric_col = 'calinski_harabasz'
+            metric_label = 'Calinski-Harabasz Index'
+        else:  # composite or composite-knee
+            metric_col = 'composite_score'
+            metric_label = 'Composite Score (silhouette)'
+
+        # Layout: grid of subplots, one per chromosome
+        n_cols = 4
+        n_rows = int(np.ceil(n_chroms / n_cols))
+
+        for bg_mode, suffix in get_backgrounds_to_generate():
+            style = apply_plot_style(bg_mode)
+
+            fig, axes = plt.subplots(n_rows, n_cols,
+                                     figsize=(4 * n_cols, 3.2 * n_rows),
+                                     squeeze=False)
+            fig.suptitle(f'Structure Mode k-selection — {args.k_selection} '
+                         f'({args.matrix_type})',
+                         fontsize=14, fontweight='bold')
+            fig.patch.set_facecolor(style['bg_color'])
+
+            for idx, chrom in enumerate(diag_chroms):
+                row, col = divmod(idx, n_cols)
+                ax = axes[row][col]
+                ax.set_facecolor(style['bg_color'])
+
+                diag = chrom_k_diagnostics[chrom]
+                sdf = diag['stats_df']
+                sel_k = diag['selected_k']
+                nr = diag['n_reads']
+
+                ax.plot(sdf['k'], sdf[metric_col], '-o', markersize=3,
+                        color='#60A5FA', linewidth=1.2)
+                ax.axvline(x=sel_k, color='#F07167', linestyle='-',
+                           alpha=0.8, linewidth=1.5, label=f'k={sel_k}')
+
+                ax.set_title(f'{chrom} (n={nr})', fontsize=9)
+                ax.set_xlabel('k', fontsize=8)
+                ax.set_ylabel(metric_label, fontsize=7)
+                ax.tick_params(labelsize=7)
+                ax.legend(fontsize=6, loc='best')
+                ax.grid(True, alpha=0.2)
+
+            # Hide unused subplots
+            for idx in range(n_chroms, n_rows * n_cols):
+                row, col = divmod(idx, n_cols)
+                axes[row][col].set_visible(False)
+
+            plt.tight_layout(rect=[0, 0, 1, 0.96])
+            k_pdf = f"{args.output_prefix}{suffix}.k_selection.pdf"
+            plt.savefig(k_pdf, dpi=150, bbox_inches='tight',
+                        facecolor=style['bg_color'])
+            plt.close()
+            print(f"\nSaved k-selection diagnostic: {k_pdf}")
+
+    # Save outputs
     matrix_file = f"{args.output_prefix}.feature_matrix.npz"
     assignments_file = f"{args.output_prefix}.sequence_assignments.tsv"
     assignment_df = pd.DataFrame(all_cluster_assignments)
     if 'group' not in assignment_df.columns:
         assignment_df['group'] = assignment_df['sample']
     assignment_df.to_csv(assignments_file, sep='\t', index=False)
-    
+
     np.savez_compressed(
         matrix_file, mode='structure', chromosomes=chromosomes,
-        linkages=chromosome_linkages, info="Per-chromosome structural analysis"
+        linkages=chromosome_linkages, metadata="Per-chromosome structural analysis (feature-matrix based)"
     )
     print(f"\nSaved structural assignments: {assignments_file}")
+    print(f"Saved feature matrix: {matrix_file}")
+
+    # Summary
+    print(f"\n--- Structure Mode Summary ---")
+    if len(all_cluster_assignments) > 0:
+        df = assignment_df
+        for chrom in chromosomes:
+            chrom_df = df[df['chromosome'] == chrom]
+            if len(chrom_df) == 0:
+                continue
+            n_major = (chrom_df['cluster_type'] == 'Major').sum()
+            n_outlier = (chrom_df['cluster_type'] != 'Major').sum()
+            n_clust = chrom_df['cluster'].nunique()
+            print(f"  {chrom}: {len(chrom_df)} reads, {n_clust} clusters (Major={n_major}, Outlier={n_outlier})")
     sys.exit(0)
 
 # --- Plot style management ---
@@ -901,68 +1031,63 @@ if args.exclude_features:
 seq_lengths = in_data.groupby('sequence')['length'].sum()
 seq_length_dict = seq_lengths.to_dict()
 
-# --- Branching Point ---
-if args.analysis_mode == 'structure':
-    run_structure_mode(in_data, args)
-    # The function will sys.exit(0), so we won't reach here
-    sys.exit(0)
+# --- Load sample metadata (enrichment mode only) ---
+if args.analysis_mode != 'structure':
+    print(f"\n--- Loading sample metadata ---")
+    sample_to_group, sample_colors_from_meta, explicit_group_colors = load_sample_metadata(args.sample_metadata, sample_labels)
 
-# --- Load sample metadata ---
-print(f"\n--- Loading sample metadata ---")
-sample_to_group, sample_colors_from_meta, explicit_group_colors = load_sample_metadata(args.sample_metadata, sample_labels)
+    # Determine unique groups
+    all_groups = sorted(set(sample_to_group.values()))
+    print(f"  Groups found: {', '.join(all_groups)}")
+    print(f"  Comparison mode: {args.comparison_mode}")
 
-# Determine unique groups
-all_groups = sorted(set(sample_to_group.values()))
-print(f"  Groups found: {', '.join(all_groups)}")
-print(f"  Comparison mode: {args.comparison_mode}")
+    # Map reads to groups
+    seq_to_group = {r: sample_to_group.get(s, s) for r, s in seq_to_sample.items()}
 
-# Map reads to groups
-seq_to_group = {r: sample_to_group.get(s, s) for r, s in seq_to_sample.items()}
+    # Count samples by group
+    group_totals = Counter(seq_to_group.values())
+    sample_totals = Counter(seq_to_sample.values())
 
-# Count samples by group
-group_totals = Counter(seq_to_group.values())
-sample_totals = Counter(seq_to_sample.values())
+    print(f"\n  Group counts:")
+    for group, count in sorted(group_totals.items()):
+        print(f"    {group}: {count:,} reads")
 
-print(f"\n  Group counts:")
-for group, count in sorted(group_totals.items()):
-    print(f"    {group}: {count:,} reads")
+    # Determine control group for group-level comparisons
+    # (used in two-group mode and for group-level stats in per-sample mode)
+    control_group = args.control_group
+    if control_group is None and len(all_groups) >= 2:
+        # Default: alphabetically first group is the control/reference
+        control_group = all_groups[0]
+    if args.comparison_mode == "two-group":
+        if len(all_groups) > 2:
+            print(f"  Note: {len(all_groups)} groups found, using '{control_group}' as reference.")
+            print(f"        Use --control-group to specify a different reference group.")
+        print(f"  Reference group: {control_group}")
 
-# Determine control group for group-level comparisons
-# (used in two-group mode and for group-level stats in per-sample mode)
-control_group = args.control_group
-if control_group is None and len(all_groups) >= 2:
-    # Default: alphabetically first group is the control/reference
-    control_group = all_groups[0]
-if args.comparison_mode == "two-group":
-    if len(all_groups) > 2:
-        print(f"  Note: {len(all_groups)} groups found, using '{control_group}' as reference.")
-        print(f"        Use --control-group to specify a different reference group.")
-    print(f"  Reference group: {control_group}")
-
-# Build group colors: explicit > derived from first sample > auto-generated
-# Start with colors derived from first sample per group
-group_colors_from_meta = {}
-for sample, color in sample_colors_from_meta.items():
-    group = sample_to_group.get(sample, sample)
-    if group not in group_colors_from_meta:
-        group_colors_from_meta[group] = color
-# Override with explicit group colors if provided
-group_colors_from_meta.update(explicit_group_colors)
-if explicit_group_colors:
-    print(f"  Explicit group colors: {explicit_group_colors}")
-
-# Generate colors for groups
-group_colors = generate_group_colors(all_groups, group_colors_from_meta)
-
-# Generate colors for samples (derive from group colors or use custom)
-sample_colors = {}
-for sample in sample_labels:
-    if sample in sample_colors_from_meta:
-        sample_colors[sample] = sample_colors_from_meta[sample]
-    else:
-        # Use group color
+    # Build group colors: explicit > derived from first sample > auto-generated
+    # Start with colors derived from first sample per group
+    group_colors_from_meta = {}
+    for sample, color in sample_colors_from_meta.items():
         group = sample_to_group.get(sample, sample)
-        sample_colors[sample] = group_colors.get(group, '#999999')
+        if group not in group_colors_from_meta:
+            group_colors_from_meta[group] = color
+    # Override with explicit group colors if provided
+    group_colors_from_meta.update(explicit_group_colors)
+    if explicit_group_colors:
+        print(f"  Explicit group colors: {explicit_group_colors}")
+
+    # Generate colors for groups
+    group_colors = generate_group_colors(all_groups, group_colors_from_meta)
+
+    # Generate colors for samples (derive from group colors or use custom)
+    sample_colors = {}
+    for sample in sample_labels:
+        if sample in sample_colors_from_meta:
+            sample_colors[sample] = sample_colors_from_meta[sample]
+        else:
+            # Use group color
+            group = sample_to_group.get(sample, sample)
+            sample_colors[sample] = group_colors.get(group, '#999999')
 
 # --- Build adjacency matrix ---
 edge_mode_str = f" [{args.edge_mode}]"
@@ -1190,6 +1315,12 @@ def build_combined_matrix(seq_names, seq_feature_data, seq_length_dict, all_feat
         seq_names, seq_feature_data, seq_length_dict, all_features,
         edge_mode, matrix_type, include_abundance, include_edges)
 
+
+# --- Structure mode branching point (before global matrix build) ---
+if args.analysis_mode == 'structure':
+    run_structure_mode(in_data, args, seq_feature_data, seq_length_dict,
+                       all_features, n_layers)
+    sys.exit(0)
 
 # Build matrix based on selected mode
 if args.matrix_mode == "layered" and n_layers > 1:
