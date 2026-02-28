@@ -1491,10 +1491,11 @@ def main():
                 row[f'{fs}_max_block_bp__{feat}'] = feat_wd.get('max_block', 0)
 
         if args.auto_label:
-            if 'telomere_region' not in featuresets and 'region' not in featuresets:
-                print("ERROR: --auto-label requires 'telomere_region' or 'region' in --featuresets")
+            auto_label_fs = ['telomere_region', 'region_subtelomere_flat']
+            pfx = next((fs for fs in auto_label_fs if fs in featuresets), None)
+            if pfx is None:
+                print("ERROR: --auto-label requires 'telomere_region' or 'region_subtelomere_flat' in --featuresets")
                 sys.exit(1)
-            pfx = 'telomere_region' if 'telomere_region' in featuresets else 'region'
             row['cluster_name'] = auto_label_cluster(row, pfx)
 
             # Type I ALT relabeling: prepend "Type I ALT" for ALT-enriched clusters
