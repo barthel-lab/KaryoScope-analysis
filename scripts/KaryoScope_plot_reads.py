@@ -2,36 +2,83 @@
 """
 KaryoScope_plot_reads.py
 
-Visualize telomeric reads with region (satellite) features.
+Visualize telomeric reads with region (satellite) features as colored bars.
 Supports vertical bars (default) or horizontal bars (--horizontal).
 
 Input modes:
-  --samples + --results-dir    Load from KaryoScope results directory
-  --bed                        Load from BED files directly
-  --clusters + --cluster-prefix  Load all reads from specific clusters
+  --samples + --results-dir          Load from KaryoScope results directory
+  --bed                              Load from BED files directly
+  --clusters + --cluster-prefix      Load reads from specific clusters
 
-Features:
-  --legend         Auto-filtered color legend
-  --horizontal     Reads as horizontal bars (1 read per row)
-  --animate        Generate panning MP4 animation
+Output:
+  --format svg|png|both              Output format (default: svg)
+  --output PATH                      Output file path (extension auto-adjusted)
+  --png-scale FACTOR                 Resolution multiplier for PNG (default: 8.0)
+  --scale-bar-output PATH            Separate scale bar SVG
+  --read-list PATH                   Filter to read IDs from file
+
+Display controls:
+  --horizontal                       Reads as horizontal bars (1 read per row)
+  --legend                           Auto-filtered color legend (composited or separate)
+  --no-header                        Skip sample labels and separator lines
+  --no-scale-bar                     Skip scale bar in left margin
+  --orient-telomere-top              Reorient reads so telomere is at top
+  --orient-chromosome-top            Reorient reads so chromosome is at top
+  --batch-size N                     Split output into batches of N reads
+
+Animation:
+  --animate                          Generate panning MP4 (implies PNG output)
+  --animate-direction                Pan direction (auto-detected by default)
+  --animate-viewport WxH             Viewport size
+  --animate-duration / --animate-fps Duration and framerate controls
 
 Usage:
     python KaryoScope_plot_reads.py \\
-        --samples NHA_p1 NHA_E6E7_3_PDL48 ... \\
+        --samples NHA_p1 NHA_E6E7_3_PDL48 \\
         --results-dir results \\
         --colors KS_human_CHM13.region.colors.txt \\
         --output output.svg
 """
 
 import argparse
+import fnmatch
 import gzip
+import logging
 import os
 import subprocess
+import sys
+import time
 from collections import defaultdict
 
 import drawsvg as draw
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
+
+logger = logging.getLogger(__name__)
+
+
+def setup_logging(output_path):
+    """Configure logging with console (INFO) and file (DEBUG) handlers."""
+    base = output_path.rsplit('.', 1)[0] if '.' in output_path else output_path
+    log_path = f"{base}.log"
+
+    root = logging.getLogger(__name__)
+    root.setLevel(logging.DEBUG)
+    root.handlers.clear()
+
+    # Console: INFO, simple format
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(logging.Formatter("%(message)s"))
+    root.addHandler(ch)
+
+    # File: DEBUG, detailed format
+    fh = logging.FileHandler(log_path, mode='w')
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    root.addHandler(fh)
+
+    return log_path
 
 
 def hex_to_rgba(hex_color):
@@ -61,17 +108,259 @@ def hex_to_rgb(hex_color):
 MAX_PNG_DIMENSION = 32000  # Stay under common image library limits
 
 
+def _save_png(img, output_path, bg_color):
+    """Alpha-composite RGBA image onto solid background and save as PNG."""
+    logger.info("  Saving PNG...")
+    if img.mode == 'RGBA':
+        bg_img = Image.new('RGB', img.size, bg_color[:3])
+        bg_img.paste(img, mask=img.split()[3])
+        bg_img.save(output_path, optimize=True)
+    else:
+        img.save(output_path, optimize=True)
+    file_size = os.path.getsize(output_path)
+    w, h = img.size
+    logger.info("Saved PNG: %s", output_path)
+    logger.info("  Dimensions: %d x %d pixels", w, h)
+    logger.info("  File size: %.1f MB", file_size / 1024 / 1024)
+
+
+_FONT_PATH = os.path.join(
+    os.path.expanduser("~"),
+    "Documents", "Barthel-Custom-Powerpoint-Theme", "fonts", "BasicSans-Regular.otf",
+)
+
+
+def _load_font(size):
+    """Load preferred font at given size, with fallback chain."""
+    try:
+        return ImageFont.truetype(_FONT_PATH, size)
+    except (OSError, IOError):
+        try:
+            return ImageFont.truetype("Arial", size)
+        except (OSError, IOError):
+            return ImageFont.load_default()
+
+
+def _draw_rect_rgba(img_array, x1, y1, x2, y2, color_rgba):
+    """Draw an RGBA rectangle onto a numpy image array with alpha blending."""
+    if x1 >= x2 or y1 >= y2:
+        return
+    alpha = color_rgba[3] / 255.0
+    if alpha >= 1.0:
+        img_array[y1:y2, x1:x2] = color_rgba
+    else:
+        fg = np.array(color_rgba[:3], dtype=np.float32)
+        bg = img_array[y1:y2, x1:x2, :3].astype(np.float32)
+        blended = alpha * fg + (1 - alpha) * bg
+        img_array[y1:y2, x1:x2, :3] = blended.astype(np.uint8)
+        img_array[y1:y2, x1:x2, 3] = 255
+
+
+def smooth_features_to_pixels(colored_features, bar_length, ratio, oversample=1):
+    """Downsample bp-level features to pixel-level via windowed majority vote.
+
+    Each pixel represents a window of ~1/ratio base pairs. For each window,
+    the color with the most bp coverage wins. Contiguous same-color pixels
+    are run-length encoded into single rectangles.
+
+    Args:
+        colored_features: list of (bp_start, bp_stop, color, fill_opacity)
+        bar_length: total number of pixels for this read's bar
+        ratio: pixels per base pair
+        oversample: internal oversampling factor (default: 1)
+
+    Returns:
+        list of {scaled_start, scaled_stop, color, fill_opacity} dicts.
+    """
+    if not colored_features or bar_length <= 0:
+        return []
+
+    effective_ratio = ratio * oversample
+    effective_bar_length = bar_length * oversample
+
+    sorted_feats = sorted(colored_features)
+    n_feats = len(sorted_feats)
+    feat_idx = 0
+
+    result = []
+    current_color = None
+    current_opacity = 1.0
+    run_start = 0
+
+    for px in range(effective_bar_length):
+        win_start = px / effective_ratio
+        win_end = (px + 1) / effective_ratio
+
+        while feat_idx < n_feats and sorted_feats[feat_idx][1] <= win_start:
+            feat_idx += 1
+
+        color_coverage = {}
+        color_opacity = {}
+        for i in range(feat_idx, n_feats):
+            f_start, f_stop, f_color, f_opacity = sorted_feats[i][:4]
+            if f_start >= win_end:
+                break
+            overlap = min(f_stop, win_end) - max(f_start, win_start)
+            if overlap > 0:
+                color_coverage[f_color] = color_coverage.get(f_color, 0) + overlap
+                color_opacity[f_color] = f_opacity
+
+        if color_coverage:
+            px_color = max(color_coverage, key=color_coverage.get)
+            px_opacity = color_opacity[px_color]
+        else:
+            px_color = None
+            px_opacity = 1.0
+
+        if px_color != current_color:
+            if current_color is not None:
+                result.append({
+                    'scaled_start': run_start / oversample,
+                    'scaled_stop': px / oversample,
+                    'color': current_color,
+                    'fill_opacity': current_opacity
+                })
+            current_color = px_color
+            current_opacity = px_opacity
+            run_start = px
+
+    if current_color is not None:
+        result.append({
+            'scaled_start': run_start / oversample,
+            'scaled_stop': bar_length,
+            'color': current_color,
+            'fill_opacity': current_opacity
+        })
+
+    return result
+
+
+def features_to_pixels_direct(colored_features, bar_length, ratio, min_width=0.5):
+    """Direct-scale bp features to pixel coordinates, preserving every transition.
+
+    Uses contiguous redistribution so that small interspersed features are
+    guaranteed at least ``min_width`` pixels of visibility.  Features are
+    placed end-to-end and large features absorb the cost proportionally
+    when the total exceeds ``bar_length``.
+
+    Args:
+        colored_features: list of (bp_start, bp_stop, color, fill_opacity)
+        bar_length: total pixel length for the bar
+        ratio: pixels per base pair
+        min_width: minimum pixel width per feature (default: 0.5)
+
+    Returns:
+        list of {scaled_start, scaled_stop, color, fill_opacity} dicts.
+    """
+    if not colored_features or bar_length <= 0:
+        return []
+
+    sorted_feats = sorted(colored_features, key=lambda f: (f[0], f[1]))
+
+    # Step 1: Scale to pixels, enforce min_width (respecting per-feature skip flag)
+    segments = []
+    for feat in sorted_feats:
+        bp_start, bp_stop, color, opacity = feat[:4]
+        skip_min = feat[4] if len(feat) > 4 else False
+        effective_min = 0 if skip_min else min_width
+        natural_width = (bp_stop - bp_start) * ratio
+        width = max(natural_width, effective_min)
+        segments.append((width, natural_width, color, opacity, effective_min))
+
+    # Step 1.5: If min-width floors alone exceed bar_length, fall back to
+    # natural (proportional) widths so large features aren't squeezed out.
+    floor_total = sum(em for _, _, _, _, em in segments)
+    if floor_total > bar_length:
+        segments = [(nw, nw, c, o, 0) for _, nw, c, o, _ in segments]
+
+    # Step 2: If total exceeds bar_length, shrink proportionally
+    total = sum(w for w, _, _, _, _ in segments)
+    if total > bar_length:
+        excess = total - bar_length
+        shrinkable = sum(max(0, w - em) for w, _, _, _, em in segments)
+        if shrinkable > 0:
+            factor = max(0, 1 - excess / shrinkable)
+            segments = [
+                (em + (w - em) * factor if w > em else w,
+                 nw, c, o, em)
+                for w, nw, c, o, em in segments
+            ]
+
+    # Step 3: Place contiguously
+    scaled = []
+    pos = 0.0
+    for width, _, color, opacity, _ in segments:
+        end = min(pos + width, bar_length)
+        if end > pos:
+            scaled.append((pos, end, color, opacity))
+        pos = end
+
+    if not scaled:
+        return []
+
+    # Step 4: Run-length encode adjacent same-color features
+    result = []
+    run_start, run_stop, run_color, run_opacity = scaled[0]
+
+    for px_start, px_stop, color, opacity in scaled[1:]:
+        if color == run_color and opacity == run_opacity and abs(px_start - run_stop) < 0.01:
+            run_stop = px_stop
+        else:
+            result.append({
+                'scaled_start': run_start,
+                'scaled_stop': run_stop,
+                'color': run_color,
+                'fill_opacity': run_opacity
+            })
+            run_start, run_stop, run_color, run_opacity = px_start, px_stop, color, opacity
+
+    result.append({
+        'scaled_start': run_start,
+        'scaled_stop': run_stop,
+        'color': run_color,
+        'fill_opacity': run_opacity
+    })
+
+    return result
+
+
+def rasterize_features(colored_features, bar_length, ratio, feature_mode="transition",
+                       oversample=1, min_feature_width=0.5):
+    """Dispatch feature rasterization based on mode.
+
+    Returns None for 'raw' mode (sentinel for old code path).
+    """
+    if feature_mode == "raw":
+        return None
+    elif feature_mode == "transition":
+        return features_to_pixels_direct(colored_features, bar_length, ratio,
+                                         min_width=min_feature_width)
+    else:
+        return smooth_features_to_pixels(colored_features, bar_length, ratio,
+                                         oversample=oversample)
+
+
+def _build_colored_features(features, colors, min_width_exclude):
+    """Build colored feature tuples from raw BED features for rasterization.
+
+    Returns list of (bp_start, bp_stop, color_hex, fill_opacity, skip_min).
+    """
+    result = []
+    for start, end, feature in features:
+        color_hex = colors.get(feature, "#ffffff")
+        skip_min = any(fnmatch.fnmatch(feature, pat) for pat in min_width_exclude)
+        result.append((start, end, color_hex, 1.0, skip_min))
+    return result
+
+
 def calculate_png_params(reads, config):
     """Calculate optimal PNG parameters within dimension limits.
 
-    For panning animations, we prioritize HEIGHT resolution (for zoom quality)
-    over width. Width dimensions (bar_width, spacing) only need to scale
-    enough to maintain visual clarity, not for zoom.
+    Uses uniform scaling so the PNG is a proportionally faithful copy
+    of the SVG, capped by MAX_PNG_DIMENSION on each axis.
 
     Returns:
         tuple: (height_scale, width_scale)
-        - height_scale: Scale factor for vertical dimensions (ratio, margins)
-        - width_scale: Scale factor for horizontal dimensions (bar, spacing)
     """
     base_ratio = config["ratio"]
     requested_scale = config.get("png_scale", 8.0)
@@ -103,16 +392,14 @@ def calculate_png_params(reads, config):
     max_height_scale = MAX_PNG_DIMENSION / base_height
     height_scale = min(requested_scale, max_height_scale)
 
-    # Width scale: scale less aggressively, just enough for clarity
-    # For panning, width mainly needs to show reads clearly, not zoom
-    # Use sqrt of height_scale as a reasonable width multiplier
-    desired_width_scale = min(height_scale, max(1.0, height_scale ** 0.5))
+    # Width scale: match height_scale for uniform scaling (PNG matches SVG proportions)
+    desired_width_scale = height_scale
     max_width_scale = MAX_PNG_DIMENSION / base_width
     width_scale = min(desired_width_scale, max_width_scale)
 
     if height_scale < requested_scale:
-        print(f"  Note: Capping height scale from {requested_scale}x to {height_scale:.2f}x "
-              f"(dimension limit: {MAX_PNG_DIMENSION}px)")
+        logger.info("  Note: Capping height scale from %.1fx to %.2fx (dimension limit: %dpx)",
+                    requested_scale, height_scale, MAX_PNG_DIMENSION)
 
     return height_scale, width_scale
 
@@ -157,7 +444,10 @@ def draw_reads_png(reads, colors, output_path, config):
     total_reads = len(reads)
     num_samples = len(sample_read_counts)
 
-    effective_left_margin = int(20 * width_scale)  # Reduced since scale bar is separate
+    # Use full left margin when display-name labels exist, otherwise reduced
+    has_left_labels = (config.get("tier_display_names") or
+                       (config.get("heatmap") and config.get("heatmap_display_names")))
+    effective_left_margin = left_margin if has_left_labels else int(20 * width_scale)
     image_width = (
         effective_left_margin
         + (total_reads * (bar_width + read_spacing))
@@ -166,8 +456,8 @@ def draw_reads_png(reads, colors, output_path, config):
     )
     image_height = top_margin + max_height_px + bottom_margin
 
-    print(f"  PNG scale: height={height_scale:.2f}x, width={width_scale:.2f}x")
-    print(f"  Target dimensions: {image_width} x {image_height} pixels")
+    logger.info("  PNG scale: height=%.2fx, width=%.2fx", height_scale, width_scale)
+    logger.info("  Target dimensions: %d x %d pixels", image_width, image_height)
 
     # Create image in RGBA mode to support transparency
     bg_color = (0, 0, 0, 255) if background == "black" else (255, 255, 255, 255)
@@ -176,17 +466,8 @@ def draw_reads_png(reads, colors, output_path, config):
     draw_ctx = ImageDraw.Draw(img)
 
     # Try to load font at scaled size
-    font_size = int(16 * height_scale)
-    try:
-        font = ImageFont.truetype(
-            "/Users/fbarthel/Documents/Barthel-Custom-Powerpoint-Theme/fonts/BasicSans-Regular.otf",
-            font_size
-        )
-    except (OSError, IOError):
-        try:
-            font = ImageFont.truetype("Arial", font_size)
-        except (OSError, IOError):
-            font = ImageFont.load_default()
+    font_size = int(config.get("font_size", 11) * height_scale)
+    font = _load_font(font_size)
 
     # Track positions
     current_x = effective_left_margin
@@ -195,8 +476,15 @@ def draw_reads_png(reads, colors, output_path, config):
     sample_x_end = {}
 
     # Draw reads (using numpy for faster rectangle drawing on very large images)
-    print(f"  Drawing {total_reads} reads...")
+    logger.info("  Drawing %d reads...", total_reads)
     img_array = np.array(img)
+
+    feature_mode = config.get("feature_mode", "raw")
+    min_feature_width = config.get("min_feature_width", 0.5)
+    min_width_exclude = config.get("min_width_exclude", [])
+    oversample = config.get("oversample", 1)
+    read_border = config.get("read_border", False)
+    read_positions = []
 
     for sample, read_id, read_length, features in reads:
         if current_sample is not None and sample != current_sample:
@@ -207,89 +495,169 @@ def draw_reads_png(reads, colors, output_path, config):
             sample_x_start[sample] = current_x
 
         current_sample = sample
+        read_positions.append((read_id, current_x))
 
-        for start, end, feature in features:
-            y_start = top_margin + int(start * ratio)
-            y_end = top_margin + int(end * ratio)
-            height = max(1, y_end - y_start)
-            color_hex = colors.get(feature, "#ffffff")
-            color_rgba = hex_to_rgba(color_hex)
+        if feature_mode == "raw":
+            for start, end, feature in features:
+                y_start = top_margin + int(start * ratio)
+                y_end = top_margin + int(end * ratio)
+                height = max(1, y_end - y_start)
+                color_hex = colors.get(feature, "#ffffff")
+                color_rgba = hex_to_rgba(color_hex)
 
-            # Draw directly to numpy array for speed
-            x1 = max(0, current_x)
-            x2 = min(image_width, current_x + bar_width)
-            y1 = max(0, y_start)
-            y2 = min(image_height, y_start + height)
-            if x1 < x2 and y1 < y2:
-                alpha = color_rgba[3] / 255.0
-                if alpha >= 1.0:
-                    # Fully opaque - direct assignment
-                    img_array[y1:y2, x1:x2] = color_rgba
-                else:
-                    # Alpha blending: new = alpha * fg + (1-alpha) * bg
-                    fg = np.array(color_rgba[:3], dtype=np.float32)
-                    bg = img_array[y1:y2, x1:x2, :3].astype(np.float32)
-                    blended = alpha * fg + (1 - alpha) * bg
-                    img_array[y1:y2, x1:x2, :3] = blended.astype(np.uint8)
-                    img_array[y1:y2, x1:x2, 3] = 255  # Keep alpha channel at full
+                x1 = max(0, current_x)
+                x2 = min(image_width, current_x + bar_width)
+                y1 = max(0, y_start)
+                y2 = min(image_height, y_start + height)
+                _draw_rect_rgba(img_array, x1, y1, x2, y2, color_rgba)
+        else:
+            colored_feats = _build_colored_features(features, colors, min_width_exclude)
+            max_feat_end = max((e for _, e, _ in features), default=0)
+            bar_length = int(max_feat_end * ratio)
+            rasterized = rasterize_features(colored_feats, bar_length, ratio,
+                                            feature_mode, oversample, min_feature_width)
+            if rasterized:
+                for run in rasterized:
+                    y1 = top_margin + int(run['scaled_start'])
+                    y2 = top_margin + int(run['scaled_stop'] + 0.5)
+                    color_rgba = hex_to_rgba(run['color'])
+                    if run['fill_opacity'] < 1.0:
+                        color_rgba = (color_rgba[0], color_rgba[1], color_rgba[2],
+                                      int(color_rgba[3] * run['fill_opacity']))
+                    x1 = max(0, current_x)
+                    x2 = min(image_width, current_x + bar_width)
+                    y1 = max(0, y1)
+                    y2 = min(image_height, y2)
+                    _draw_rect_rgba(img_array, x1, y1, x2, y2, color_rgba)
+
+        if read_border:
+            bx1 = max(0, current_x)
+            bx2 = min(image_width, current_x + bar_width)
+            read_top = top_margin
+            max_feat_end = max((e for _, e, _ in features), default=0)
+            read_bottom = min(image_height, top_margin + int(max_feat_end * ratio))
+            if bx2 > bx1 and read_bottom > read_top:
+                border_color = np.array([0, 0, 0, 255], dtype=np.uint8)
+                img_array[read_top, bx1:bx2] = border_color
+                img_array[min(read_bottom, image_height - 1), bx1:bx2] = border_color
+                img_array[read_top:read_bottom + 1, bx1] = border_color
+                img_array[read_top:read_bottom + 1, min(bx2, image_width - 1)] = border_color
 
         current_x += bar_width + read_spacing
 
     if current_sample:
         sample_x_end[current_sample] = current_x
 
+    # Draw heatmap grid if enabled
+    if config.get("heatmap") and config.get("metadata_columns"):
+        draw_heatmap_grid_png(img_array, read_positions, config, width_scale, height_scale)
+
     # Convert back to PIL Image for text rendering
     img = Image.fromarray(img_array)
     draw_ctx = ImageDraw.Draw(img)
+
+    # Draw heatmap row labels (matching SVG draw_heatmap_grid_svg lines 2206-2216)
+    if config.get("heatmap") and config.get("metadata_columns"):
+        heatmap_display_names = config.get("heatmap_display_names", {})
+        metadata_columns = config["metadata_columns"]
+        base_bar_width = config["bar_width"]
+        box_h = max(1, int(base_bar_width * width_scale))
+        scaled_bottom_gap = int(config["heatmap_bottom_gap"] * height_scale)
+        scaled_row_gap = max(1, int(config["heatmap_row_gap"] * height_scale))
+        for row_idx, col_name in enumerate(reversed(metadata_columns)):
+            row_y = top_margin - scaled_bottom_gap - (row_idx + 1) * box_h - row_idx * scaled_row_gap
+            display_name = heatmap_display_names.get(col_name, col_name)
+            bbox = font.getbbox(display_name)
+            text_w = bbox[2] - bbox[0]
+            text_h = bbox[3] - bbox[1]
+            label_y = row_y + box_h // 2 - text_h // 2
+            draw_ctx.text(
+                (left_margin - int(5 * width_scale) - text_w, label_y),
+                display_name, fill=text_color, font=font)
 
     # Draw labels and lines (unless --no-header)
     if not config.get("no_header", False):
         label_interval = 300
         read_width = bar_width + read_spacing
-        line_y = top_margin - int(5 * height_scale)
-        label_y = top_margin - int(25 * height_scale)
+        hm_offset = int(config.get("heatmap_total", 0) * height_scale)
+        label_tiers = config.get("label_tiers", {})
+        group_subgroup_order = config.get("group_subgroup_order", [])
+        has_grouping = bool(label_tiers)
 
-        for sample in sample_order:
-            if sample in sample_x_start and sample in sample_x_end:
-                # White line
+        if has_grouping:
+            base_font_size = config.get("font_size", 11)
+            tier_offset = int((base_font_size + 10) * height_scale)
+            tier_display_names = config.get("tier_display_names", {})
+
+            # Tier 2 (bottom): subgroup lines + labels
+            # SVG: line at top_margin - 5 - hm_offset, label baseline at top_margin - 10 - hm_offset
+            # PIL y = SVG baseline y - font_size (PIL draws from top-left, SVG from baseline)
+            tier2_line_y = top_margin - int(5 * height_scale) - hm_offset
+            tier2_label_y = top_margin - int(10 * height_scale) - hm_offset - font_size
+            for sample in sample_order:
+                if sample in sample_x_start and sample in sample_x_end:
+                    draw_ctx.line(
+                        [(sample_x_start[sample], tier2_line_y),
+                         (sample_x_end[sample], tier2_line_y)],
+                        fill=text_color, width=max(1, int(1.5 * height_scale))
+                    )
+                    _, subgroup = label_tiers.get(sample, (sample, None))
+                    label_text = (subgroup or sample).replace("_", " ")
+                    draw_ctx.text(
+                        (sample_x_start[sample], tier2_label_y),
+                        label_text, fill=text_color, font=font)
+
+            # Tier 2 display name at left margin (e.g., "Condition")
+            if 1 in tier_display_names:
+                label_text = tier_display_names[1]
+                bbox = font.getbbox(label_text)
+                text_w = bbox[2] - bbox[0]
+                draw_ctx.text(
+                    (left_margin - int(5 * width_scale) - text_w, tier2_label_y),
+                    label_text, fill=text_color, font=font)
+
+            # Tier 1 (top): group lines + labels
+            # SVG: line at top_margin - 5 - tier_offset - hm_offset, label baseline at tier1_line_y - 5
+            group_spans = compute_group_spans(
+                sample_order, sample_x_start, sample_x_end, group_subgroup_order)
+            tier1_line_y = top_margin - int(5 * height_scale) - tier_offset - hm_offset
+            tier1_label_y = tier1_line_y - int(5 * height_scale) - font_size
+            for group_name, gx_start, gx_end in group_spans:
                 draw_ctx.line(
-                    [(sample_x_start[sample], line_y),
-                     (sample_x_end[sample], line_y)],
+                    [(gx_start, tier1_line_y), (gx_end, tier1_line_y)],
                     fill=text_color, width=max(1, int(2 * height_scale))
                 )
+                draw_ctx.text(
+                    (gx_start, tier1_label_y),
+                    group_name.replace("_", " "), fill=text_color, font=font)
 
-                # Labels
-                label_text = sample.replace("_", " ")
-                num_reads = sample_read_counts[sample]
+            # Tier 1 display name at left margin (e.g., "Satellite")
+            if 0 in tier_display_names:
+                label_text = tier_display_names[0]
+                bbox = font.getbbox(label_text)
+                text_w = bbox[2] - bbox[0]
+                draw_ctx.text(
+                    (left_margin - int(5 * width_scale) - text_w, tier1_label_y),
+                    label_text, fill=text_color, font=font)
+        else:
+            # Single-tier labels
+            # SVG: line at top_margin - 5 - hm_offset, label baseline at top_margin - 12 - hm_offset
+            line_y = top_margin - int(5 * height_scale) - hm_offset
+            label_y = top_margin - int(12 * height_scale) - hm_offset - font_size
+            for sample in sample_order:
+                if sample in sample_x_start and sample in sample_x_end:
+                    draw_ctx.line(
+                        [(sample_x_start[sample], line_y),
+                         (sample_x_end[sample], line_y)],
+                        fill=text_color, width=max(1, int(2 * height_scale))
+                    )
+                    label_text = sample.replace("_", " ")
+                    num_reads = sample_read_counts[sample]
+                    for i in range(0, num_reads, label_interval):
+                        x_pos = sample_x_start[sample] + (i * read_width)
+                        draw_ctx.text((x_pos, label_y), label_text, fill=text_color, font=font)
 
-                for i in range(0, num_reads, label_interval):
-                    x_pos = sample_x_start[sample] + (i * read_width)
-                    draw_ctx.text((x_pos, label_y), label_text, fill=text_color, font=font)
-
-        # Draw separator lines
-        for sample in sample_order[:-1]:
-            if sample in sample_x_end:
-                sep_x = sample_x_end[sample] + sample_spacing // 2
-                # Create semi-transparent line by drawing in gray
-                sep_color = (77, 77, 77) if background == "black" else (200, 200, 200)
-                draw_ctx.line(
-                    [(sep_x, top_margin), (sep_x, top_margin + max_height_px)],
-                    fill=sep_color, width=1
-                )
-
-    # Save PNG - blend alpha with background to produce RGB (faster for animation)
-    print(f"  Saving PNG...")
-    if img.mode == 'RGBA':
-        # Alpha composite onto solid background
-        bg_img = Image.new('RGB', img.size, bg_color[:3])
-        bg_img.paste(img, mask=img.split()[3])  # Use alpha channel as mask
-        bg_img.save(output_path, optimize=True)
-    else:
-        img.save(output_path, optimize=True)
-    file_size = os.path.getsize(output_path)
-    print(f"Saved PNG: {output_path}")
-    print(f"  Dimensions: {image_width} x {image_height} pixels")
-    print(f"  File size: {file_size / 1024 / 1024:.1f} MB")
+    _save_png(img, output_path, bg_color)
 
     return image_height
 
@@ -329,13 +697,13 @@ def calculate_horizontal_png_params(reads, config):
     max_width_scale = MAX_PNG_DIMENSION / base_width
     width_scale = min(requested_scale, max_width_scale)
 
-    # Height scale: scale less aggressively
-    desired_height_scale = min(width_scale, max(1.0, width_scale ** 0.5))
+    # Height scale: match width_scale for uniform scaling (PNG matches SVG proportions)
+    desired_height_scale = width_scale
     max_height_scale = MAX_PNG_DIMENSION / base_height
     height_scale = min(desired_height_scale, max_height_scale)
 
     if width_scale < requested_scale:
-        print(f"  Note: Capping width scale from {requested_scale}x to {width_scale:.2f}x "
+        logger.info(f"  Note: Capping width scale from {requested_scale}x to {width_scale:.2f}x "
               f"(dimension limit: {MAX_PNG_DIMENSION}px)")
 
     return height_scale, width_scale
@@ -386,8 +754,8 @@ def draw_reads_horizontal_png(reads, colors, output_path, config):
         + int(50 * height_scale)
     )
 
-    print(f"  PNG scale: height={height_scale:.2f}x, width={width_scale:.2f}x")
-    print(f"  Target dimensions: {image_width} x {image_height} pixels")
+    logger.info(f"  PNG scale: height={height_scale:.2f}x, width={width_scale:.2f}x")
+    logger.info(f"  Target dimensions: {image_width} x {image_height} pixels")
 
     # Create image
     bg_color = (0, 0, 0, 255) if background == "black" else (255, 255, 255, 255)
@@ -395,17 +763,8 @@ def draw_reads_horizontal_png(reads, colors, output_path, config):
     img = Image.new('RGBA', (image_width, image_height), bg_color)
 
     # Try to load font
-    font_size = int(16 * height_scale)
-    try:
-        font = ImageFont.truetype(
-            "/Users/fbarthel/Documents/Barthel-Custom-Powerpoint-Theme/fonts/BasicSans-Regular.otf",
-            font_size
-        )
-    except (OSError, IOError):
-        try:
-            font = ImageFont.truetype("Arial", font_size)
-        except (OSError, IOError):
-            font = ImageFont.load_default()
+    font_size = int(config.get("font_size", 11) * height_scale)
+    font = _load_font(font_size)
 
     # Track positions
     current_y = top_margin
@@ -414,8 +773,14 @@ def draw_reads_horizontal_png(reads, colors, output_path, config):
     sample_y_end = {}
 
     # Draw reads using numpy for speed
-    print(f"  Drawing {total_reads} reads...")
+    logger.info(f"  Drawing {total_reads} reads...")
     img_array = np.array(img)
+
+    feature_mode = config.get("feature_mode", "raw")
+    min_feature_width = config.get("min_feature_width", 0.5)
+    min_width_exclude = config.get("min_width_exclude", [])
+    oversample = config.get("oversample", 1)
+    read_border = config.get("read_border", False)
 
     for sample, read_id, read_length, features in reads:
         if current_sample is not None and sample != current_sample:
@@ -427,28 +792,51 @@ def draw_reads_horizontal_png(reads, colors, output_path, config):
 
         current_sample = sample
 
-        for start, end, feature in features:
-            x_start = left_margin + int(start * ratio)
-            x_end = left_margin + int(end * ratio)
-            width = max(1, x_end - x_start)
-            color_hex = colors.get(feature, "#ffffff")
-            color_rgba = hex_to_rgba(color_hex)
+        if feature_mode == "raw":
+            for start, end, feature in features:
+                x_start = left_margin + int(start * ratio)
+                x_end = left_margin + int(end * ratio)
+                width = max(1, x_end - x_start)
+                color_hex = colors.get(feature, "#ffffff")
+                color_rgba = hex_to_rgba(color_hex)
 
-            # Draw directly to numpy array
-            x1 = max(0, x_start)
-            x2 = min(image_width, x_start + width)
-            y1 = max(0, current_y)
-            y2 = min(image_height, current_y + bar_width)
-            if x1 < x2 and y1 < y2:
-                alpha = color_rgba[3] / 255.0
-                if alpha >= 1.0:
-                    img_array[y1:y2, x1:x2] = color_rgba
-                else:
-                    fg = np.array(color_rgba[:3], dtype=np.float32)
-                    bg = img_array[y1:y2, x1:x2, :3].astype(np.float32)
-                    blended = alpha * fg + (1 - alpha) * bg
-                    img_array[y1:y2, x1:x2, :3] = blended.astype(np.uint8)
-                    img_array[y1:y2, x1:x2, 3] = 255
+                x1 = max(0, x_start)
+                x2 = min(image_width, x_start + width)
+                y1 = max(0, current_y)
+                y2 = min(image_height, current_y + bar_width)
+                _draw_rect_rgba(img_array, x1, y1, x2, y2, color_rgba)
+        else:
+            colored_feats = _build_colored_features(features, colors, min_width_exclude)
+            max_feat_end = max((e for _, e, _ in features), default=0)
+            bar_length = int(max_feat_end * ratio)
+            rasterized = rasterize_features(colored_feats, bar_length, ratio,
+                                            feature_mode, oversample, min_feature_width)
+            if rasterized:
+                for run in rasterized:
+                    x1 = left_margin + int(run['scaled_start'])
+                    x2 = left_margin + int(run['scaled_stop'] + 0.5)
+                    color_rgba = hex_to_rgba(run['color'])
+                    if run['fill_opacity'] < 1.0:
+                        color_rgba = (color_rgba[0], color_rgba[1], color_rgba[2],
+                                      int(color_rgba[3] * run['fill_opacity']))
+                    x1 = max(0, x1)
+                    x2 = min(image_width, x2)
+                    y1 = max(0, current_y)
+                    y2 = min(image_height, current_y + bar_width)
+                    _draw_rect_rgba(img_array, x1, y1, x2, y2, color_rgba)
+
+        if read_border:
+            by1 = max(0, current_y)
+            by2 = min(image_height, current_y + bar_width)
+            max_feat_end = max((e for _, e, _ in features), default=0)
+            read_right = min(image_width, left_margin + int(max_feat_end * ratio))
+            read_left = left_margin
+            if by2 > by1 and read_right > read_left:
+                border_color = np.array([0, 0, 0, 255], dtype=np.uint8)
+                img_array[by1, read_left:read_right] = border_color
+                img_array[min(by2, image_height - 1), read_left:read_right] = border_color
+                img_array[by1:by2 + 1, read_left] = border_color
+                img_array[by1:by2 + 1, min(read_right, image_width - 1)] = border_color
 
         current_y += bar_width + read_spacing
 
@@ -463,24 +851,25 @@ def draw_reads_horizontal_png(reads, colors, output_path, config):
     if not config.get("no_header", False):
         label_interval = 300
         read_height = bar_width + read_spacing
+        font_size = config.get("font_size", 14)
+        label_tiers = config.get("label_tiers", {})
+        group_subgroup_order = config.get("group_subgroup_order", [])
+        has_grouping = bool(label_tiers)
 
-        for sample in sample_order:
-            if sample in sample_y_start and sample in sample_y_end:
-                # Vertical line at left spanning this sample
-                line_x = left_margin - int(5 * height_scale)
-                draw_ctx.line(
-                    [(line_x, sample_y_start[sample]),
-                     (line_x, sample_y_end[sample])],
-                    fill=text_color, width=max(1, int(2 * height_scale))
-                )
+        if has_grouping:
+            tier_offset = font_size + 10
+            line_x = left_margin - int(5 * height_scale)
 
-                # Labels (rotated vertically on left margin)
-                label_text = sample.replace("_", " ")
-                num_reads_in_sample = sample_read_counts[sample]
-
-                for i in range(0, num_reads_in_sample, label_interval):
-                    y_pos = sample_y_start[sample] + (i * read_height)
-                    # Draw rotated text using a temporary image
+            # Tier 2 (inner): subgroup lines + labels
+            for sample in sample_order:
+                if sample in sample_y_start and sample in sample_y_end:
+                    draw_ctx.line(
+                        [(line_x, sample_y_start[sample]),
+                         (line_x, sample_y_end[sample])],
+                        fill=text_color, width=max(1, int(1.5 * height_scale))
+                    )
+                    _, subgroup = label_tiers.get(sample, (sample, None))
+                    label_text = (subgroup or sample).replace("_", " ")
                     bbox = font.getbbox(label_text)
                     tw = bbox[2] - bbox[0]
                     th = bbox[3] - bbox[1]
@@ -489,20 +878,61 @@ def draw_reads_horizontal_png(reads, colors, output_path, config):
                     txt_draw.text((2, 2), label_text, fill=text_color + (255,), font=font)
                     txt_img = txt_img.rotate(90, expand=True)
                     paste_x = max(0, line_x - txt_img.width - int(5 * height_scale))
-                    paste_y = y_pos
+                    paste_y = sample_y_start[sample]
                     if paste_y + txt_img.height <= image_height:
                         img.paste(txt_img, (paste_x, paste_y), txt_img)
 
-        # Draw separator lines between samples
-        for sample in sample_order[:-1]:
-            if sample in sample_y_end:
-                sep_y = sample_y_end[sample] + sample_spacing // 2
-                sep_color = (77, 77, 77) if background == "black" else (200, 200, 200)
+            # Tier 1 (outer): group lines + labels
+            group_spans = compute_group_spans(
+                sample_order, sample_y_start, sample_y_end, group_subgroup_order)
+            tier1_x = line_x - tier_offset
+            for group_name, gy_start, gy_end in group_spans:
                 draw_ctx = ImageDraw.Draw(img)  # Refresh after paste
                 draw_ctx.line(
-                    [(left_margin, sep_y), (left_margin + max_width_px, sep_y)],
-                    fill=sep_color, width=1
+                    [(tier1_x, gy_start), (tier1_x, gy_end)],
+                    fill=text_color, width=max(1, int(2 * height_scale))
                 )
+                label_text = group_name.replace("_", " ")
+                bbox = font.getbbox(label_text)
+                tw = bbox[2] - bbox[0]
+                th = bbox[3] - bbox[1]
+                txt_img = Image.new('RGBA', (tw + 4, th + 4), (0, 0, 0, 0))
+                txt_draw = ImageDraw.Draw(txt_img)
+                txt_draw.text((2, 2), label_text, fill=text_color + (255,), font=font)
+                txt_img = txt_img.rotate(90, expand=True)
+                paste_x = max(0, tier1_x - txt_img.width - int(5 * height_scale))
+                paste_y = gy_start
+                if paste_y + txt_img.height <= image_height:
+                    img.paste(txt_img, (paste_x, paste_y), txt_img)
+        else:
+            for sample in sample_order:
+                if sample in sample_y_start and sample in sample_y_end:
+                    # Vertical line at left spanning this sample
+                    line_x = left_margin - int(5 * height_scale)
+                    draw_ctx.line(
+                        [(line_x, sample_y_start[sample]),
+                         (line_x, sample_y_end[sample])],
+                        fill=text_color, width=max(1, int(2 * height_scale))
+                    )
+
+                    # Labels (rotated vertically on left margin)
+                    label_text = sample.replace("_", " ")
+                    num_reads_in_sample = sample_read_counts[sample]
+
+                    for i in range(0, num_reads_in_sample, label_interval):
+                        y_pos = sample_y_start[sample] + (i * read_height)
+                        # Draw rotated text using a temporary image
+                        bbox = font.getbbox(label_text)
+                        tw = bbox[2] - bbox[0]
+                        th = bbox[3] - bbox[1]
+                        txt_img = Image.new('RGBA', (tw + 4, th + 4), (0, 0, 0, 0))
+                        txt_draw = ImageDraw.Draw(txt_img)
+                        txt_draw.text((2, 2), label_text, fill=text_color + (255,), font=font)
+                        txt_img = txt_img.rotate(90, expand=True)
+                        paste_x = max(0, line_x - txt_img.width - int(5 * height_scale))
+                        paste_y = y_pos
+                        if paste_y + txt_img.height <= image_height:
+                            img.paste(txt_img, (paste_x, paste_y), txt_img)
 
     # Draw horizontal scale bar at top
     if config.get("draw_scale_bar", True):
@@ -537,18 +967,7 @@ def draw_reads_horizontal_png(reads, colors, output_path, config):
             label_y = 2
         draw_ctx.text((label_x, label_y), label, fill=text_color, font=font, anchor="mt")
 
-    # Save PNG
-    print(f"  Saving PNG...")
-    if img.mode == 'RGBA':
-        bg_img = Image.new('RGB', img.size, bg_color[:3])
-        bg_img.paste(img, mask=img.split()[3])
-        bg_img.save(output_path, optimize=True)
-    else:
-        img.save(output_path, optimize=True)
-    file_size = os.path.getsize(output_path)
-    print(f"Saved PNG: {output_path}")
-    print(f"  Dimensions: {image_width} x {image_height} pixels")
-    print(f"  File size: {file_size / 1024 / 1024:.1f} MB")
+    _save_png(img, output_path, bg_color)
 
     return image_width
 
@@ -604,7 +1023,8 @@ def draw_reads_horizontal_svg(reads, colors, output_path, config):
                            sb_x + scale_bar_width_px, sb_y + 4,
                            stroke=text_color, stroke_width=1))
         label = f"{scale_bar_bp // 1000} Kbp"
-        d.append(draw.Text(label, 12, sb_x + scale_bar_width_px / 2, sb_y - 8,
+        d.append(draw.Text(label, config.get("font_size", 14),
+                           sb_x + scale_bar_width_px / 2, sb_y - 8,
                            fill=text_color, text_anchor="middle",
                            font_family="Basic Sans"))
 
@@ -612,6 +1032,12 @@ def draw_reads_horizontal_svg(reads, colors, output_path, config):
     current_sample = None
     sample_y_start = {}
     sample_y_end = {}
+
+    feature_mode = config.get("feature_mode", "raw")
+    min_feature_width = config.get("min_feature_width", 0.5)
+    min_width_exclude = config.get("min_width_exclude", [])
+    oversample = config.get("oversample", 1)
+    read_border = config.get("read_border", False)
 
     for sample, read_id, read_length, features in reads:
         if current_sample is not None and sample != current_sample:
@@ -623,11 +1049,31 @@ def draw_reads_horizontal_svg(reads, colors, output_path, config):
 
         current_sample = sample
 
-        for start, end, feature in features:
-            x_start = left_margin + int(start * ratio)
-            width = max(1, int((end - start) * ratio))
-            color = colors.get(feature, "#ffffff")
-            d.append(draw.Rectangle(x_start, current_y, width, bar_width, fill=color))
+        if feature_mode == "raw":
+            for start, end, feature in features:
+                x_start = left_margin + int(start * ratio)
+                width = max(1, int((end - start) * ratio))
+                color = colors.get(feature, "#ffffff")
+                d.append(draw.Rectangle(x_start, current_y, width, bar_width, fill=color))
+        else:
+            colored_feats = _build_colored_features(features, colors, min_width_exclude)
+            max_feat_end = max((e for _, e, _ in features), default=0)
+            bar_length = int(max_feat_end * ratio)
+            rasterized = rasterize_features(colored_feats, bar_length, ratio,
+                                            feature_mode, oversample, min_feature_width)
+            if rasterized:
+                for run in rasterized:
+                    rx = left_margin + run['scaled_start']
+                    rw = run['scaled_stop'] - run['scaled_start']
+                    d.append(draw.Rectangle(rx, current_y, rw, bar_width,
+                                            fill=run['color'],
+                                            fill_opacity=run['fill_opacity']))
+
+        if read_border:
+            max_feat_end = max((e for _, e, _ in features), default=0)
+            read_width_px = int(max_feat_end * ratio)
+            d.append(draw.Rectangle(left_margin, current_y, read_width_px, bar_width,
+                                    fill='none', stroke='black', stroke_width=0.5))
 
         current_y += bar_width + read_spacing
 
@@ -639,40 +1085,88 @@ def draw_reads_horizontal_svg(reads, colors, output_path, config):
         font_family = "Basic Sans"
         label_interval = 300
         read_height = bar_width + read_spacing
+        font_size = config.get("font_size", 14)
+        label_tiers = config.get("label_tiers", {})
+        group_subgroup_order = config.get("group_subgroup_order", [])
+        has_grouping = bool(label_tiers)
 
-        for sample in sample_order:
-            if sample in sample_y_start and sample in sample_y_end:
-                # Vertical line at left
-                line_x = left_margin - 5
-                d.append(draw.Line(line_x, sample_y_start[sample],
-                                   line_x, sample_y_end[sample],
-                                   stroke=text_color, stroke_width=2))
+        if has_grouping:
+            tier_offset = font_size + 10
+            line_x = left_margin - 5
+            tier_display_names = config.get("tier_display_names", {})
 
-                label_text = sample.replace("_", " ")
-                num_reads_in_sample = sample_read_counts[sample]
-
-                for i in range(0, num_reads_in_sample, label_interval):
-                    y_pos = sample_y_start[sample] + (i * read_height)
+            # Tier 2 (inner): subgroup lines + labels
+            for sample in sample_order:
+                if sample in sample_y_start and sample in sample_y_end:
+                    d.append(draw.Line(line_x, sample_y_start[sample],
+                                       line_x, sample_y_end[sample],
+                                       stroke=text_color, stroke_width=1.5))
+                    _, subgroup = label_tiers.get(sample, (sample, None))
+                    label_text = (subgroup or sample).replace("_", " ")
+                    ly = sample_y_start[sample] + 50
                     lx = line_x - 10
-                    ly = y_pos + 50
                     d.append(draw.Text(
-                        label_text, 16, lx, ly,
+                        label_text, font_size, lx, ly,
                         fill=text_color, text_anchor="middle",
                         font_family=font_family,
                         transform=f"rotate(-90, {lx}, {ly})",
                     ))
 
-        for sample in sample_order[:-1]:
-            if sample in sample_y_end:
-                sep_y = sample_y_end[sample] + sample_spacing / 2
-                d.append(draw.Line(
-                    left_margin, sep_y, left_margin + max_width_px, sep_y,
-                    stroke=text_color, stroke_width=0.5, stroke_opacity=0.3,
+            # Tier 2 display name (top of margin)
+            if 1 in tier_display_names:
+                d.append(draw.Text(
+                    tier_display_names[1], font_size,
+                    line_x, top_margin - 10,
+                    fill=text_color, text_anchor="middle",
+                    font_family=font_family,
                 ))
 
+            # Tier 1 (outer): group lines + labels
+            group_spans = compute_group_spans(
+                sample_order, sample_y_start, sample_y_end, group_subgroup_order)
+            tier1_x = line_x - tier_offset
+            for group_name, gy_start, gy_end in group_spans:
+                d.append(draw.Line(tier1_x, gy_start, tier1_x, gy_end,
+                                   stroke=text_color, stroke_width=1.5))
+                ly = gy_start + 50
+                d.append(draw.Text(
+                    group_name.replace("_", " "), font_size, tier1_x - 10, ly,
+                    fill=text_color, text_anchor="middle",
+                    font_family=font_family,
+                    transform=f"rotate(-90, {tier1_x - 10}, {ly})",
+                ))
+
+            # Tier 1 display name (top of margin)
+            if 0 in tier_display_names:
+                d.append(draw.Text(
+                    tier_display_names[0], font_size,
+                    tier1_x, top_margin - 10,
+                    fill=text_color, text_anchor="middle",
+                    font_family=font_family,
+                ))
+        else:
+            for sample in sample_order:
+                if sample in sample_y_start and sample in sample_y_end:
+                    line_x = left_margin - 5
+                    d.append(draw.Line(line_x, sample_y_start[sample],
+                                       line_x, sample_y_end[sample],
+                                       stroke=text_color, stroke_width=2))
+                    label_text = sample.replace("_", " ")
+                    num_reads_in_sample = sample_read_counts[sample]
+                    for i in range(0, num_reads_in_sample, label_interval):
+                        y_pos = sample_y_start[sample] + (i * read_height)
+                        lx = line_x - 10
+                        ly = y_pos + 50
+                        d.append(draw.Text(
+                            label_text, font_size, lx, ly,
+                            fill=text_color, text_anchor="middle",
+                            font_family=font_family,
+                            transform=f"rotate(-90, {lx}, {ly})",
+                        ))
+
     d.save_svg(output_path)
-    print(f"\nSaved: {output_path}")
-    print(f"  Dimensions: {image_width} x {image_height} pixels")
+    logger.info("\nSaved: %s", output_path)
+    logger.info(f"  Dimensions: {image_width} x {image_height} pixels")
 
     return image_width
 
@@ -699,16 +1193,7 @@ def draw_legend_png(features_used, colors, config, horizontal=False):
     row_height = swatch_size + 6
 
     # Load font
-    try:
-        font = ImageFont.truetype(
-            "/Users/fbarthel/Documents/Barthel-Custom-Powerpoint-Theme/fonts/BasicSans-Regular.otf",
-            font_size
-        )
-    except (OSError, IOError):
-        try:
-            font = ImageFont.truetype("Arial", font_size)
-        except (OSError, IOError):
-            font = ImageFont.load_default()
+    font = _load_font(font_size)
 
     # Filter to only features in use, skip _specific duplicates
     filtered = {}
@@ -807,7 +1292,7 @@ def composite_legend(png_path, legend_img, position="below"):
             combined.paste(legend_img, (0, mh))
 
     combined.save(png_path, optimize=True)
-    print(f"  Legend composited ({position}): {png_path}")
+    logger.info(f"  Legend composited ({position}): {png_path}")
 
 
 def load_cluster_reads(cluster_prefix, cluster_ids, results_dir,
@@ -821,16 +1306,16 @@ def load_cluster_reads(cluster_prefix, cluster_ids, results_dir,
 
     assignments_file = f"{cluster_prefix}.sequence_assignments.tsv"
     if not os.path.exists(assignments_file):
-        print(f"Error: Cluster assignments file not found: {assignments_file}")
+        logger.error(f"Error: Cluster assignments file not found: {assignments_file}")
         return [], []
 
-    print(f"  Loading cluster assignments: {assignments_file}")
+    logger.info(f"  Loading cluster assignments: {assignments_file}")
     df = pd.read_csv(assignments_file, sep='\t')
     if 'read' in df.columns:
         df = df.rename(columns={'read': 'sequence'})
 
     df = df[df['cluster'].isin(cluster_ids)]
-    print(f"  Found {len(df)} reads in clusters: {cluster_ids}")
+    logger.info(f"  Found {len(df)} reads in clusters: {cluster_ids}")
 
     # Load BED data for all samples represented in these clusters
     samples = df['sample'].unique().tolist()
@@ -855,13 +1340,13 @@ def load_cluster_reads(cluster_prefix, cluster_ids, results_dir,
             read_length = max(end for _, end, _ in feats)
             result.append((label, row['sequence'], read_length, feats))
             found += 1
-        print(f"  {label}: {found} reads with BED data")
+        logger.info(f"  {label}: {found} reads with BED data")
 
     return result, sample_order
 
 
 def draw_scale_bar_png(image_height, top_margin, ratio, background, output_path,
-                       height_scale=1.0):
+                       height_scale=1.0, font_size=14):
     """Render a standalone vertical scale bar as PNG for animation overlay.
 
     Generated at source PNG dimensions with scaled ratio. The animation function
@@ -883,17 +1368,8 @@ def draw_scale_bar_png(image_height, top_margin, ratio, background, output_path,
     draw_ctx = ImageDraw.Draw(img)
 
     # Load font — scale with height_scale so text survives downscale to viewport
-    font_size = max(14, int(14 * height_scale))
-    try:
-        font = ImageFont.truetype(
-            "/Users/fbarthel/Documents/Barthel-Custom-Powerpoint-Theme/fonts/BasicSans-Regular.otf",
-            font_size
-        )
-    except (OSError, IOError):
-        try:
-            font = ImageFont.truetype("Arial", font_size)
-        except (OSError, IOError):
-            font = ImageFont.load_default()
+    scaled_font_size = max(font_size, int(font_size * height_scale))
+    font = _load_font(scaled_font_size)
 
     x = 45
     y = top_margin
@@ -921,8 +1397,8 @@ def draw_scale_bar_png(image_height, top_margin, ratio, background, output_path,
     img.paste(txt_img, (paste_x, paste_y), txt_img)
 
     img.save(output_path)
-    print(f"  Scale bar saved for animation: {output_path}")
-    print(f"  Dimensions: {width} x {image_height} pixels")
+    logger.info(f"  Scale bar saved for animation: {output_path}")
+    logger.info(f"  Dimensions: {width} x {image_height} pixels")
 
 
 def _run_animation(png_path, num_reads, args, config=None,
@@ -966,13 +1442,13 @@ def _run_animation(png_path, num_reads, args, config=None,
     height_scale = config.get("png_scale", 8.0) if config else 1.0
     scaled_ratio = args.ratio * height_scale
 
-    print(f"\nGenerating animation: {mp4_path}")
-    print(f"  Direction: {direction}, Duration: {duration:.1f}s, FPS: {args.animate_fps}")
-    print(f"  Viewport: {vw}x{vh}, Zoom: {args.animate_zoom}")
+    logger.info(f"\nGenerating animation: {mp4_path}")
+    logger.info(f"  Direction: {direction}, Duration: {duration:.1f}s, FPS: {args.animate_fps}")
+    logger.info(f"  Viewport: {vw}x{vh}, Zoom: {args.animate_zoom}")
     if legend:
-        print(f"  Legend: {legend}")
+        logger.info(f"  Legend: {legend}")
     if scale_bar:
-        print(f"  Scale bar: {scale_bar}")
+        logger.info(f"  Scale bar: {scale_bar}")
 
     if direction == "horizontal":
         # Pass scaled margins/ratio matching the source PNG's coordinate space
@@ -992,7 +1468,7 @@ def _run_animation(png_path, num_reads, args, config=None,
             background=bg, scale_bar_padding=10,
             ratio=scaled_ratio)
 
-    print(f"  Animation: {mp4_path}")
+    logger.info(f"  Animation: {mp4_path}")
 
 
 def parse_args():
@@ -1025,12 +1501,31 @@ def parse_args():
         help="Path to region colors file (e.g., KS_human_CHM13.region.colors.txt)",
     )
     parser.add_argument(
-        "--output", "-o", required=True, help="Output SVG file path"
+        "--output", "-o", required=True, help="Output file path (extension auto-adjusted based on --format)"
     )
     parser.add_argument(
         "--scale-bar-output",
         default=None,
-        help="Output SVG file path for separate scale bar (optional)",
+        help="Output path for separate scale bar SVG (PNG also rendered if rsvg-convert is available)",
+    )
+    parser.add_argument(
+        "--read-list",
+        default=None,
+        help="File with read IDs to include (one per line, or TSV with IDs in first column). "
+             "Optionally, 2nd and 3rd columns provide group and subgroup labels for "
+             "two-level grouping (e.g., satellite type and cell line).",
+    )
+    parser.add_argument(
+        "--min-length",
+        type=int,
+        default=None,
+        help="Minimum read length in bp (shorter reads discarded)",
+    )
+    parser.add_argument(
+        "--max-length",
+        type=int,
+        default=None,
+        help="Maximum read length in bp (longer reads discarded)",
     )
 
     # Data options
@@ -1060,14 +1555,14 @@ def parse_args():
     parser.add_argument(
         "--bar-width",
         type=int,
-        default=3,
-        help="Width of each read bar in pixels (default: 3)",
+        default=5,
+        help="Width of each read bar in pixels (default: 5)",
     )
     parser.add_argument(
         "--read-spacing",
         type=int,
-        default=3,
-        help="Horizontal spacing between reads (default: 3)",
+        default=5,
+        help="Horizontal spacing between reads (default: 5)",
     )
     parser.add_argument(
         "--sample-spacing",
@@ -1084,26 +1579,8 @@ def parse_args():
     parser.add_argument(
         "--background",
         default="black",
-        choices=["white", "black"],
-        help="Background color (default: black)",
-    )
-    parser.add_argument(
-        "--top-margin",
-        type=int,
-        default=80,
-        help="Top margin for labels (default: 80)",
-    )
-    parser.add_argument(
-        "--left-margin",
-        type=int,
-        default=60,
-        help="Left margin for scale bar (default: 60)",
-    )
-    parser.add_argument(
-        "--bottom-margin",
-        type=int,
-        default=40,
-        help="Bottom margin (default: 40)",
+        choices=["white", "black", "both"],
+        help="Background color (default: black). Use 'both' to generate black and white variants.",
     )
     parser.add_argument(
         "--orient-telomere-top",
@@ -1132,6 +1609,19 @@ def parse_args():
         help="Skip drawing the scale bar in the left margin",
     )
     parser.add_argument(
+        "--font-size",
+        type=int,
+        default=11,
+        help="Font size for labels and scale bar text (default: 11)",
+    )
+    parser.add_argument(
+        "--viewport-ratio",
+        default="16:9",
+        help="Aspect ratio W:H for output (default: 16:9). "
+             "Width is calculated from content, height derived from ratio. "
+             "Set to 'none' to disable and use raw content dimensions.",
+    )
+    parser.add_argument(
         "--format",
         choices=["svg", "png", "both"],
         default="svg",
@@ -1145,6 +1635,32 @@ def parse_args():
              "Higher values = sharper at high zoom but larger files.",
     )
 
+    # ── Heatmap ──
+    parser.add_argument(
+        "--heatmap",
+        action="store_true",
+        help="Draw a categorical heatmap grid above read bars using extra columns "
+             "(4th+) from --read-list TSV. Requires a header row.",
+    )
+    parser.add_argument(
+        "--label-tier", action="append", default=None,
+        help="Column from --read-list TSV to use as a tiered label, "
+             "with optional display name: COLUMN:DISPLAY_NAME. "
+             "Can be specified multiple times for multiple tiers (top to bottom order). "
+             "Default: columns 2 and 3 (group, subgroup).",
+    )
+    parser.add_argument(
+        "--heatmap-track", action="append", default=None,
+        help="Column from --read-list TSV to use as a heatmap row, "
+             "with optional display name: COLUMN:DISPLAY_NAME. "
+             "Can be specified multiple times. "
+             "Default with --heatmap: columns 4+ from header.",
+    )
+    parser.add_argument(
+        "--max-read-length",
+        type=int, default=None,
+        help="Exclude reads longer than this many bp (default: no limit).",
+    )
     # ── Orientation ──
     parser.add_argument(
         "--horizontal",
@@ -1174,6 +1690,40 @@ def parse_args():
         default=None,
         help="Comma-separated cluster IDs to plot (e.g., '22,69,112'). "
              "Requires --cluster-prefix and --results-dir.",
+    )
+
+    # ── Feature rendering ──
+    parser.add_argument(
+        "--feature-mode",
+        default="smooth",
+        choices=["raw", "transition", "smooth"],
+        help="Feature rendering mode: smooth (default, windowed majority-vote "
+             "downsampling), transition (direct scaling with min-width enforcement), "
+             "raw (integer pixel stacking).",
+    )
+    parser.add_argument(
+        "--min-feature-width",
+        type=float,
+        default=0.5,
+        help="Min pixel width per feature in transition mode (default: 0.5).",
+    )
+    parser.add_argument(
+        "--min-width-exclude",
+        nargs="*",
+        default=["novel", "*arm*", "ct*"],
+        help="Glob patterns for features exempt from min-width inflation "
+             "(default: novel *arm* ct*).",
+    )
+    parser.add_argument(
+        "--oversample",
+        type=int,
+        default=1,
+        help="Oversampling factor for smooth mode (default: 1).",
+    )
+    parser.add_argument(
+        "--read-border",
+        action="store_true",
+        help="Draw thin black border around each read bar.",
     )
 
     # ── Animation ──
@@ -1262,6 +1812,176 @@ def load_color_mapping(colors_file):
     return colors
 
 
+def load_read_list(path):
+    """Load read IDs and all column data from a TSV read-list file.
+
+    Accepts:
+      - 1 column: read IDs only (backward compatible)
+      - 2+ columns: read_id + any number of data columns (TSV)
+
+    Skips header lines (sequence/read/read_id) but captures column names.
+
+    Returns:
+        tuple: (read_ids, all_columns, read_data, read_rows)
+        - read_ids: set of read ID strings
+        - all_columns: ordered list of column names from the header (columns 2+)
+        - read_data: dict mapping read_id -> {col_name: value} for all columns
+          (last occurrence wins for duplicate read IDs)
+        - read_rows: list of (read_id, {col_name: value}) in file order,
+          preserving duplicates for correct group ordering
+    """
+    read_ids = set()
+    all_columns = []
+    read_data = {}
+    read_rows = []
+
+    open_func = gzip.open if path.endswith(".gz") else open
+    mode = "rt" if path.endswith(".gz") else "r"
+    with open_func(path, mode) as f:
+        for line in f:
+            fields = line.strip().split("\t")
+            if not fields or not fields[0]:
+                continue
+            rid = fields[0]
+            if rid.lower() in ("sequence", "read", "read_id"):
+                # Capture all column names from header (columns 2+)
+                if len(fields) > 1:
+                    all_columns = fields[1:]
+                continue
+            read_ids.add(rid)
+
+            # Store all column values for this read
+            if all_columns and len(fields) > 1:
+                meta = {}
+                for i, col_name in enumerate(all_columns):
+                    idx = 1 + i
+                    if idx < len(fields) and fields[idx]:
+                        meta[col_name] = fields[idx]
+                    else:
+                        meta[col_name] = None
+                read_data[rid] = meta
+                read_rows.append((rid, meta))
+
+    return read_ids, all_columns, read_data, read_rows
+
+
+def apply_read_list_grouping(reads, read_groups, group_subgroup_order):
+    """Replace sample field with composite group labels for two-level grouping.
+
+    Args:
+        reads: list of (sample, read_id, read_length, features) tuples
+        read_groups: dict mapping read_id -> (group, subgroup)
+        group_subgroup_order: ordered list of (group, subgroup) tuples
+
+    Returns:
+        tuple: (reads, sample_order, group_boundaries)
+        - reads: updated read tuples with composite sample labels
+        - sample_order: list of composite label strings in group order
+        - group_boundaries: set of sample labels that are the LAST subgroup
+          before a group change (used for thicker separators)
+    """
+    # Build composite labels
+    def _label(group, subgroup):
+        if subgroup:
+            return f"{group} \u2014 {subgroup}"
+        return group
+
+    sample_order = [_label(g, s) for g, s in group_subgroup_order]
+
+    # Relabel reads
+    updated = []
+    for sample, read_id, read_length, features in reads:
+        if read_id in read_groups:
+            group, subgroup = read_groups[read_id]
+            new_sample = _label(group, subgroup)
+            updated.append((new_sample, read_id, read_length, features))
+        else:
+            updated.append((sample, read_id, read_length, features))
+
+    # Compute group boundaries: the LAST subgroup label before a group change
+    group_boundaries = set()
+    if len(group_subgroup_order) > 1:
+        for i in range(len(group_subgroup_order) - 1):
+            curr_group = group_subgroup_order[i][0]
+            next_group = group_subgroup_order[i + 1][0]
+            if curr_group != next_group:
+                group_boundaries.add(sample_order[i])
+
+    return updated, sample_order, group_boundaries
+
+
+def compute_group_spans(sample_order, sample_starts, sample_ends, group_subgroup_order):
+    """Compute positional spans for top-level groups from subgroup spans.
+
+    Args:
+        sample_order: list of composite label strings (e.g., "aSat — NHA p1")
+        sample_starts: dict mapping composite label -> start position
+        sample_ends: dict mapping composite label -> end position
+        group_subgroup_order: list of (group, subgroup) tuples
+
+    Returns:
+        list of (group_label, span_start, span_end) in order.
+        Only includes groups with at least one visible subgroup.
+    """
+    def _label(group, subgroup):
+        if subgroup:
+            return f"{group} \u2014 {subgroup}"
+        return group
+
+    result = []
+    current_group = None
+    group_start = None
+    group_end = None
+
+    for group, subgroup in group_subgroup_order:
+        composite = _label(group, subgroup)
+        if composite not in sample_starts:
+            continue
+
+        if group != current_group:
+            if current_group is not None and group_start is not None:
+                result.append((current_group, group_start, group_end))
+            current_group = group
+            group_start = sample_starts[composite]
+            group_end = sample_ends.get(composite, group_start)
+        else:
+            group_end = sample_ends.get(composite, group_end)
+
+    if current_group is not None and group_start is not None:
+        result.append((current_group, group_start, group_end))
+
+    return result
+
+
+def _parse_bed_file(bed_path, sample):
+    """Parse a BED file and return read tuples for a given sample.
+
+    Returns:
+        list of (sample, read_id, read_length, features) tuples
+    """
+    read_features = defaultdict(list)
+    open_func = gzip.open if bed_path.endswith(".gz") else open
+    mode = "rt" if bed_path.endswith(".gz") else "r"
+
+    with open_func(bed_path, mode) as f:
+        for line in f:
+            parts = line.strip().split("\t")
+            if len(parts) >= 4:
+                read_id = parts[0]
+                start = int(parts[1])
+                end = int(parts[2])
+                feature = parts[3]
+                read_features[read_id].append((start, end, feature))
+
+    reads = []
+    for read_id, features in read_features.items():
+        read_length = max(end for _, end, _ in features)
+        reads.append((sample, read_id, read_length, features))
+
+    logger.info(f"  {sample}: {len(read_features)} reads loaded")
+    return reads
+
+
 def load_sample_bed_data(samples, results_dir, database, featureset, smoothness, analysis="telogator"):
     """Load BED data for all samples.
 
@@ -1287,30 +2007,10 @@ def load_sample_bed_data(samples, results_dir, database, featureset, smoothness,
             if os.path.exists(bed_path_gz):
                 bed_path = bed_path_gz
             else:
-                print(f"Warning: BED file not found for {sample}: {bed_path}")
+                logger.warning(f"Warning: BED file not found for {sample}: {bed_path}")
                 continue
 
-        # Parse BED file, group by read
-        read_features = defaultdict(list)
-        open_func = gzip.open if bed_path.endswith(".gz") else open
-        mode = "rt" if bed_path.endswith(".gz") else "r"
-
-        with open_func(bed_path, mode) as f:
-            for line in f:
-                parts = line.strip().split("\t")
-                if len(parts) >= 4:
-                    read_id = parts[0]
-                    start = int(parts[1])
-                    end = int(parts[2])
-                    feature = parts[3]
-                    read_features[read_id].append((start, end, feature))
-
-        # Calculate read lengths and add to list
-        for read_id, features in read_features.items():
-            read_length = max(end for _, end, _ in features)
-            all_reads.append((sample, read_id, read_length, features))
-
-        print(f"  {sample}: {len(read_features)} reads loaded")
+        all_reads.extend(_parse_bed_file(bed_path, sample))
 
     return all_reads
 
@@ -1341,30 +2041,10 @@ def load_bed_files_direct(bed_specs):
         sample_order.append(sample)
 
         if not os.path.exists(bed_path):
-            print(f"Warning: BED file not found: {bed_path}")
+            logger.warning(f"Warning: BED file not found: {bed_path}")
             continue
 
-        # Parse BED file, group by read
-        read_features = defaultdict(list)
-        open_func = gzip.open if bed_path.endswith(".gz") else open
-        mode = "rt" if bed_path.endswith(".gz") else "r"
-
-        with open_func(bed_path, mode) as f:
-            for line in f:
-                parts = line.strip().split("\t")
-                if len(parts) >= 4:
-                    read_id = parts[0]
-                    start = int(parts[1])
-                    end = int(parts[2])
-                    feature = parts[3]
-                    read_features[read_id].append((start, end, feature))
-
-        # Calculate read lengths and add to list
-        for read_id, features in read_features.items():
-            read_length = max(end for _, end, _ in features)
-            all_reads.append((sample, read_id, read_length, features))
-
-        print(f"  {sample}: {len(read_features)} reads loaded")
+        all_reads.extend(_parse_bed_file(bed_path, sample))
 
     return all_reads, sample_order
 
@@ -1388,6 +2068,55 @@ def sort_reads(reads, sample_order):
     return sorted(reads, key=sort_key)
 
 
+def compute_viewport_params(target_w, target_h, reads, config, horizontal=False):
+    """Back-calculate bar_width, read_spacing, and ratio to fit a target viewport.
+
+    For vertical mode: width governs read pitch, height governs ratio.
+    For horizontal mode: width governs ratio, height governs read pitch.
+
+    Returns:
+        dict with updated bar_width, read_spacing, ratio values
+    """
+    sample_read_counts = defaultdict(int)
+    for sample, _, _, _ in reads:
+        sample_read_counts[sample] += 1
+    num_samples = len(sample_read_counts)
+    total_reads = len(reads)
+    max_length = max(r[2] for r in reads)
+
+    sample_spacing = config["sample_spacing"]
+    top_margin = config["top_margin"]
+    left_margin = config["left_margin"]
+    bottom_margin = config["bottom_margin"]
+
+    updates = {}
+
+    if horizontal:
+        # Width governs ratio (feature detail along x-axis)
+        usable_w = target_w - left_margin - 50
+        updates["ratio"] = usable_w / max_length if max_length > 0 else config["ratio"]
+
+        # Height governs read pitch
+        usable_h = target_h - top_margin - 50 - ((num_samples - 1) * sample_spacing)
+        if total_reads > 0:
+            pitch = max(2, usable_h / total_reads)
+            updates["bar_width"] = max(1, int(pitch * 0.5))
+            updates["read_spacing"] = max(1, int(pitch - updates["bar_width"]))
+    else:
+        # Width governs read pitch
+        usable_w = target_w - left_margin - 50 - ((num_samples - 1) * sample_spacing)
+        if total_reads > 0:
+            pitch = max(2, usable_w / total_reads)
+            updates["bar_width"] = max(1, int(pitch * 0.5))
+            updates["read_spacing"] = max(1, int(pitch - updates["bar_width"]))
+
+        # Height governs ratio
+        usable_h = target_h - top_margin - bottom_margin
+        updates["ratio"] = usable_h / max_length if max_length > 0 else config["ratio"]
+
+    return updates
+
+
 # Telomere features used for orientation detection
 TELOMERE_FEATURES = {'canonical_telomere', 'noncanonical_telomere'}
 
@@ -1405,14 +2134,16 @@ CHROMOSOME_FEATURES = {
 }
 
 
-def orient_telomere_top(reads):
-    """Reorient reads so telomere features are at the top (position 0).
+def _orient_reads(reads, target_features, label):
+    """Reorient reads so that target features are at the top (position 0).
 
-    For each read, checks if telomere features are closer to start or end.
+    For each read, checks if any target features are closer to start or end.
     If closer to end, flips the read coordinates.
 
     Args:
         reads: List of (sample, read_id, read_length, features) tuples
+        target_features: set of feature names to orient toward the top
+        label: description for the print message (e.g. "telomere", "chromosome")
 
     Returns:
         List of reoriented reads
@@ -1421,87 +2152,162 @@ def orient_telomere_top(reads):
     flipped_count = 0
 
     for sample, read_id, read_length, features in reads:
-        # Find telomere positions
-        telomere_positions = []
+        positions = []
         for start, end, feature in features:
-            if feature in TELOMERE_FEATURES:
-                telomere_positions.extend([start, end])
+            if feature in target_features:
+                positions.extend([start, end])
 
-        if telomere_positions:
-            # Calculate average telomere position
-            avg_telomere_pos = sum(telomere_positions) / len(telomere_positions)
+        if positions:
+            avg_pos = sum(positions) / len(positions)
             midpoint = read_length / 2
 
-            # If telomere is in second half, flip the read
-            if avg_telomere_pos > midpoint:
-                # Flip coordinates: new_start = length - old_end, new_end = length - old_start
+            if avg_pos > midpoint:
                 flipped_features = [
                     (read_length - end, read_length - start, feature)
                     for start, end, feature in features
                 ]
-                # Sort by start position
                 flipped_features.sort(key=lambda x: x[0])
                 oriented_reads.append((sample, read_id, read_length, flipped_features))
                 flipped_count += 1
             else:
                 oriented_reads.append((sample, read_id, read_length, features))
         else:
-            # No telomere features, keep as-is
             oriented_reads.append((sample, read_id, read_length, features))
 
-    print(f"  Reoriented {flipped_count} of {len(reads)} reads (telomere now at top)")
+    logger.info(f"  Reoriented {flipped_count} of {len(reads)} reads ({label} now at top)")
     return oriented_reads
+
+
+def orient_telomere_top(reads):
+    """Reorient reads so telomere features are at the top (position 0)."""
+    return _orient_reads(reads, TELOMERE_FEATURES, "telomere")
 
 
 def orient_chromosome_top(reads):
-    """Reorient reads so chromosome features are at the top (position 0).
+    """Reorient reads so chromosome features are at the top (position 0)."""
+    return _orient_reads(reads, CHROMOSOME_FEATURES, "chromosome")
 
-    For each read, checks if chromosome-specific features are closer to start or end.
-    If closer to end, flips the read coordinates.
 
-    Args:
-        reads: List of (sample, read_id, read_length, features) tuples
+def assign_heatmap_colors(metadata_columns, read_metadata):
+    """Assign colors to unique values in each metadata column.
 
     Returns:
-        List of reoriented reads
+        dict: {col_name: {value: hex_color}} mapping for each column.
     """
-    oriented_reads = []
-    flipped_count = 0
+    palette = ["#40D392", "#60A5FA", "#F07167", "#FBBF24", "#10B981", "#3B82F6", "#C4A9E8"]
+    missing_color = "#545454"
+    color_map = {}
 
-    for sample, read_id, read_length, features in reads:
-        # Find chromosome feature positions
-        chromosome_positions = []
-        for start, end, feature in features:
-            if feature in CHROMOSOME_FEATURES:
-                chromosome_positions.extend([start, end])
+    for col in metadata_columns:
+        # Collect unique values preserving first-seen order
+        seen = []
+        seen_set = set()
+        for rid, meta in read_metadata.items():
+            val = meta.get(col)
+            if val is not None and val not in seen_set:
+                seen.append(val)
+                seen_set.add(val)
+        # Assign colors cyclically
+        val_colors = {}
+        for i, val in enumerate(seen):
+            val_colors[val] = palette[i % len(palette)]
+        val_colors[None] = missing_color
+        color_map[col] = val_colors
 
-        if chromosome_positions:
-            # Calculate average chromosome position
-            avg_chromosome_pos = sum(chromosome_positions) / len(chromosome_positions)
-            midpoint = read_length / 2
-
-            # If chromosome is in second half, flip the read
-            if avg_chromosome_pos > midpoint:
-                # Flip coordinates: new_start = length - old_end, new_end = length - old_start
-                flipped_features = [
-                    (read_length - end, read_length - start, feature)
-                    for start, end, feature in features
-                ]
-                # Sort by start position
-                flipped_features.sort(key=lambda x: x[0])
-                oriented_reads.append((sample, read_id, read_length, flipped_features))
-                flipped_count += 1
-            else:
-                oriented_reads.append((sample, read_id, read_length, features))
-        else:
-            # No chromosome features, keep as-is
-            oriented_reads.append((sample, read_id, read_length, features))
-
-    print(f"  Reoriented {flipped_count} of {len(reads)} reads (chromosome now at top)")
-    return oriented_reads
+    return color_map
 
 
-def draw_scale_bar(d, x, y, ratio, text_color, max_height_px):
+def draw_heatmap_grid_svg(d, read_positions, config, text_color):
+    """Draw heatmap grid of colored squares between labels and read bars (SVG)."""
+    metadata_columns = config["metadata_columns"]
+    read_metadata = config["read_metadata"]
+    heatmap_colors = config["heatmap_colors"]
+    heatmap_display_names = config.get("heatmap_display_names", {})
+    bar_width = config["bar_width"]
+    top_margin = config["top_margin"]
+    heatmap_bottom_gap = config["heatmap_bottom_gap"]
+    heatmap_row_gap = config["heatmap_row_gap"]
+    background = config["background"]
+    left_margin = config["left_margin"]
+    font_size = config.get("font_size", 14)
+
+    border_color = "#555555" if background == "black" else "#333333"
+    n_rows = len(metadata_columns)
+
+    for row_idx, col_name in enumerate(reversed(metadata_columns)):
+        # Rows stack bottom-up from top_margin - heatmap_bottom_gap
+        row_y = top_margin - heatmap_bottom_gap - (row_idx + 1) * bar_width - row_idx * heatmap_row_gap
+        val_colors = heatmap_colors.get(col_name, {})
+
+        for read_id, rx in read_positions:
+            meta = read_metadata.get(read_id, {})
+            val = meta.get(col_name)
+            color = val_colors.get(val, val_colors.get(None, "#545454"))
+            d.append(draw.Rectangle(
+                rx, row_y, bar_width, bar_width,
+                fill=color,
+                stroke=border_color,
+                stroke_width=0.3,
+            ))
+
+        # Row label at left margin (use display name if available)
+        display_name = heatmap_display_names.get(col_name, col_name)
+        label_y = row_y + bar_width / 2
+        d.append(draw.Text(
+            display_name, font_size,
+            left_margin - 5, label_y,
+            fill=text_color,
+            text_anchor="end",
+            font_family="Basic Sans",
+            dominant_baseline="central",
+        ))
+
+
+def draw_heatmap_grid_png(img_array, read_positions, config, width_scale, height_scale):
+    """Draw heatmap grid of colored squares between labels and read bars (PNG)."""
+    metadata_columns = config["metadata_columns"]
+    read_metadata = config["read_metadata"]
+    heatmap_colors = config["heatmap_colors"]
+    base_bar_width = config["bar_width"]
+    base_top_margin = config["top_margin"]
+    heatmap_bottom_gap = config["heatmap_bottom_gap"]
+    heatmap_row_gap = config["heatmap_row_gap"]
+    background = config["background"]
+
+    bar_width = max(1, int(base_bar_width * width_scale))
+    top_margin = int(base_top_margin * height_scale)
+    scaled_bottom_gap = int(heatmap_bottom_gap * height_scale)
+    scaled_row_gap = max(1, int(heatmap_row_gap * height_scale))
+    box_h = max(1, int(base_bar_width * width_scale))
+
+    border_color = np.array([85, 85, 85, 255] if background == "black"
+                            else [51, 51, 51, 255], dtype=np.uint8)
+    img_h, img_w = img_array.shape[:2]
+
+    for row_idx, col_name in enumerate(reversed(metadata_columns)):
+        row_y = top_margin - scaled_bottom_gap - (row_idx + 1) * box_h - row_idx * scaled_row_gap
+        val_colors = heatmap_colors.get(col_name, {})
+
+        for read_id, rx in read_positions:
+            meta = read_metadata.get(read_id, {})
+            val = meta.get(col_name)
+            color_hex = val_colors.get(val, val_colors.get(None, "#545454"))
+            color_rgba = hex_to_rgba(color_hex)
+
+            x1 = max(0, rx)
+            x2 = min(img_w, rx + bar_width)
+            y1 = max(0, row_y)
+            y2 = min(img_h, row_y + box_h)
+            if x2 > x1 and y2 > y1:
+                img_array[y1:y2, x1:x2] = color_rgba
+                # Thin border
+                img_array[y1, x1:x2] = border_color
+                img_array[min(y2, img_h - 1), x1:x2] = border_color
+                img_array[y1:y2, x1] = border_color
+                img_array[y1:y2, min(x2, img_w - 1)] = border_color
+
+
+def draw_scale_bar(d, x, y, ratio, text_color, max_height_px, font_size=14):
     """Draw a vertical scale bar showing read length scale."""
     scale_bar_bp = 10000  # 10 kbp
     scale_bar_height = int(scale_bar_bp * ratio)
@@ -1515,10 +2321,10 @@ def draw_scale_bar(d, x, y, ratio, text_color, max_height_px):
     d.append(draw.Rectangle(x, y, 3, scale_bar_height, fill=text_color))
 
     # Draw tick marks at top and bottom
-    d.append(draw.Line(x - 3, y, x + 6, y, stroke=text_color, stroke_width=1))
+    d.append(draw.Line(x - 2, y, x + 6, y, stroke=text_color, stroke_width=1))
     d.append(
         draw.Line(
-            x - 3,
+            x - 2,
             y + scale_bar_height,
             x + 6,
             y + scale_bar_height,
@@ -1529,16 +2335,17 @@ def draw_scale_bar(d, x, y, ratio, text_color, max_height_px):
 
     # Draw label (rotated)
     label = f"{scale_bar_bp // 1000} Kbp"
-    label_x = x - 10
+    label_x = x - 5
     label_y = y + scale_bar_height / 2
     d.append(
         draw.Text(
             label,
-            12,
+            font_size,
             label_x,
             label_y,
             fill=text_color,
             text_anchor="middle",
+            font_family="Basic Sans",
             transform=f"rotate(-90, {label_x}, {label_y})",
         )
     )
@@ -1598,10 +2405,10 @@ def draw_scale_bar_svg(output_path, image_height, top_margin, ratio, background)
     )
 
     d.save_svg(output_path)
-    print(f"Saved scale bar: {output_path}")
-    print(f"  Dimensions: {width} x {image_height} pixels")
+    logger.info(f"Saved scale bar: {output_path}")
+    logger.info(f"  Dimensions: {width} x {image_height} pixels")
 
-    # Render scale bar PNG (small enough for rsvg-convert)
+    # Also render PNG via rsvg-convert if available
     png_path = output_path.rsplit('.', 1)[0] + '.png'
     try:
         subprocess.run(
@@ -1609,9 +2416,11 @@ def draw_scale_bar_svg(output_path, image_height, top_margin, ratio, background)
             check=True,
             capture_output=True,
         )
-        print(f"Saved scale bar PNG: {png_path}")
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pass  # Scale bar PNG optional
+        logger.info(f"  Also rendered PNG via rsvg-convert: {png_path}")
+    except FileNotFoundError:
+        logger.info(f"  Note: rsvg-convert not found, skipping PNG render of scale bar")
+    except subprocess.CalledProcessError:
+        logger.warning(f"  Warning: rsvg-convert failed to render scale bar PNG")
 
 
 def draw_reads_svg(reads, colors, output_path, config):
@@ -1667,7 +2476,8 @@ def draw_reads_svg(reads, colors, output_path, config):
 
     # Draw scale bar (left side) only if not creating separate file
     if draw_scale:
-        draw_scale_bar(d, left_margin - 40, top_margin, ratio, text_color, max_height_px)
+        draw_scale_bar(d, left_margin - 10, top_margin, ratio, text_color, max_height_px,
+                        font_size=config.get("font_size", 14))
 
     # Use effective left margin for positioning reads
     left_margin = effective_left_margin
@@ -1677,6 +2487,13 @@ def draw_reads_svg(reads, colors, output_path, config):
     current_sample = None
     sample_x_start = {}
     sample_x_end = {}
+
+    feature_mode = config.get("feature_mode", "raw")
+    min_feature_width = config.get("min_feature_width", 0.5)
+    min_width_exclude = config.get("min_width_exclude", [])
+    oversample = config.get("oversample", 1)
+    read_border = config.get("read_border", False)
+    read_positions = []
 
     for sample, read_id, read_length, features in reads:
         # Add sample spacing when sample changes
@@ -1688,16 +2505,35 @@ def draw_reads_svg(reads, colors, output_path, config):
             sample_x_start[sample] = current_x
 
         current_sample = sample
+        read_positions.append((read_id, current_x))
 
-        # Draw this read's features as colored rectangles
-        for start, end, feature in features:
-            y_start = top_margin + int(start * ratio)
-            height = max(1, int((end - start) * ratio))
-            color = colors.get(feature, "#ffffff")
+        if feature_mode == "raw":
+            for start, end, feature in features:
+                y_start = top_margin + int(start * ratio)
+                height = max(1, int((end - start) * ratio))
+                color = colors.get(feature, "#ffffff")
+                d.append(
+                    draw.Rectangle(current_x, y_start, bar_width, height, fill=color)
+                )
+        else:
+            colored_feats = _build_colored_features(features, colors, min_width_exclude)
+            max_feat_end = max((e for _, e, _ in features), default=0)
+            bar_length = int(max_feat_end * ratio)
+            rasterized = rasterize_features(colored_feats, bar_length, ratio,
+                                            feature_mode, oversample, min_feature_width)
+            if rasterized:
+                for run in rasterized:
+                    ry = top_margin + run['scaled_start']
+                    rh = run['scaled_stop'] - run['scaled_start']
+                    d.append(draw.Rectangle(current_x, ry, bar_width, rh,
+                                            fill=run['color'],
+                                            fill_opacity=run['fill_opacity']))
 
-            d.append(
-                draw.Rectangle(current_x, y_start, bar_width, height, fill=color)
-            )
+        if read_border:
+            max_feat_end = max((e for _, e, _ in features), default=0)
+            read_height_px = int(max_feat_end * ratio)
+            d.append(draw.Rectangle(current_x, top_margin, bar_width, read_height_px,
+                                    fill='none', stroke='black', stroke_width=0.5))
 
         current_x += bar_width + read_spacing
 
@@ -1709,82 +2545,155 @@ def draw_reads_svg(reads, colors, output_path, config):
     if not config.get("no_header", False):
         label_interval = 300  # Repeat label every N reads
         font_family = "Basic Sans"
+        font_size = config.get("font_size", 14)
+        label_tiers = config.get("label_tiers", {})
+        group_subgroup_order = config.get("group_subgroup_order", [])
+        has_grouping = bool(label_tiers)
 
-        for sample in sample_order:
-            if sample in sample_x_start and sample in sample_x_end:
-                # Draw horizontal line at top spanning this sample
-                d.append(
-                    draw.Line(
-                        sample_x_start[sample],
-                        top_margin - 5,
-                        sample_x_end[sample],
-                        top_margin - 5,
-                        stroke=text_color,
-                        stroke_width=2,
-                    )
-                )
+        if has_grouping:
+            tier_offset = font_size + 10
+            hm_offset = config.get("heatmap_total", 0)
+            tier_display_names = config.get("tier_display_names", {})
 
-                # Parse label: replace underscores with spaces
-                label_text = sample.replace("_", " ")
+            # Tier 2 (bottom): subgroup lines + labels
+            tier2_line_y = top_margin - 5 - hm_offset
+            for sample in sample_order:
+                if sample in sample_x_start and sample in sample_x_end:
+                    d.append(draw.Line(
+                        sample_x_start[sample], tier2_line_y,
+                        sample_x_end[sample], tier2_line_y,
+                        stroke=text_color, stroke_width=1.5,
+                    ))
+                    _, subgroup = label_tiers.get(sample, (sample, None))
+                    label_text = (subgroup or sample).replace("_", " ")
+                    d.append(draw.Text(
+                        label_text, font_size,
+                        sample_x_start[sample], top_margin - 10 - hm_offset,
+                        fill=text_color, text_anchor="start",
+                        font_family=font_family,
+                    ))
 
-                # Calculate label positions (starting at first read, then every N reads)
-                num_reads_in_sample = sample_read_counts[sample]
-                read_width = bar_width + read_spacing
+            # Tier 2 display name (left margin)
+            if 1 in tier_display_names:
+                d.append(draw.Text(
+                    tier_display_names[1], font_size,
+                    left_margin - 5, top_margin - 10 - hm_offset,
+                    fill=text_color, text_anchor="end",
+                    font_family=font_family,
+                ))
 
-                # Determine label positions - first label at start, then every interval
-                label_positions = []
-                for i in range(0, num_reads_in_sample, label_interval):
-                    x_pos = sample_x_start[sample] + (i * read_width)
-                    label_positions.append(x_pos)
+            # Tier 1 (top): group lines + labels spanning all subgroups
+            group_spans = compute_group_spans(
+                sample_order, sample_x_start, sample_x_end, group_subgroup_order)
+            tier1_line_y = top_margin - 5 - tier_offset - hm_offset
+            for group_name, gx_start, gx_end in group_spans:
+                d.append(draw.Line(
+                    gx_start, tier1_line_y, gx_end, tier1_line_y,
+                    stroke=text_color, stroke_width=1.5,
+                ))
+                d.append(draw.Text(
+                    group_name.replace("_", " "), font_size,
+                    gx_start, tier1_line_y - 5,
+                    fill=text_color, text_anchor="start",
+                    font_family=font_family,
+                ))
 
-                # Draw labels above the white line
-                for x_pos in label_positions:
-                    d.append(
-                        draw.Text(
-                            label_text,
-                            16,
-                            x_pos,
-                            top_margin - 12,
-                            fill=text_color,
-                            text_anchor="start",
+            # Tier 1 display name (left margin)
+            if 0 in tier_display_names:
+                d.append(draw.Text(
+                    tier_display_names[0], font_size,
+                    left_margin - 5, tier1_line_y - 5,
+                    fill=text_color, text_anchor="end",
+                    font_family=font_family,
+                ))
+        else:
+            # Single-tier labels (no grouping)
+            hm_offset = config.get("heatmap_total", 0)
+            for sample in sample_order:
+                if sample in sample_x_start and sample in sample_x_end:
+                    d.append(draw.Line(
+                        sample_x_start[sample], top_margin - 5 - hm_offset,
+                        sample_x_end[sample], top_margin - 5 - hm_offset,
+                        stroke=text_color, stroke_width=2,
+                    ))
+                    label_text = sample.replace("_", " ")
+                    num_reads_in_sample = sample_read_counts[sample]
+                    read_width = bar_width + read_spacing
+                    for i in range(0, num_reads_in_sample, label_interval):
+                        x_pos = sample_x_start[sample] + (i * read_width)
+                        d.append(draw.Text(
+                            label_text, font_size, x_pos, top_margin - 12 - hm_offset,
+                            fill=text_color, text_anchor="start",
                             font_family=font_family,
-                        )
-                    )
+                        ))
 
-        # Draw separator lines between samples
-        for sample in sample_order[:-1]:
-            if sample in sample_x_end:
-                sep_x = sample_x_end[sample] + sample_spacing / 2
-                d.append(
-                    draw.Line(
-                        sep_x,
-                        top_margin,
-                        sep_x,
-                        top_margin + max_height_px,
-                        stroke=text_color,
-                        stroke_width=0.5,
-                        stroke_opacity=0.3,
-                    )
-                )
+    # Draw heatmap grid if enabled
+    if config.get("heatmap") and config.get("metadata_columns"):
+        draw_heatmap_grid_svg(d, read_positions, config, text_color)
+
+        # Draw legend for heatmap at bottom of image
+        heatmap_colors = config["heatmap_colors"]
+        metadata_columns = config["metadata_columns"]
+        heatmap_display_names = config.get("heatmap_display_names", {})
+        legend_x = left_margin
+        legend_y = top_margin + max_height_px + 10
+        legend_font_size = config.get("font_size", 14) - 2
+        swatch_size = legend_font_size
+        col_gap = 20
+        for col_name in metadata_columns:
+            val_colors = heatmap_colors.get(col_name, {})
+            display_name = heatmap_display_names.get(col_name, col_name)
+            # Column header
+            d.append(draw.Text(
+                display_name + ":", legend_font_size, legend_x, legend_y,
+                fill=text_color, text_anchor="start", font_family="Basic Sans",
+                font_weight="bold",
+            ))
+            legend_x += len(display_name) * (legend_font_size * 0.6) + 10
+            for val, color in val_colors.items():
+                if val is None:
+                    continue
+                d.append(draw.Rectangle(
+                    legend_x, legend_y - swatch_size + 2, swatch_size, swatch_size,
+                    fill=color,
+                ))
+                d.append(draw.Text(
+                    str(val), legend_font_size,
+                    legend_x + swatch_size + 3, legend_y,
+                    fill=text_color, text_anchor="start", font_family="Basic Sans",
+                ))
+                legend_x += swatch_size + len(str(val)) * (legend_font_size * 0.6) + 15
+            legend_x += col_gap
 
     # Save SVG
     d.save_svg(output_path)
-    print(f"\nSaved: {output_path}")
-    print(f"  Dimensions: {image_width} x {image_height} pixels")
+    logger.info(f"\nSaved: {output_path}")
+    logger.info(f"  Dimensions: {image_width} x {image_height} pixels")
 
     return image_height
 
 
 def main():
     args = parse_args()
+    t_start = time.time()
 
-    print("KaryoScope Read Visualization")
-    print("=" * 50)
+    # Hardcoded layout margins (not user-facing)
+    args.top_margin = 30
+    args.left_margin = 30
+    args.bottom_margin = 15
+
+    # Set up logging (console + file)
+    log_path = setup_logging(args.output)
+
+    logger.info("KaryoScope Read Visualization")
+    logger.info("=" * 50)
+    logger.info("Command: %s", " ".join(sys.argv))
+    logger.debug("Output: %s", args.output)
 
     # If --animate is set, ensure PNG format
     fmt = args.format
     if args.animate and fmt == "svg":
-        print("  --animate requires PNG output, switching format to 'both'")
+        logger.info("  --animate requires PNG output, switching format to 'both'")
         fmt = "both"
 
     # Validate input arguments
@@ -1793,32 +2702,32 @@ def main():
     elif args.clusters and args.cluster_prefix:
         input_mode = "cluster"
         if not args.results_dir:
-            print("Error: --clusters requires --results-dir")
+            logger.error("Error: --clusters requires --results-dir")
             return
     elif args.samples and args.results_dir:
         input_mode = "samples"
     else:
-        print("Error: Must provide --bed, --samples+--results-dir, "
-              "or --clusters+--cluster-prefix+--results-dir")
+        logger.error("Error: Must provide --bed, --samples+--results-dir, "
+                      "or --clusters+--cluster-prefix+--results-dir")
         return
 
     # Load color mapping
-    print(f"\nLoading colors from: {args.colors}")
+    logger.info("\nLoading colors from: %s", args.colors)
     colors = load_color_mapping(args.colors)
-    print(f"  Loaded {len(colors)} color mappings")
+    logger.info("  Loaded %d color mappings", len(colors))
 
     # Load BED data
     if input_mode == "bed":
-        print(f"\nLoading feature data from BED files...")
+        logger.info("\nLoading feature data from BED files...")
         reads, sample_order = load_bed_files_direct(args.bed)
     elif input_mode == "cluster":
         cluster_ids = [int(c.strip()) for c in args.clusters.split(',')]
-        print(f"\nLoading reads for clusters: {cluster_ids}")
+        logger.info("\nLoading reads for clusters: %s", cluster_ids)
         reads, sample_order = load_cluster_reads(
             args.cluster_prefix, cluster_ids, args.results_dir,
             args.database, args.featureset, args.smoothness, args.analysis)
     else:
-        print(f"\nLoading feature data from: {args.results_dir}")
+        logger.info("\nLoading feature data from: %s", args.results_dir)
         reads = load_sample_bed_data(
             args.samples,
             args.results_dir,
@@ -1829,24 +2738,192 @@ def main():
         )
         sample_order = args.samples
 
-    print(f"  Total reads: {len(reads)}")
+    logger.info("  Total reads: %d", len(reads))
+
+    # Length filtering
+    if args.min_length is not None or args.max_length is not None:
+        before = len(reads)
+        reads = [r for r in reads
+                 if (args.min_length is None or r[2] >= args.min_length)
+                 and (args.max_length is None or r[2] <= args.max_length)]
+        logger.info("\nLength filter: %d -> %d reads (min=%s, max=%s)",
+                     before, len(reads), args.min_length, args.max_length)
+
+    # Filter to read list if provided (with optional grouping)
+    all_columns = []
+    read_data = {}
+    read_groups = {}
+    group_subgroup_order = []
+    read_metadata = {}
+    metadata_columns = []
+    tier_specs = []   # [(column_name, display_name), ...]
+    heatmap_specs = []  # [(column_name, display_name), ...]
+    if args.read_list:
+        read_ids, all_columns, read_data, read_rows = load_read_list(args.read_list)
+        logger.info("\nFiltering to %d read IDs from: %s", len(read_ids), args.read_list)
+        reads = [r for r in reads if r[1] in read_ids]
+        logger.info("  Matched: %d reads", len(reads))
+        if all_columns:
+            logger.info("  Columns: %s", all_columns)
+
+        # Parse --label-tier and --heatmap-track
+        if args.label_tier:
+            for spec in args.label_tier:
+                col, _, name = spec.partition(":")
+                tier_specs.append((col, name or col))
+        elif all_columns and len(all_columns) >= 2:
+            # Default: first two columns as tiers (group, subgroup)
+            tier_specs = [(all_columns[0], all_columns[0]),
+                          (all_columns[1], all_columns[1])]
+
+        if args.heatmap_track:
+            for spec in args.heatmap_track:
+                col, _, name = spec.partition(":")
+                heatmap_specs.append((col, name or col))
+        elif args.heatmap and all_columns:
+            # Default: remaining columns after tiers
+            tier_cols = {t[0] for t in tier_specs}
+            heatmap_specs = [(c, c) for c in all_columns if c not in tier_cols]
+
+        # Validate column names exist in the header
+        if all_columns:
+            col_set = set(all_columns)
+            for col, _ in tier_specs:
+                if col not in col_set:
+                    logger.warning("  --label-tier column '%s' not found in TSV header: %s", col, all_columns)
+            for col, _ in heatmap_specs:
+                if col not in col_set:
+                    logger.warning("  --heatmap-track column '%s' not found in TSV header: %s", col, all_columns)
+
+        # Build read_groups and group_subgroup_order from tier_specs
+        # Iterate read_rows (raw file order) to preserve TSV ordering,
+        # even when duplicate read IDs cause read_data dict entries to
+        # be overwritten.
+        if len(tier_specs) >= 2:
+            group_col = tier_specs[0][0]
+            subgroup_col = tier_specs[1][0]
+            seen_pairs = set()
+            for rid, meta in read_rows:
+                group = meta.get(group_col)
+                subgroup = meta.get(subgroup_col)
+                if group and subgroup:
+                    read_groups[rid] = (group, subgroup)
+                    pair = (group, subgroup)
+                    if pair not in seen_pairs:
+                        seen_pairs.add(pair)
+                        group_subgroup_order.append(pair)
+                elif group:
+                    read_groups[rid] = (group, None)
+                    pair = (group, None)
+                    if pair not in seen_pairs:
+                        seen_pairs.add(pair)
+                        group_subgroup_order.append(pair)
+        elif len(tier_specs) == 1:
+            group_col = tier_specs[0][0]
+            seen_pairs = set()
+            for rid, meta in read_rows:
+                group = meta.get(group_col)
+                if group:
+                    read_groups[rid] = (group, None)
+                    pair = (group, None)
+                    if pair not in seen_pairs:
+                        seen_pairs.add(pair)
+                        group_subgroup_order.append(pair)
+
+        # Build read_metadata and metadata_columns from heatmap_specs
+        if heatmap_specs:
+            metadata_columns = [col for col, _ in heatmap_specs]
+            for rid in read_ids:
+                src = read_data.get(rid, {})
+                meta = {}
+                for col, _ in heatmap_specs:
+                    meta[col] = src.get(col)
+                read_metadata[rid] = meta
+
+        if read_groups:
+            logger.info("  Grouping: %d group-subgroup pairs", len(group_subgroup_order))
+        if metadata_columns:
+            logger.info("  Heatmap columns: %s", metadata_columns)
+
+    # Validate heatmap option
+    if args.heatmap or heatmap_specs:
+        if heatmap_specs and not args.heatmap:
+            args.heatmap = True  # --heatmap-track implies --heatmap
+        if not metadata_columns:
+            logger.warning("--heatmap requires heatmap columns in --read-list TSV. Disabling heatmap.")
+            args.heatmap = False
+        elif args.horizontal:
+            logger.warning("--heatmap is not supported with --horizontal. Disabling heatmap.")
+            args.heatmap = False
 
     if not reads:
-        print("Error: No reads loaded. Check sample names and paths.")
+        logger.error("No reads loaded. Check sample names and paths.")
         return
 
     # Orient reads so telomere is at top (if requested)
     if args.orient_telomere_top:
-        print(f"\nOrienting reads (telomere at top)...")
+        logger.info("\nOrienting reads (telomere at top)...")
         reads = orient_telomere_top(reads)
 
     # Orient reads so chromosome is at top (if requested)
     if args.orient_chromosome_top:
-        print(f"\nOrienting reads (chromosome at top)...")
+        logger.info("\nOrienting reads (chromosome at top)...")
         reads = orient_chromosome_top(reads)
 
+    # Apply two-level grouping if read-list provided group/subgroup columns
+    group_boundaries = set()
+    label_tiers = {}
+    tier_display_names = {}  # {tier_index: display_name}
+    if read_groups and group_subgroup_order:
+        reads, sample_order, group_boundaries = apply_read_list_grouping(
+            reads, read_groups, group_subgroup_order)
+        # Build label_tiers lookup: composite_label -> (group, subgroup)
+        def _label(g, s):
+            return f"{g} \u2014 {s}" if s else g
+        label_tiers = {_label(g, s): (g, s) for g, s in group_subgroup_order}
+        # Build tier display names from specs
+        for i, (_, display_name) in enumerate(tier_specs):
+            tier_display_names[i] = display_name
+        # Add extra top margin for additional tiers beyond the first
+        n_tiers = len(tier_specs)
+        if n_tiers > 0:
+            tier_offset = args.font_size + 10
+            args.top_margin += (n_tiers - 1) * tier_offset
+        logger.info("  Applied grouping: %d composite samples, %d tier(s)", len(sample_order), n_tiers)
+        if tier_display_names:
+            args.left_margin = max(args.left_margin, 60)
+
+    # Build heatmap display name mapping
+    heatmap_display_names = {}  # {column_name: display_name}
+    for col, display_name in heatmap_specs:
+        heatmap_display_names[col] = display_name
+
+    # Heatmap layout: assign colors now; margin adjustment deferred until after
+    # viewport ratio scaling so we use the final bar_width.
+    heatmap_colors = {}
+    heatmap_row_gap = 1
+    heatmap_top_gap = 3
+    heatmap_bottom_gap = 10
+    heatmap_total = 0
+    if args.heatmap and metadata_columns:
+        args.bottom_margin = max(args.bottom_margin, 25)  # Room for heatmap legend
+        heatmap_colors = assign_heatmap_colors(metadata_columns, read_metadata)
+        for col, val_map in heatmap_colors.items():
+            display = heatmap_display_names.get(col, col)
+            cats = [f"{v}={c}" for v, c in val_map.items() if v is not None]
+            logger.info("  %s: %s", display, ", ".join(cats))
+
+    # Filter by max read length
+    if args.max_read_length:
+        before = len(reads)
+        reads = [(s, rid, rl, f) for s, rid, rl, f in reads
+                 if rl <= args.max_read_length]
+        removed = before - len(reads)
+        if removed:
+            logger.info("\nFiltered %d read(s) exceeding %d bp", removed, args.max_read_length)
+
     # Sort reads
-    print(f"\nSorting reads by sample order, then by length (descending)")
+    logger.info("\nSorting reads by sample order, then by length (descending)")
     sorted_reads = sort_reads(reads, sample_order)
 
     # Build config
@@ -1863,107 +2940,214 @@ def main():
         "draw_scale_bar": args.scale_bar_output is None and not args.no_scale_bar,
         "no_header": args.no_header,
         "png_scale": args.png_scale,
+        "font_size": args.font_size,
+        "label_tiers": label_tiers,
+        "group_subgroup_order": group_subgroup_order,
+        "tier_display_names": tier_display_names,
+        "heatmap_display_names": heatmap_display_names,
+        "feature_mode": args.feature_mode,
+        "min_feature_width": args.min_feature_width,
+        "min_width_exclude": args.min_width_exclude or [],
+        "oversample": args.oversample,
+        "read_border": args.read_border,
+        "heatmap": args.heatmap,
+        "read_metadata": read_metadata,
+        "metadata_columns": metadata_columns,
+        "heatmap_colors": heatmap_colors,
+        "heatmap_row_gap": heatmap_row_gap,
+        "heatmap_top_gap": heatmap_top_gap,
+        "heatmap_bottom_gap": heatmap_bottom_gap,
+        "heatmap_total": heatmap_total,
     }
 
-    # Determine output paths
-    base_output = args.output.rsplit('.', 1)[0] if '.' in args.output else args.output
-    svg_output = args.output if args.output.endswith('.svg') else f"{base_output}.svg"
-    png_output = f"{base_output}.png"
+    # Apply viewport ratio overrides
+    # Only the ratio (px/bp) changes with aspect ratio — bar_width, read_spacing,
+    # heatmap squares, and labels stay constant regardless of ratio.
+    if args.viewport_ratio and args.viewport_ratio.lower() != "none":
+        vr_w, vr_h = [int(x) for x in args.viewport_ratio.split(':')]
+        total_reads_count = len(sorted_reads)
+        _sample_counts = defaultdict(int)
+        for s, _, _, _ in sorted_reads:
+            _sample_counts[s] += 1
+        _num_samples = len(_sample_counts)
 
-    image_size = None  # height for vertical, width for horizontal
-
-    if args.batch_size:
-        num_batches = (len(sorted_reads) + args.batch_size - 1) // args.batch_size
-        print(f"\nGenerating {num_batches} batched outputs ({args.batch_size} reads each)")
-
-        for i in range(0, len(sorted_reads), args.batch_size):
-            batch = sorted_reads[i:i + args.batch_size]
-            batch_num = (i // args.batch_size) + 1
-            batch_base = f"{base_output}.batch{batch_num:03d}"
-
-            if args.horizontal:
-                if fmt in ("svg", "both"):
-                    batch_svg = f"{batch_base}.svg"
-                    print(f"\nGenerating SVG (horizontal): {batch_svg}")
-                    image_size = draw_reads_horizontal_svg(batch, colors, batch_svg, config)
-                if fmt in ("png", "both"):
-                    batch_png = f"{batch_base}.png"
-                    print(f"\nGenerating PNG (horizontal): {batch_png}")
-                    image_size = draw_reads_horizontal_png(batch, colors, batch_png, config)
-            else:
-                if fmt in ("svg", "both"):
-                    batch_svg = f"{batch_base}.svg"
-                    print(f"\nGenerating SVG: {batch_svg}")
-                    image_size = draw_reads_svg(batch, colors, batch_svg, config)
-                if fmt in ("png", "both"):
-                    batch_png = f"{batch_base}.png"
-                    print(f"\nGenerating PNG: {batch_png}")
-                    image_size = draw_reads_png(batch, colors, batch_png, config)
-    else:
-        if args.horizontal:
-            if fmt in ("svg", "both"):
-                print(f"\nGenerating SVG (horizontal): {svg_output}")
-                image_size = draw_reads_horizontal_svg(sorted_reads, colors, svg_output, config)
-            if fmt in ("png", "both"):
-                print(f"\nGenerating PNG (horizontal): {png_output}")
-                image_size = draw_reads_horizontal_png(sorted_reads, colors, png_output, config)
-        else:
-            if fmt in ("svg", "both"):
-                print(f"\nGenerating SVG: {svg_output}")
-                image_size = draw_reads_svg(sorted_reads, colors, svg_output, config)
-            if fmt in ("png", "both"):
-                print(f"\nGenerating PNG: {png_output}")
-                image_size = draw_reads_png(sorted_reads, colors, png_output, config)
-
-    # Handle legend: save separately for animation, or composite onto PNG
-    legend_png_path = None
-    if args.legend and fmt in ("png", "both"):
-        features_used = {feat for _, _, _, feats in sorted_reads for _, _, feat in feats}
-        legend_img = draw_legend_png(features_used, colors, config,
-                                     horizontal=args.horizontal)
-        if legend_img is not None:
-            if args.animate:
-                # Save as separate file — animation function will overlay it
-                legend_png_path = f"{base_output}.legend.png"
-                if legend_img.mode == 'RGBA':
-                    bg_c = (0, 0, 0) if args.background == "black" else (255, 255, 255)
-                    bg_img = Image.new('RGB', legend_img.size, bg_c)
-                    bg_img.paste(legend_img, mask=legend_img.split()[3])
-                    bg_img.save(legend_png_path)
-                else:
-                    legend_img.save(legend_png_path)
-                print(f"  Legend saved for animation: {legend_png_path}")
-            else:
-                # Composite directly onto the reads image
-                position = "right" if args.horizontal else "below"
-                composite_legend(png_output, legend_img, position=position)
-
-    # Scale bar: adaptive horizontal panning draws its own; vertical still uses overlay
-    scale_bar_png_path = None
-
-    # Generate animation if requested
-    if args.animate:
-        if fmt not in ("png", "both"):
-            # Should not reach here due to earlier correction, but be safe
-            print(f"\nGenerating PNG for animation: {png_output}")
-            if args.horizontal:
-                draw_reads_horizontal_png(sorted_reads, colors, png_output, config)
-            else:
-                draw_reads_png(sorted_reads, colors, png_output, config)
-        _run_animation(png_output, len(sorted_reads), args, config,
-                       legend_path=legend_png_path, scale_bar_path=scale_bar_png_path)
-
-    # Generate separate scale bar if requested
-    if args.scale_bar_output and image_size and not args.horizontal:
-        draw_scale_bar_svg(
-            args.scale_bar_output,
-            image_size,
-            args.top_margin,
-            args.ratio,
-            args.background,
+        bw = config["bar_width"]
+        natural_w = (
+            config["left_margin"]
+            + total_reads_count * (bw + config["read_spacing"])
+            + (_num_samples - 1) * config["sample_spacing"]
+            + 50
         )
 
-    print("\nDone!")
+        # Reserve heatmap space before computing ratio (needs final bar_width)
+        if args.heatmap and metadata_columns:
+            n_rows = len(metadata_columns)
+            heatmap_total = (n_rows * bw
+                             + (n_rows - 1) * heatmap_row_gap
+                             + heatmap_top_gap + heatmap_bottom_gap)
+            config["top_margin"] += heatmap_total
+            config["heatmap_total"] = heatmap_total
+            logger.info("\nHeatmap: %d row(s), %dpx added to top margin", n_rows, heatmap_total)
+
+        # Derive height from aspect ratio; only adjust ratio (px/bp)
+        natural_h = int(natural_w * vr_h / vr_w)
+        max_length = max(r[2] for r in sorted_reads)
+        usable_h = natural_h - config["top_margin"] - config["bottom_margin"]
+        config["ratio"] = usable_h / max_length if max_length > 0 else config["ratio"]
+
+        logger.info("\nViewport ratio %d:%d -> %dx%d: bar_width=%d, read_spacing=%d, ratio=%.6f",
+                    vr_w, vr_h, natural_w, natural_h,
+                    config['bar_width'], config['read_spacing'], config['ratio'])
+    else:
+        # No viewport ratio — still need heatmap margin if applicable
+        if args.heatmap and metadata_columns:
+            final_bw = config["bar_width"]
+            n_rows = len(metadata_columns)
+            heatmap_total = (n_rows * final_bw
+                             + (n_rows - 1) * heatmap_row_gap
+                             + heatmap_top_gap + heatmap_bottom_gap)
+            config["top_margin"] += heatmap_total
+            config["heatmap_total"] = heatmap_total
+            logger.info("\nHeatmap: %d row(s), %dpx added to top margin", n_rows, heatmap_total)
+
+    # Log full config at DEBUG level
+    logger.debug("Config: %s", {k: v for k, v in config.items()
+                 if k not in ('read_metadata',)})
+    for sample in sample_order:
+        count = sum(1 for s, _, _, _ in sorted_reads if s == sample)
+        logger.debug("  %s: %d reads", sample, count)
+
+    # Determine background theme(s) to render
+    bg_themes = ['black', 'white'] if args.background == 'both' else [args.background]
+    base_output = args.output.rsplit('.', 1)[0] if '.' in args.output else args.output
+    animation_done = False
+
+    for bg_color in bg_themes:
+        config["background"] = bg_color
+        theme_suffix = f"_{bg_color}" if len(bg_themes) > 1 else ""
+
+        # Determine output paths for this theme
+        svg_output = f"{base_output}{theme_suffix}.svg"
+        png_output = f"{base_output}{theme_suffix}.png"
+
+        image_size = None  # height for vertical, width for horizontal
+
+        if args.batch_size:
+            num_batches = (len(sorted_reads) + args.batch_size - 1) // args.batch_size
+            logger.info("\nGenerating %d batched outputs (%d reads each) [%s]",
+                        num_batches, args.batch_size, bg_color)
+
+            for i in range(0, len(sorted_reads), args.batch_size):
+                batch = sorted_reads[i:i + args.batch_size]
+                batch_num = (i // args.batch_size) + 1
+                batch_base = f"{base_output}{theme_suffix}.batch{batch_num:03d}"
+
+                if args.horizontal:
+                    if fmt in ("svg", "both"):
+                        batch_svg = f"{batch_base}.svg"
+                        logger.info("\nGenerating SVG (horizontal): %s", batch_svg)
+                        image_size = draw_reads_horizontal_svg(batch, colors, batch_svg, config)
+                    if fmt in ("png", "both"):
+                        batch_png = f"{batch_base}.png"
+                        logger.info("\nGenerating PNG (horizontal): %s", batch_png)
+                        image_size = draw_reads_horizontal_png(batch, colors, batch_png, config)
+                else:
+                    if fmt in ("svg", "both"):
+                        batch_svg = f"{batch_base}.svg"
+                        logger.info("\nGenerating SVG: %s", batch_svg)
+                        t_draw = time.time()
+                        image_size = draw_reads_svg(batch, colors, batch_svg, config)
+                        logger.debug("SVG generation took %.2fs", time.time() - t_draw)
+                    if fmt in ("png", "both"):
+                        batch_png = f"{batch_base}.png"
+                        logger.info("\nGenerating PNG: %s", batch_png)
+                        t_draw = time.time()
+                        image_size = draw_reads_png(batch, colors, batch_png, config)
+                        logger.debug("PNG generation took %.2fs", time.time() - t_draw)
+        else:
+            if args.horizontal:
+                if fmt in ("svg", "both"):
+                    logger.info("\nGenerating SVG (horizontal): %s", svg_output)
+                    image_size = draw_reads_horizontal_svg(sorted_reads, colors, svg_output, config)
+                if fmt in ("png", "both"):
+                    logger.info("\nGenerating PNG (horizontal): %s", png_output)
+                    image_size = draw_reads_horizontal_png(sorted_reads, colors, png_output, config)
+            else:
+                if fmt in ("svg", "both"):
+                    logger.info("\nGenerating SVG: %s", svg_output)
+                    t_draw = time.time()
+                    image_size = draw_reads_svg(sorted_reads, colors, svg_output, config)
+                    logger.debug("SVG generation took %.2fs", time.time() - t_draw)
+                if fmt in ("png", "both"):
+                    logger.info("\nGenerating PNG: %s", png_output)
+                    t_draw = time.time()
+                    image_size = draw_reads_png(sorted_reads, colors, png_output, config)
+                    logger.debug("PNG generation took %.2fs", time.time() - t_draw)
+
+        # Handle legend: save separately for animation, or composite onto PNG
+        legend_png_path = None
+        if args.legend and fmt in ("png", "both"):
+            features_used = {feat for _, _, _, feats in sorted_reads for _, _, feat in feats}
+            legend_img = draw_legend_png(features_used, colors, config,
+                                         horizontal=args.horizontal)
+            if legend_img is not None:
+                if args.animate:
+                    # Save as separate file — animation function will overlay it
+                    legend_png_path = f"{base_output}{theme_suffix}.legend.png"
+                    if legend_img.mode == 'RGBA':
+                        bg_c = (0, 0, 0) if bg_color == "black" else (255, 255, 255)
+                        bg_img = Image.new('RGB', legend_img.size, bg_c)
+                        bg_img.paste(legend_img, mask=legend_img.split()[3])
+                        bg_img.save(legend_png_path)
+                    else:
+                        legend_img.save(legend_png_path)
+                    logger.info("  Legend saved for animation: %s", legend_png_path)
+                else:
+                    # Composite directly onto the reads image
+                    position = "right" if args.horizontal else "below"
+                    composite_legend(png_output, legend_img, position=position)
+
+        # Scale bar: adaptive horizontal panning draws its own; vertical needs a PNG overlay
+        scale_bar_png_path = None
+        if args.animate and not args.horizontal and not args.no_scale_bar and image_size:
+            scale_bar_png_path = f"{base_output}{theme_suffix}.scalebar.png"
+            height_scale, _ = calculate_png_params(sorted_reads, config)
+            scaled_ratio = args.ratio * height_scale
+            scaled_top_margin = int(args.top_margin * height_scale)
+            draw_scale_bar_png(image_size, scaled_top_margin, scaled_ratio,
+                               bg_color, scale_bar_png_path, height_scale,
+                               font_size=config.get("font_size", 11))
+
+        # Generate animation if requested (only once, for the first theme)
+        if args.animate and not animation_done:
+            if fmt not in ("png", "both"):
+                logger.info("\nGenerating PNG for animation: %s", png_output)
+                if args.horizontal:
+                    draw_reads_horizontal_png(sorted_reads, colors, png_output, config)
+                else:
+                    draw_reads_png(sorted_reads, colors, png_output, config)
+            _run_animation(png_output, len(sorted_reads), args, config,
+                           legend_path=legend_png_path, scale_bar_path=scale_bar_png_path)
+            animation_done = True
+
+        # Generate separate scale bar if requested
+        if args.scale_bar_output and image_size and not args.horizontal:
+            sb_output = args.scale_bar_output
+            if len(bg_themes) > 1:
+                sb_base = sb_output.rsplit('.', 1)[0] if '.' in sb_output else sb_output
+                sb_ext = sb_output.rsplit('.', 1)[1] if '.' in sb_output else 'svg'
+                sb_output = f"{sb_base}_{bg_color}.{sb_ext}"
+            draw_scale_bar_svg(
+                sb_output,
+                image_size,
+                args.top_margin,
+                args.ratio,
+                bg_color,
+            )
+
+    elapsed = time.time() - t_start
+    logger.info("\nDone! (%.1fs)", elapsed)
+    logger.info("Log file: %s", log_path)
 
 
 if __name__ == "__main__":
