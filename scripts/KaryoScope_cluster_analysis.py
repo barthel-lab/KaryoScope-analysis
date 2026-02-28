@@ -71,10 +71,11 @@ parser.add_argument("--min-k", dest="min_k", type=int, default=40,
 parser.add_argument("--max-k", dest="max_k", type=int, default=300,
                     help="Maximum number of clusters to test during auto-detection (default: 300)")
 parser.add_argument("--k-selection", dest="k_selection", default="composite-knee",
-                    choices=["composite", "silhouette", "calinski", "composite-knee"],
+                    choices=["composite", "silhouette", "cosine-silhouette", "calinski", "composite-knee"],
                     help="Metric for selecting optimal k:\n"
                          "  composite: max weighted combination of silhouette + enrichment\n"
                          "  silhouette: cluster cohesion (favors fewer, tighter clusters)\n"
+                         "  cosine-silhouette: cosine silhouette score (favors fewer, tighter clusters)\n"
                          "  calinski: Calinski-Harabasz index\n"
                          "  composite-knee: knee/elbow of composite score curve (default, diminishing returns)")
 parser.add_argument("--min-cluster-size", dest="min_cluster_size", type=int, default=3,
@@ -1752,6 +1753,9 @@ if args.n_clusters is None:
     if args.k_selection == "silhouette":
         selected_k = best_silhouette_k
         selection_metric = "silhouette"
+    elif args.k_selection == "cosine-silhouette":
+        selected_k = best_cosine_k
+        selection_metric = "cosine silhouette"
     elif args.k_selection == "calinski":
         selected_k = best_ch_k
         selection_metric = "Calinski-Harabasz"
