@@ -528,10 +528,12 @@ Abundance variables capture the compositional content of each sequence. The `--m
 
 | `--matrix-type` | Abundance formula |
 |---|---|
-| `length_weighted` (default) | `total_feature_bp / sequence_length` |
+| `length_weighted` | `total_feature_bp / sequence_length` |
 | `binary` | `1` if feature present, else `0` |
 | `count` | `total_feature_bp` (raw, unnormalized) |
 | `count_log1p` | `log(total_feature_bp + 1)` |
+| `count_log1p_zscore` | z-score normalized `log(total_feature_bp + 1)` |
+| `count_log1p_zscore_blockweight` (default) | z-score + block reweighting for equal edge/abundance variance contribution |
 
 Note: abundance is **length-based** (total bp per feature), not occurrence-based (number of BED records).
 
@@ -747,27 +749,33 @@ composite_score = (0.5 × silhouette_norm +
 
 ### 6.4 K-Selection Methods {#64-k-selection-methods}
 
-Four methods available for selecting optimal k:
+Five methods available for selecting optimal k:
 
 #### Method 1: Maximum Silhouette
 ```python
 k_optimal = argmax(silhouette_scores)
 ```
-Favors fewer, tighter clusters. Often selects lower k values.
+Favors fewer, tighter clusters using Euclidean distance. Often selects lower k values.
 
-#### Method 2: Maximum Calinski-Harabasz
+#### Method 2: Maximum Cosine Silhouette
+```python
+k_optimal = argmax(cosine_silhouette_scores)
+```
+Same as silhouette but uses cosine distance. Better suited for high-dimensional sparse feature matrices where angle between vectors is more meaningful than Euclidean distance.
+
+#### Method 3: Maximum Calinski-Harabasz
 ```python
 k_optimal = argmax(CH_scores)
 ```
 Favors compact, well-separated clusters.
 
-#### Method 3: Maximum Composite
+#### Method 4: Maximum Composite
 ```python
 k_optimal = argmax(composite_scores)
 ```
 Balances quality and enrichment. May favor higher k if it improves enrichment.
 
-#### Method 4: Composite-Knee (default)
+#### Method 5: Composite-Knee (default)
 
 **Kneedle Algorithm** finds the "elbow" point where increasing k yields diminishing returns:
 
@@ -1020,10 +1028,12 @@ q_values = false_discovery_control(raw_pvals, method='by')
 
 **Matrix Type:**
 
-- `length_weighted` (default): Edge weight = source feature length normalized by sequence length. Best for biological interpretation as it reflects the relative genomic span of transitions.
+- `count_log1p_zscore_blockweight` (default): Applies `log(x+1)` then per-column z-score normalization, then scales the edge and abundance blocks so each contributes equal total variance. Recommended when using both edges and abundance together, as it prevents whichever block has more columns from dominating the clustering.
+- `count_log1p_zscore`: Same as above but without block reweighting. Use when you want z-score normalization but want column counts to influence relative block importance.
+- `count_log1p`: Applies `log(x+1)` to raw counts (edges) and raw bp totals (abundance). Compresses dynamic range, making rare transitions more visible. No normalization across columns.
+- `length_weighted`: Edge weight = source feature length normalized by sequence length. Best for biological interpretation as it reflects the relative genomic span of transitions.
 - `count`: Edge weight = number of times transition occurs in the sequence. Use if feature lengths are unreliable or when transition frequency is more informative than length.
 - `binary`: Edge weight = 1 if transition occurs at least once in the sequence, else 0. Use for presence/absence patterns only, ignoring frequency and length.
-- `count_log1p`: Applies `log(x+1)` to raw counts (edges) and raw bp totals (abundance). Compresses dynamic range, making rare transitions more visible. Use when clustering is dominated by high-count transitions and rare structural patterns are underrepresented.
 
 **Note:** `--matrix-type` controls both edge and abundance weighting.
 
@@ -1038,7 +1048,12 @@ q_values = false_discovery_control(raw_pvals, method='by')
 - `symmetric` (default): Reduces dimensions, order-independent
 - `directional`: Use if transition direction matters (e.g., strand-specific)
 
-**Abundance:**
+**Include Edges (`--include-edges` / `--no-include-edges`):**
+
+- `True` (default): Include edge (transition) features in the matrix
+- `False`: Abundance-only clustering. Use when transitions are uninformative or when you want to cluster purely on feature composition
+
+**Abundance (`--abundance` / `--no-abundance`):**
 
 - `True` (default): Recommended for comprehensive feature representation
 - `False`: Use only if interested purely in transitions
@@ -1066,6 +1081,7 @@ q_values = false_discovery_control(raw_pvals, method='by')
 - `composite-knee` (default): Best for discovery (finds diminishing returns)
 - `composite`: Use if you want maximum enrichment
 - `silhouette`: Use if quality more important than enrichment
+- `cosine-silhouette`: Like silhouette but with cosine distance; better for high-dimensional sparse matrices
 - `calinski`: Similar to silhouette but emphasizes separation
 
 **K-range:**
@@ -1105,11 +1121,34 @@ q_values = false_discovery_control(raw_pvals, method='by')
 - `max_sequence_length=50000`: Removes rare long outliers (default: 50000)
 - Adjust based on expected biological sequence length distribution
 
+**Sequence list (`--sequence-list`):**
+
+- Path to a file with sequence names to include (one per line)
+- Useful for subsetting to a specific set of reads (e.g., from a previous analysis or external selection)
+
 **Feature exclusion:**
 
 - Exclude low-quality annotations: `novel,unknown`
 - Exclude canonical telomeres: `canonical_telomere*`
 - Use wildcards for pattern matching
+
+### 9.6 Analysis Mode {#96-analysis-mode}
+
+**`--analysis-mode`:**
+
+- `enrichment` (default): Clusters all sequences together and tests for sample/group enrichment. Standard mode for comparing conditions.
+- `structure`: Per-chromosome structural analysis. Identifies structural outliers within each chromosome using distance-based thresholds.
+
+**`--structural-threshold`** (for structure mode):
+
+- `0.25` (default): Distance threshold for grouping structurally similar sequences. Lower values create more groups (stricter similarity).
+
+### 9.7 Visualization {#97-visualization}
+
+**UMAP:**
+
+- `--umap` (default: True): Generate static UMAP PDF/SVG
+- `--umap-html`: Also generate an interactive HTML UMAP using Plotly (zoomable, hoverable with read metadata)
 
 ---
 
