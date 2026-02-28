@@ -197,6 +197,9 @@ def parse_args():
                         help="Rotate plot 90 degrees (dendrogram on left, reads vertical)")
     parser.add_argument("--show-matrix", dest="show_matrix", action="store_true",
                         help="Show sample × cluster read count matrix (vertical mode only)")
+    parser.add_argument("--show-bar-plots", dest="show_bar_plots", action="store_true",
+                        help="Show stacked bar plots (sample column sums and cluster row sums). "
+                             "Can be used independently or with --show-matrix.")
     parser.add_argument("--column-tracks", dest="column_tracks", action="store_true",
                         help="Display featuresets as separate columns instead of stacked rows. "
                              "In vertical mode: each featureset gets its own column area. "
@@ -289,6 +292,7 @@ def _print_params_and_command(args, database, featuresets, background_color):
         ("filter-enrichment", _fmt(args.filter_enrichment, "filter_enrichment"), None),
         ("vertical", _fmt(args.vertical, "vertical"), None),
         ("show-matrix", _fmt(args.show_matrix, "show_matrix"), None),
+        ("show-bar-plots", _fmt(args.show_bar_plots, "show_bar_plots"), None),
         ("column-tracks", _fmt(args.column_tracks, "column_tracks"), None),
         ("show-read-indices", _fmt(args.show_read_indices, "show_read_indices"), None),
         ("show-dendrogram", _fmt(args.show_dendrogram, "show_dendrogram"), None),
@@ -1315,7 +1319,7 @@ def compute_cluster_dendrogram_order(feature_matrix_data, cluster_reads):
                cluster_dendro_data contains 'linkage' and 'cluster_order' for drawing cluster dendrogram
     """
     from scipy.cluster.hierarchy import leaves_list, optimal_leaf_ordering
-    from scipy.spatial.distance import squareform
+    from scipy.spatial.distance import squareform, pdist
 
     read_to_original_cluster = {}
     read_to_original_enrichment = {}
@@ -1505,8 +1509,22 @@ def compute_cluster_dendrogram_order(feature_matrix_data, cluster_reads):
                 label_to_idx = {cid: i for i, cid in enumerate(reordered_cluster_ids)}
                 optimized_linkage = phylo_tree_to_linkage(full_tree, label_to_idx)
 
-            # Identity mapping since we built linkage in display order
-            leaf_order = list(range(len(reordered_cluster_ids)))
+                # Apply optimal leaf ordering to cluster dendrogram
+                try:
+                    centroid_map = {cid: i for i, cid in enumerate(displayed_clusters_in_order)}
+                    ordered_centroid_idx = [centroid_map[cid] for cid in reordered_cluster_ids]
+                    ordered_centroids = subset_centroids[ordered_centroid_idx]
+                    centroid_dist = pdist(ordered_centroids)
+                    optimized_linkage = optimal_leaf_ordering(optimized_linkage, centroid_dist)
+                    leaf_order = leaves_list(optimized_linkage)
+                    reordered_cluster_ids = [reordered_cluster_ids[i] for i in leaf_order]
+                    print(f"  Applied optimal leaf ordering to cluster dendrogram")
+                except Exception as e:
+                    print(f"  Warning: Could not apply optimal leaf ordering: {e}")
+                    leaf_order = list(range(len(reordered_cluster_ids)))
+
+            if not isinstance(leaf_order, list):
+                leaf_order = list(range(len(reordered_cluster_ids)))
         else:
             reordered_cluster_ids = displayed_clusters_in_order
             optimized_linkage = None
@@ -2735,7 +2753,8 @@ def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_me
         max_count = max(max_count, max(counts.values()) if counts.values() else 1)
 
     # Cluster samples within each group by their count profiles
-    from scipy.cluster.hierarchy import linkage, leaves_list
+    from scipy.cluster.hierarchy import linkage, leaves_list, optimal_leaf_ordering
+    from scipy.spatial.distance import pdist
 
     # Group samples by their group
     group_to_samples = {}
@@ -2767,6 +2786,7 @@ def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_me
             row_sums[row_sums == 0] = 1  # Avoid division by zero
             prop_matrix = count_matrix / row_sums
             Z = linkage(prop_matrix, method='ward')
+            Z = optimal_leaf_ordering(Z, pdist(prop_matrix))
             order = leaves_list(Z)
             ordered_samples = [all_samples[i] for i in order]
             group_linkages['All'] = (Z, original_samples, ordered_samples)
@@ -2791,6 +2811,7 @@ def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_me
                         row_sums[row_sums == 0] = 1
                         prop_matrix = count_matrix / row_sums
                         Z = linkage(prop_matrix, method='ward')
+                        Z = optimal_leaf_ordering(Z, pdist(prop_matrix))
                         order = leaves_list(Z)
                         ordered_samples = [group_samples[i] for i in order]
                         group_linkages[group_name] = (Z, original_samples, ordered_samples)
@@ -2812,6 +2833,7 @@ def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_me
                     row_sums[row_sums == 0] = 1
                     prop_matrix = count_matrix / row_sums
                     Z = linkage(prop_matrix, method='ward')
+                    Z = optimal_leaf_ordering(Z, pdist(prop_matrix))
                     order = leaves_list(Z)
                     ordered_samples = [group_samples[i] for i in order]
                     group_linkages[group_name] = (Z, original_samples, ordered_samples)
@@ -5618,7 +5640,7 @@ def main():
             meta_df = pd.read_csv(sample_metadata_file, sep='\t')
             n_samples = len(meta_df)
             matrix_width = n_samples * cell_width + 15
-            row_bar_width = 60
+            row_bar_width = 60 if args.show_bar_plots else 0
             print(f"  Matrix enabled: {n_samples} samples (cell size: {cell_size}px)")
 
         matrix_block_width = (matrix_width + row_bar_width + 15) if args.show_matrix else 0
@@ -5788,7 +5810,7 @@ def main():
             bubble_legend_height = 30  # Minimal bottom margin (legends moved to right side)
         right_legend_width = 170  # Space for vertical color legend on right
         right_legend_gap = 15  # Gap between cluster labels and right legend
-        bar_plot_height = 100 if args.show_matrix else 0  # Space for bar plot below matrix
+        bar_plot_height = 100 if args.show_bar_plots else 0  # Space for bar plot below matrix
         image_width = left_margin + feature_bars_width + 20 + label_width + right_legend_gap + right_legend_width
         image_height = current_y + 50 + bar_plot_height + bubble_legend_height
 
@@ -5899,17 +5921,18 @@ def main():
                     draw_sample_dendrogram(d, matrix_data, matrix_x_start, dendro_bottom, sample_dendro_height,
                                            line_color=text_color)
 
-                # Draw bar plot below matrix (column sums)
-                bar_plot_y = max(cluster_y_end.values()) + cell_height / 2 + 5
-                draw_sample_bar_plot(d, matrix_data, cluster_ids, cluster_enrichments, matrix_x_start, bar_plot_y,
-                                    cell_width, 40, text_color, background_color, sample_colors=sample_colors)
+                if args.show_bar_plots:
+                    # Draw bar plot below matrix (column sums)
+                    bar_plot_y = max(cluster_y_end.values()) + cell_height / 2 + 5
+                    draw_sample_bar_plot(d, matrix_data, cluster_ids, cluster_enrichments, matrix_x_start, bar_plot_y,
+                                        cell_width, 40, text_color, background_color, sample_colors=sample_colors)
 
-                # Draw row bar plot to right of matrix (row sums)
-                row_bar_x_start = matrix_x_start + matrix_width + 5
-                draw_cluster_bar_plot(d, matrix_data, cluster_ids, cluster_y_start, cluster_y_end,
-                                     cluster_enrichments, row_bar_x_start, row_bar_width - 10,
-                                     text_color, background_color, sample_colors=sample_colors,
-                                     axis_y=header_baseline_y)
+                    # Draw row bar plot to right of matrix (row sums)
+                    row_bar_x_start = matrix_x_start + matrix_width + 5
+                    draw_cluster_bar_plot(d, matrix_data, cluster_ids, cluster_y_start, cluster_y_end,
+                                         cluster_enrichments, row_bar_x_start, row_bar_width - 10,
+                                         text_color, background_color, sample_colors=sample_colors,
+                                         axis_y=header_baseline_y)
 
             # Draw enrichment bubbles/grid (to the RIGHT of dendrogram tips, before feature bars)
             # Dendrogram tips are at 50 + dendrogram_width (consistent with draw_cluster_dendrogram_vertical)
