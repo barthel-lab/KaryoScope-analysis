@@ -48,7 +48,8 @@ import os
 import subprocess
 import sys
 import time
-from collections import defaultdict
+import re
+from collections import defaultdict, namedtuple
 
 import drawsvg as draw
 from PIL import Image, ImageDraw, ImageFont
@@ -537,11 +538,14 @@ def draw_reads_png(reads, colors, output_path, config):
             max_feat_end = max((e for _, e, _ in features), default=0)
             read_bottom = min(image_height, top_margin + int(max_feat_end * ratio))
             if bx2 > bx1 and read_bottom > read_top:
-                border_color = np.array([0, 0, 0, 255], dtype=np.uint8)
-                img_array[read_top, bx1:bx2] = border_color
-                img_array[min(read_bottom, image_height - 1), bx1:bx2] = border_color
-                img_array[read_top:read_bottom + 1, bx1] = border_color
-                img_array[read_top:read_bottom + 1, min(bx2, image_width - 1)] = border_color
+                border_color = np.array(text_color + (255,), dtype=np.uint8)
+                bt = max(1, int(width_scale))
+                img_array[read_top:read_top + bt, bx1:bx2] = border_color
+                rb = min(read_bottom, image_height - 1)
+                img_array[rb - bt + 1:rb + 1, bx1:bx2] = border_color
+                img_array[read_top:read_bottom + 1, bx1:bx1 + bt] = border_color
+                rx = min(bx2, image_width - 1)
+                img_array[read_top:read_bottom + 1, rx - bt + 1:rx + 1] = border_color
 
         current_x += bar_width + read_spacing
 
@@ -555,6 +559,49 @@ def draw_reads_png(reads, colors, output_path, config):
     # Convert back to PIL Image for text rendering
     img = Image.fromarray(img_array)
     draw_ctx = ImageDraw.Draw(img)
+
+    # Draw inline scale bar (matching SVG draw_scale_bar at line 2786)
+    if config.get("draw_scale_bar", True):
+        scale_bar_bp = 10000
+        scale_bar_height = int(scale_bar_bp * ratio)
+        max_scale_height = max_height_px
+        if scale_bar_height > max_scale_height:
+            scale_bar_bp = 5000
+            scale_bar_height = int(scale_bar_bp * ratio)
+
+        sb_bar_w = max(1, int(1.5 * height_scale))
+        sb_tick_ext = max(2, int(3 * height_scale))
+        sb_x = effective_left_margin - int(10 * width_scale)
+        sb_y = top_margin
+
+        # Vertical bar
+        draw_ctx.rectangle([sb_x, sb_y, sb_x + sb_bar_w, sb_y + scale_bar_height],
+                           fill=text_color)
+        # Tick marks (symmetric around bar center)
+        bar_center_x = sb_x + sb_bar_w // 2
+        tick_w = max(1, int(1 * height_scale))
+        draw_ctx.line([(bar_center_x - sb_tick_ext, sb_y),
+                       (bar_center_x + sb_tick_ext, sb_y)],
+                      fill=text_color, width=tick_w)
+        draw_ctx.line([(bar_center_x - sb_tick_ext, sb_y + scale_bar_height),
+                       (bar_center_x + sb_tick_ext, sb_y + scale_bar_height)],
+                      fill=text_color, width=tick_w)
+
+        # Rotated label
+        sb_label = f"{scale_bar_bp // 1000} Kbp"
+        sb_font = _load_font(max(font_size, int(config.get("font_size", 14) * height_scale)))
+        bbox = sb_font.getbbox(sb_label)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        pad = max(4, int(2 * height_scale))
+        txt_img = Image.new('RGBA', (tw + 2 * pad, th + 2 * pad), (0, 0, 0, 0))
+        txt_draw = ImageDraw.Draw(txt_img)
+        txt_draw.text((pad, pad - bbox[1]), sb_label, fill=text_color + (255,), font=sb_font)
+        txt_img = txt_img.rotate(90, expand=True)
+        bar_center_x = sb_x + sb_bar_w // 2
+        paste_x = max(0, bar_center_x - sb_tick_ext - txt_img.width - int(3 * width_scale))
+        paste_y = sb_y + (scale_bar_height - txt_img.height) // 2
+        img.paste(txt_img, (paste_x, paste_y), txt_img)
 
     # Draw heatmap row labels (matching SVG draw_heatmap_grid_svg lines 2206-2216)
     if config.get("heatmap") and config.get("metadata_columns"):
@@ -570,7 +617,7 @@ def draw_reads_png(reads, colors, output_path, config):
             bbox = font.getbbox(display_name)
             text_w = bbox[2] - bbox[0]
             text_h = bbox[3] - bbox[1]
-            label_y = row_y + box_h // 2 - text_h // 2
+            label_y = row_y + box_h // 2 - text_h // 2 - bbox[1]
             draw_ctx.text(
                 (left_margin - int(5 * width_scale) - text_w, label_y),
                 display_name, fill=text_color, font=font)
@@ -625,7 +672,7 @@ def draw_reads_png(reads, colors, output_path, config):
             for group_name, gx_start, gx_end in group_spans:
                 draw_ctx.line(
                     [(gx_start, tier1_line_y), (gx_end, tier1_line_y)],
-                    fill=text_color, width=max(1, int(2 * height_scale))
+                    fill=text_color, width=max(1, int(1.5 * height_scale))
                 )
                 draw_ctx.text(
                     (gx_start, tier1_label_y),
@@ -649,7 +696,7 @@ def draw_reads_png(reads, colors, output_path, config):
                     draw_ctx.line(
                         [(sample_x_start[sample], line_y),
                          (sample_x_end[sample], line_y)],
-                        fill=text_color, width=max(1, int(2 * height_scale))
+                        fill=text_color, width=max(1, int(1.5 * height_scale))
                     )
                     label_text = sample.replace("_", " ")
                     num_reads = sample_read_counts[sample]
@@ -832,7 +879,7 @@ def draw_reads_horizontal_png(reads, colors, output_path, config):
             read_right = min(image_width, left_margin + int(max_feat_end * ratio))
             read_left = left_margin
             if by2 > by1 and read_right > read_left:
-                border_color = np.array([0, 0, 0, 255], dtype=np.uint8)
+                border_color = np.array(text_color + (255,), dtype=np.uint8)
                 img_array[by1, read_left:read_right] = border_color
                 img_array[min(by2, image_height - 1), read_left:read_right] = border_color
                 img_array[by1:by2 + 1, read_left] = border_color
@@ -890,7 +937,7 @@ def draw_reads_horizontal_png(reads, colors, output_path, config):
                 draw_ctx = ImageDraw.Draw(img)  # Refresh after paste
                 draw_ctx.line(
                     [(tier1_x, gy_start), (tier1_x, gy_end)],
-                    fill=text_color, width=max(1, int(2 * height_scale))
+                    fill=text_color, width=max(1, int(1.5 * height_scale))
                 )
                 label_text = group_name.replace("_", " ")
                 bbox = font.getbbox(label_text)
@@ -912,7 +959,7 @@ def draw_reads_horizontal_png(reads, colors, output_path, config):
                     draw_ctx.line(
                         [(line_x, sample_y_start[sample]),
                          (line_x, sample_y_end[sample])],
-                        fill=text_color, width=max(1, int(2 * height_scale))
+                        fill=text_color, width=max(1, int(1.5 * height_scale))
                     )
 
                     # Labels (rotated vertically on left margin)
@@ -1073,7 +1120,7 @@ def draw_reads_horizontal_svg(reads, colors, output_path, config):
             max_feat_end = max((e for _, e, _ in features), default=0)
             read_width_px = int(max_feat_end * ratio)
             d.append(draw.Rectangle(left_margin, current_y, read_width_px, bar_width,
-                                    fill='none', stroke='black', stroke_width=0.5))
+                                    fill='none', stroke=text_color, stroke_width=0.5))
 
         current_y += bar_width + read_spacing
 
@@ -1171,14 +1218,12 @@ def draw_reads_horizontal_svg(reads, colors, output_path, config):
     return image_width
 
 
-def draw_legend_png(features_used, colors, config, horizontal=False):
+def draw_legend_png(features_used, colors, config, horizontal=False, scale=1.0,
+                    max_width=None, extra_items=None):
     """Render an auto-filtered color legend as a PIL Image.
 
-    Args:
-        features_used: set of feature names that appeared in the plotted reads
-        colors: {feature_name: hex_color} mapping
-        config: dict with background, etc.
-        horizontal: if True, render single-column layout (for horizontal mode)
+    Uses compute_legend_layout() for grid-aligned columns with section headers.
+    Optional extra_items are prepended (e.g. heatmap legend entries).
 
     Returns:
         PIL.Image: legend image ready for compositing
@@ -1186,70 +1231,328 @@ def draw_legend_png(features_used, colors, config, horizontal=False):
     background = config["background"]
     bg_color = (0, 0, 0, 255) if background == "black" else (255, 255, 255, 255)
     text_color = (255, 255, 255) if background == "black" else (0, 0, 0)
+    border_color = (255, 255, 255, 255) if background == "black" else (0, 0, 0, 255)
+    color_sections = config.get("color_sections")
 
-    swatch_size = 14
-    font_size = 14
-    padding = 10
-    row_height = swatch_size + 6
+    base_font = config.get("font_size", 14)
+    swatch_size = int(base_font * scale)
+    font_size = int(base_font * scale)
+    item_padding = int(3 * scale)
 
-    # Load font
     font = _load_font(font_size)
 
-    # Filter to only features in use, skip _specific duplicates
-    filtered = {}
-    for feat in sorted(features_used):
-        base = feat.replace("_specific", "")
-        if base in filtered:
-            continue
-        color_hex = colors.get(feat, colors.get(base, None))
-        if color_hex:
-            filtered[base] = color_hex
+    def measure_text(text, _fs):
+        bbox = font.getbbox(text)
+        return bbox[2] - bbox[0]
 
+    filtered = _filter_legend_features(features_used, colors, color_sections)
+    if extra_items:
+        filtered = extra_items + filtered
     if not filtered:
         return None
 
-    items = list(filtered.items())
+    max_cols = 1 if horizontal else 6
+    layout = compute_legend_layout(
+        filtered, max_cols=max_cols, max_width=max_width,
+        swatch_size=swatch_size, font_size=font_size,
+        padding=int(10 * scale), col_gap=int(20 * scale),
+        item_padding=item_padding, measure_text_fn=measure_text)
 
-    # Measure max label width
-    max_label_w = 0
-    for name, _ in items:
-        bbox = font.getbbox(name)
-        max_label_w = max(max_label_w, bbox[2] - bbox[0])
-
-    col_width = swatch_size + 8 + max_label_w + padding * 2
-
-    if horizontal:
-        # Single-column layout (placed to the right of horizontal reads)
-        num_cols = 1
-        num_rows = len(items)
-    else:
-        # Multi-column layout (placed below vertical reads)
-        max_cols = 6
-        num_cols = min(max_cols, max(1, len(items)))
-        num_rows = (len(items) + num_cols - 1) // num_cols
-
-    legend_width = num_cols * col_width + padding * 2
-    legend_height = num_rows * row_height + padding * 2
-
-    legend_img = Image.new('RGBA', (legend_width, legend_height), bg_color)
+    legend_img = Image.new('RGBA', (layout.width, layout.height), bg_color)
     ctx = ImageDraw.Draw(legend_img)
 
-    for idx, (name, color_hex) in enumerate(items):
-        if horizontal:
-            col = 0
-            row = idx
+    for item in layout.items:
+        if item.is_header:
+            ctx.text((int(item.x), int(item.y + 2)), item.label,
+                     fill=text_color, font=font)
         else:
-            col = idx // num_rows
-            row = idx % num_rows
-
-        x = padding + col * col_width
-        y = padding + row * row_height
-
-        rgba = hex_to_rgba(color_hex)
-        ctx.rectangle([x, y, x + swatch_size, y + swatch_size], fill=rgba)
-        ctx.text((x + swatch_size + 8, y), name, fill=text_color, font=font)
+            # Color swatch with border
+            sx = int(item.x) + layout.item_padding
+            sy = int(item.y) + layout.item_padding
+            rgba = hex_to_rgba(item.color)
+            ctx.rectangle([sx, sy, sx + swatch_size, sy + swatch_size],
+                          fill=rgba, outline=border_color, width=max(1, int(scale)))
+            # Label text
+            swatch_gap = int(swatch_size * 0.4)
+            tx = sx + swatch_size + swatch_gap
+            ctx.text((tx, sy), item.label, fill=text_color, font=font)
 
     return legend_img
+
+
+LegendItem = namedtuple('LegendItem', ['x', 'y', 'label', 'color', 'is_header'])
+LegendLayout = namedtuple('LegendLayout', ['items', 'width', 'height', 'col_width',
+                                            'num_cols', 'swatch_size', 'font_size',
+                                            'row_height', 'item_padding'])
+
+
+def _build_heatmap_legend_items(config):
+    """Convert heatmap color data to legend item tuples.
+
+    Returns list of (display_name, color_hex, section_header) matching
+    the format used by _filter_legend_features / compute_legend_layout.
+    """
+    items = []
+    heatmap_colors = config.get("heatmap_colors", {})
+    heatmap_display_names = config.get("heatmap_display_names", {})
+    for col_name in config.get("metadata_columns", []):
+        val_colors = heatmap_colors.get(col_name, {})
+        header = heatmap_display_names.get(col_name, col_name)
+        for val, color in val_colors.items():
+            if val is None:
+                continue
+            display = str(val).replace("_", " ")
+            items.append((display, color, header))
+    return items
+
+
+def _filter_legend_features(features_used, colors, color_sections=None):
+    """Filter features for legend display.
+
+    Deduplicates _specific variants, trims _multigroup suffixes,
+    replaces underscores with spaces, and preserves section grouping.
+
+    Returns:
+        list of (display_name, color_hex, section_header_or_None) tuples
+    """
+    # Build set of base feature names actually in use
+    used_bases = set()
+    for feat in features_used:
+        base = re.sub(r'_specific$', '', feat)
+        used_bases.add(base)
+
+    seen_display = set()
+    result = []
+
+    if color_sections:
+        for header, section_feats in color_sections:
+            for feat in section_feats:
+                base = re.sub(r'_specific$', '', feat)
+                if base not in used_bases:
+                    continue
+                display = re.sub(r'_multigroup\d+$', '', base).replace('_', ' ')
+                if display in seen_display:
+                    continue
+                seen_display.add(display)
+                color_hex = colors.get(feat, colors.get(base, None))
+                if color_hex:
+                    result.append((display, color_hex, header))
+    else:
+        for feat in sorted(features_used):
+            base = re.sub(r'_specific$', '', feat)
+            display = re.sub(r'_multigroup\d+$', '', base).replace('_', ' ')
+            if display in seen_display:
+                continue
+            seen_display.add(display)
+            color_hex = colors.get(feat, colors.get(base, None))
+            if color_hex:
+                result.append((display, color_hex, None))
+
+    return result
+
+
+def compute_legend_layout(filtered_items, *, max_width=None, max_cols=6,
+                          swatch_size=12, font_size=12, padding=10,
+                          col_gap=20, item_padding=3, measure_text_fn=None):
+    """Compute a grid layout for legend items with optional section headers.
+
+    Items fill top-to-bottom, then left-to-right. Section headers start a new
+    column if the current column is non-empty.
+
+    Returns:
+        LegendLayout with positioned items and total dimensions.
+    """
+    if measure_text_fn is None:
+        measure_text_fn = lambda text, fs: len(text) * fs * 0.48
+
+    if not filtered_items:
+        return LegendLayout([], 0, 0, 0, 0, swatch_size, font_size, 0, item_padding)
+
+    swatch_gap = int(swatch_size * 0.4)
+    row_height = swatch_size + 2 * item_padding + 4
+
+    # Measure widest label to get uniform column width
+    max_label_w = 0
+    for display, _, _ in filtered_items:
+        max_label_w = max(max_label_w, measure_text_fn(display, font_size))
+    col_width = swatch_size + swatch_gap + int(max_label_w) + 2 * item_padding + 4
+
+    # Determine number of columns
+    if max_width:
+        available = max_width - 2 * padding
+        num_cols = min(max_cols, max(1, int((available + col_gap) / (col_width + col_gap))))
+    else:
+        num_cols = min(max_cols, max(1, len(filtered_items)))
+
+    # Group items by section
+    sections = []
+    current_header = None
+    current_items = []
+    first = True
+    for display, color_hex, header in filtered_items:
+        if header != current_header and not first:
+            sections.append((current_header, current_items))
+            current_items = []
+        current_header = header
+        current_items.append((display, color_hex))
+        first = False
+    if current_items:
+        sections.append((current_header, current_items))
+
+    # Count total slots (header rows + item rows)
+    total_slots = 0
+    for header, items in sections:
+        if header:
+            total_slots += 1  # header row
+        total_slots += len(items)
+
+    num_rows = max(1, -(-total_slots // num_cols))  # ceil division
+
+    # Place items column-first
+    positioned = []
+    col = 0
+    row = 0
+    for header, items in sections:
+        # Start new column for new section if current column has items
+        if header and row > 0:
+            col += 1
+            row = 0
+            if col >= num_cols:
+                col = 0
+                # All columns full, just continue stacking
+
+        if header:
+            x = padding + col * (col_width + col_gap)
+            y = padding + row * row_height
+            positioned.append(LegendItem(x, y, header, None, True))
+            row += 1
+
+        for display, color_hex in items:
+            if row >= num_rows and col + 1 < num_cols:
+                col += 1
+                row = 0
+            x = padding + col * (col_width + col_gap)
+            y = padding + row * row_height
+            positioned.append(LegendItem(x, y, display, color_hex, False))
+            row += 1
+
+    # Compute actual dimensions from placed items
+    max_x = max(item.x for item in positioned) + col_width if positioned else 0
+    max_y = max(item.y for item in positioned) + row_height if positioned else 0
+    total_width = max_x + padding
+    total_height = max_y + padding
+
+    actual_cols = (max(item.x for item in positioned) - padding) // (col_width + col_gap) + 1 if positioned else 0
+
+    return LegendLayout(positioned, int(total_width), int(total_height),
+                        col_width, int(actual_cols), swatch_size, font_size,
+                        row_height, item_padding)
+
+
+def _estimate_heatmap_legend_height(config, image_width, left_margin):
+    """Pre-calculate height needed for the heatmap legend with row-wrapping."""
+    metadata_columns = config.get("metadata_columns", [])
+    heatmap_colors = config.get("heatmap_colors", {})
+    heatmap_display_names = config.get("heatmap_display_names", {})
+    font_size = config.get("font_size", 14)
+    swatch_size = font_size
+    col_gap = 20
+    row_height = swatch_size + 10
+    right_margin = 50
+    max_x = image_width - right_margin
+
+    x = left_margin
+    num_rows = 1
+    for col_name in metadata_columns:
+        val_colors = heatmap_colors.get(col_name, {})
+        display_name = heatmap_display_names.get(col_name, col_name)
+        header_w = len(display_name) * (font_size * 0.6) + 10
+        if x + header_w > max_x and x > left_margin:
+            num_rows += 1
+            x = left_margin
+        x += header_w
+        for val, color in val_colors.items():
+            if val is None:
+                continue
+            item_w = swatch_size + len(str(val)) * (font_size * 0.6) + 15
+            if x + item_w > max_x and x > left_margin:
+                num_rows += 1
+                x = left_margin
+            x += item_w
+        x += col_gap
+
+    return num_rows * row_height
+
+
+def estimate_featureset_legend_height(features_used, colors, config, image_width,
+                                      extra_items=None):
+    """Pre-calculate the height the SVG featureset legend will consume."""
+    color_sections = config.get("color_sections")
+    filtered = _filter_legend_features(features_used, colors, color_sections)
+    if extra_items:
+        filtered = extra_items + filtered
+    if not filtered:
+        return 0
+    font_size = config.get("font_size", 14)
+    layout = compute_legend_layout(
+        filtered, max_width=image_width, swatch_size=font_size, font_size=font_size)
+    return layout.height
+
+
+def draw_legend_svg(d, features_used, colors, config, legend_y, image_width=None,
+                    extra_items=None):
+    """Draw color legend in SVG below reads.
+
+    Uses compute_legend_layout() for grid-aligned columns with section headers.
+    Optional extra_items are prepended (e.g. heatmap legend entries).
+
+    Returns:
+        int: total height consumed by the legend
+    """
+    background = config["background"]
+    text_color = "#ffffff" if background == "black" else "#000000"
+    border_color = "#ffffff" if background == "black" else "#000000"
+    font_size = config.get("font_size", 14)
+    font_family = "Basic Sans"
+    color_sections = config.get("color_sections")
+
+    filtered = _filter_legend_features(features_used, colors, color_sections)
+    if extra_items:
+        filtered = extra_items + filtered
+    if not filtered:
+        return 0
+
+    layout = compute_legend_layout(
+        filtered, max_width=image_width, swatch_size=font_size, font_size=font_size)
+
+    for item in layout.items:
+        ix = item.x
+        iy = legend_y + item.y
+
+        if item.is_header:
+            d.append(draw.Text(
+                item.label, font_size, ix, iy + font_size,
+                fill=text_color, text_anchor="start", font_family=font_family,
+                font_weight="bold",
+            ))
+        else:
+            # Color swatch with border
+            swatch_y = iy + layout.item_padding
+            swatch_x = ix + layout.item_padding
+            d.append(draw.Rectangle(
+                swatch_x, swatch_y, layout.swatch_size, layout.swatch_size,
+                fill=item.color, stroke=border_color, stroke_width=0.5,
+            ))
+            # Label text
+            swatch_gap = int(layout.swatch_size * 0.4)
+            text_x = swatch_x + layout.swatch_size + swatch_gap
+            text_y = swatch_y + layout.swatch_size - 1
+            d.append(draw.Text(
+                item.label, font_size, text_x, text_y,
+                fill=text_color, text_anchor="start", font_family=font_family,
+            ))
+
+    return layout.height
 
 
 def composite_legend(png_path, legend_img, position="below"):
@@ -1789,19 +2092,36 @@ def load_color_mapping(colors_file):
     """Load feature -> color mapping from colors file.
 
     Handles both '_specific' suffix variants and bare feature names.
+    Parses '# comment' lines as section headers for legend grouping.
 
     Returns:
-        dict: feature_name -> hex_color
+        tuple: (colors_dict, color_sections)
+            - colors_dict: {feature_name: hex_color}
+            - color_sections: [(section_header_or_None, [feature_names])]
     """
     colors = {"novel": "#ffffff"}  # Default for unknown features
+    sections = []
+    current_header = None
+    current_features = []
 
     with open(colors_file, "r") as f:
         for line in f:
-            parts = line.strip().split()
+            stripped = line.strip()
+            # Parse section headers from comment lines
+            m = re.match(r'^#\s+(.+)', stripped)
+            if m:
+                # Save previous section if it has features
+                if current_features:
+                    sections.append((current_header, current_features))
+                current_header = m.group(1).strip()
+                current_features = []
+                continue
+            parts = stripped.split()
             if len(parts) < 2 or parts[0].lower() == "feature":
                 continue
             feature, color = parts[0], parts[1]
             colors[feature] = color
+            current_features.append(feature)
             # Also map without _specific suffix for smoothed BED files
             if feature.endswith("_specific"):
                 colors[feature[:-9]] = color
@@ -1809,7 +2129,14 @@ def load_color_mapping(colors_file):
             if not feature.endswith("_specific") and not feature.endswith("_multigroup1"):
                 colors[feature + "_specific"] = color
 
-    return colors
+    # Save final section
+    if current_features:
+        sections.append((current_header, current_features))
+    # If no sections found at all, wrap everything in a None-header section
+    if not sections:
+        sections = [(None, list(colors.keys()))]
+
+    return colors, sections
 
 
 def load_read_list(path):
@@ -2231,7 +2558,7 @@ def draw_heatmap_grid_svg(d, read_positions, config, text_color):
     left_margin = config["left_margin"]
     font_size = config.get("font_size", 14)
 
-    border_color = "#555555" if background == "black" else "#333333"
+    stroke_color = "#ffffff" if background == "black" else "#000000"
     n_rows = len(metadata_columns)
 
     for row_idx, col_name in enumerate(reversed(metadata_columns)):
@@ -2246,20 +2573,19 @@ def draw_heatmap_grid_svg(d, read_positions, config, text_color):
             d.append(draw.Rectangle(
                 rx, row_y, bar_width, bar_width,
                 fill=color,
-                stroke=border_color,
-                stroke_width=0.3,
+                stroke=stroke_color,
+                stroke_width=0.5,
             ))
 
         # Row label at left margin (use display name if available)
         display_name = heatmap_display_names.get(col_name, col_name)
-        label_y = row_y + bar_width / 2
+        label_y = row_y + bar_width / 2 + font_size * 0.35
         d.append(draw.Text(
             display_name, font_size,
             left_margin - 5, label_y,
             fill=text_color,
             text_anchor="end",
             font_family="Basic Sans",
-            dominant_baseline="central",
         ))
 
 
@@ -2280,8 +2606,8 @@ def draw_heatmap_grid_png(img_array, read_positions, config, width_scale, height
     scaled_row_gap = max(1, int(heatmap_row_gap * height_scale))
     box_h = max(1, int(base_bar_width * width_scale))
 
-    border_color = np.array([85, 85, 85, 255] if background == "black"
-                            else [51, 51, 51, 255], dtype=np.uint8)
+    border_color = np.array([255, 255, 255, 255] if background == "black"
+                            else [0, 0, 0, 255], dtype=np.uint8)
     img_h, img_w = img_array.shape[:2]
 
     for row_idx, col_name in enumerate(reversed(metadata_columns)):
@@ -2300,11 +2626,56 @@ def draw_heatmap_grid_png(img_array, read_positions, config, width_scale, height
             y2 = min(img_h, row_y + box_h)
             if x2 > x1 and y2 > y1:
                 img_array[y1:y2, x1:x2] = color_rgba
-                # Thin border
-                img_array[y1, x1:x2] = border_color
-                img_array[min(y2, img_h - 1), x1:x2] = border_color
-                img_array[y1:y2, x1] = border_color
-                img_array[y1:y2, min(x2, img_w - 1)] = border_color
+                # Scaled border
+                bt = max(1, int(width_scale))
+                img_array[y1:y1 + bt, x1:x2] = border_color
+                by = min(y2, img_h - 1)
+                img_array[by - bt + 1:by + 1, x1:x2] = border_color
+                img_array[y1:y2, x1:x1 + bt] = border_color
+                bx = min(x2, img_w - 1)
+                img_array[y1:y2, bx - bt + 1:bx + 1] = border_color
+
+
+def draw_heatmap_legend_png(draw_ctx, config, top_margin, max_height_px, left_margin,
+                            height_scale, width_scale):
+    """Draw heatmap legend (colored swatches + value labels) below reads in PNG."""
+    heatmap_colors = config["heatmap_colors"]
+    metadata_columns = config["metadata_columns"]
+    heatmap_display_names = config.get("heatmap_display_names", {})
+    background = config["background"]
+    text_color = (255, 255, 255) if background == "black" else (0, 0, 0)
+
+    legend_font_size = max(10, int(config.get("font_size", 14) * height_scale))
+    font = _load_font(legend_font_size)
+    swatch_size = legend_font_size
+    col_gap = int(20 * width_scale)
+
+    legend_x = left_margin
+    legend_y = top_margin + max_height_px + int(10 * height_scale)
+
+    for col_name in metadata_columns:
+        val_colors = heatmap_colors.get(col_name, {})
+        display_name = heatmap_display_names.get(col_name, col_name)
+        header = display_name + ":"
+        bold_font = _load_font(legend_font_size)
+        draw_ctx.text((legend_x, legend_y), header, fill=text_color, font=bold_font)
+        bbox = bold_font.getbbox(header)
+        legend_x += bbox[2] - bbox[0] + int(10 * width_scale)
+        for val, color in val_colors.items():
+            if val is None:
+                continue
+            rgba = hex_to_rgba(color)
+            draw_ctx.rectangle(
+                [legend_x, legend_y, legend_x + swatch_size, legend_y + swatch_size],
+                fill=rgba)
+            label = str(val)
+            draw_ctx.text((legend_x + swatch_size + int(3 * width_scale), legend_y),
+                          label, fill=text_color, font=font)
+            bbox = font.getbbox(label)
+            legend_x += swatch_size + (bbox[2] - bbox[0]) + int(15 * width_scale)
+        legend_x += col_gap
+
+    return legend_font_size + int(10 * height_scale)
 
 
 def draw_scale_bar(d, x, y, ratio, text_color, max_height_px, font_size=14):
@@ -2318,7 +2689,7 @@ def draw_scale_bar(d, x, y, ratio, text_color, max_height_px, font_size=14):
         scale_bar_height = int(scale_bar_bp * ratio)
 
     # Draw vertical bar
-    d.append(draw.Rectangle(x, y, 3, scale_bar_height, fill=text_color))
+    d.append(draw.Line(x, y, x, y + scale_bar_height, stroke=text_color, stroke_width=1))
 
     # Draw tick marks at top and bottom
     d.append(draw.Line(x - 2, y, x + 6, y, stroke=text_color, stroke_width=1))
@@ -2372,7 +2743,7 @@ def draw_scale_bar_svg(output_path, image_height, top_margin, ratio, background)
     y = top_margin
 
     # Draw vertical bar
-    d.append(draw.Rectangle(x, y, 3, scale_bar_height, fill=text_color))
+    d.append(draw.Line(x, y, x, y + scale_bar_height, stroke=text_color, stroke_width=1))
 
     # Draw tick marks at top and bottom
     d.append(draw.Line(x - 3, y, x + 6, y, stroke=text_color, stroke_width=1))
@@ -2467,7 +2838,17 @@ def draw_reads_svg(reads, colors, output_path, config):
         + ((num_samples - 1) * sample_spacing)
         + 50  # Right margin
     )
-    image_height = top_margin + max_height_px + bottom_margin
+    # Pre-calculate legend heights to include in image_height
+    features_used = {feat for _, _, _, feats in reads for _, _, feat in feats}
+    has_heatmap = config.get("heatmap") and config.get("metadata_columns")
+    has_featureset = bool(features_used)
+    hm_items = _build_heatmap_legend_items(config) if has_heatmap else None
+    legend_extra = 0
+    if has_featureset or hm_items:
+        legend_extra += estimate_featureset_legend_height(
+            features_used, colors, config, image_width, extra_items=hm_items)
+
+    image_height = top_margin + max_height_px + bottom_margin + legend_extra
 
     # Create drawing
     d = draw.Drawing(image_width, image_height, id_prefix="tr")
@@ -2533,7 +2914,7 @@ def draw_reads_svg(reads, colors, output_path, config):
             max_feat_end = max((e for _, e, _ in features), default=0)
             read_height_px = int(max_feat_end * ratio)
             d.append(draw.Rectangle(current_x, top_margin, bar_width, read_height_px,
-                                    fill='none', stroke='black', stroke_width=0.5))
+                                    fill='none', stroke=text_color, stroke_width=0.5))
 
         current_x += bar_width + read_spacing
 
@@ -2631,39 +3012,11 @@ def draw_reads_svg(reads, colors, output_path, config):
     if config.get("heatmap") and config.get("metadata_columns"):
         draw_heatmap_grid_svg(d, read_positions, config, text_color)
 
-        # Draw legend for heatmap at bottom of image
-        heatmap_colors = config["heatmap_colors"]
-        metadata_columns = config["metadata_columns"]
-        heatmap_display_names = config.get("heatmap_display_names", {})
-        legend_x = left_margin
-        legend_y = top_margin + max_height_px + 10
-        legend_font_size = config.get("font_size", 14) - 2
-        swatch_size = legend_font_size
-        col_gap = 20
-        for col_name in metadata_columns:
-            val_colors = heatmap_colors.get(col_name, {})
-            display_name = heatmap_display_names.get(col_name, col_name)
-            # Column header
-            d.append(draw.Text(
-                display_name + ":", legend_font_size, legend_x, legend_y,
-                fill=text_color, text_anchor="start", font_family="Basic Sans",
-                font_weight="bold",
-            ))
-            legend_x += len(display_name) * (legend_font_size * 0.6) + 10
-            for val, color in val_colors.items():
-                if val is None:
-                    continue
-                d.append(draw.Rectangle(
-                    legend_x, legend_y - swatch_size + 2, swatch_size, swatch_size,
-                    fill=color,
-                ))
-                d.append(draw.Text(
-                    str(val), legend_font_size,
-                    legend_x + swatch_size + 3, legend_y,
-                    fill=text_color, text_anchor="start", font_family="Basic Sans",
-                ))
-                legend_x += swatch_size + len(str(val)) * (legend_font_size * 0.6) + 15
-            legend_x += col_gap
+    # Draw unified color legend below reads (heatmap + featureset sections)
+    if features_used or hm_items:
+        feat_legend_y = top_margin + max_height_px + 10
+        draw_legend_svg(d, features_used, colors, config, feat_legend_y, image_width,
+                        extra_items=hm_items)
 
     # Save SVG
     d.save_svg(output_path)
@@ -2713,7 +3066,7 @@ def main():
 
     # Load color mapping
     logger.info("\nLoading colors from: %s", args.colors)
-    colors = load_color_mapping(args.colors)
+    colors, color_sections = load_color_mapping(args.colors)
     logger.info("  Loaded %d color mappings", len(colors))
 
     # Load BED data
@@ -2906,7 +3259,7 @@ def main():
     heatmap_bottom_gap = 10
     heatmap_total = 0
     if args.heatmap and metadata_columns:
-        args.bottom_margin = max(args.bottom_margin, 25)  # Room for heatmap legend
+        args.bottom_margin = max(args.bottom_margin, 35)  # Room for heatmap + featureset legends
         heatmap_colors = assign_heatmap_colors(metadata_columns, read_metadata)
         for col, val_map in heatmap_colors.items():
             display = heatmap_display_names.get(col, col)
@@ -2958,6 +3311,7 @@ def main():
         "heatmap_top_gap": heatmap_top_gap,
         "heatmap_bottom_gap": heatmap_bottom_gap,
         "heatmap_total": heatmap_total,
+        "color_sections": color_sections,
     }
 
     # Apply viewport ratio overrides
@@ -3086,10 +3440,18 @@ def main():
 
         # Handle legend: save separately for animation, or composite onto PNG
         legend_png_path = None
-        if args.legend and fmt in ("png", "both"):
+        if fmt in ("png", "both"):
             features_used = {feat for _, _, _, feats in sorted_reads for _, _, feat in feats}
+            height_scale, width_scale = calculate_png_params(sorted_reads, config)
+            png_img = Image.open(png_output)
+            png_width = png_img.size[0]
+            png_img.close()
+            hm_items = _build_heatmap_legend_items(config) if config.get("heatmap") else None
             legend_img = draw_legend_png(features_used, colors, config,
-                                         horizontal=args.horizontal)
+                                         horizontal=args.horizontal,
+                                         scale=height_scale,
+                                         max_width=png_width,
+                                         extra_items=hm_items)
             if legend_img is not None:
                 if args.animate:
                     # Save as separate file — animation function will overlay it
