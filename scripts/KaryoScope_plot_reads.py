@@ -53,6 +53,7 @@ from collections import defaultdict, namedtuple
 
 import drawsvg as draw
 from PIL import Image, ImageDraw, ImageFont
+Image.MAX_IMAGE_PIXELS = None
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -2526,7 +2527,7 @@ def assign_heatmap_colors(metadata_columns, read_metadata):
     Returns:
         dict: {col_name: {value: hex_color}} mapping for each column.
     """
-    palette = ["#40D392", "#60A5FA", "#F07167", "#FBBF24", "#10B981", "#3B82F6", "#C4A9E8"]
+    palette = ["#40D392", "#60A5FA", "#F07167", "#FBBF24", "#EC4899", "#C4A9E8"]
     missing_color = "#545454"
     color_map = {}
 
@@ -3233,6 +3234,17 @@ def main():
             logger.info("  --filter-group %s: %d -> %d reads, %d groups",
                         ", ".join(sorted(allowed)), before, len(reads),
                         len(group_subgroup_order))
+
+    # Sort group_subgroup_order: preserve first-seen order for both groups and subgroups
+    if group_subgroup_order and len(tier_specs) >= 2:
+        group_rank = {}
+        subgroup_rank = {}
+        for g, s in group_subgroup_order:
+            if g not in group_rank:
+                group_rank[g] = len(group_rank)
+            if s not in subgroup_rank:
+                subgroup_rank[s] = len(subgroup_rank)
+        group_subgroup_order.sort(key=lambda pair: (group_rank.get(pair[0], 0), subgroup_rank.get(pair[1], 0)))
 
     # Validate heatmap option
     if args.heatmap or heatmap_specs:

@@ -485,6 +485,14 @@ def create_adaptive_horizontal_panning(
         output_path,
     ]
     process = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    # Drain ffmpeg stderr in a background thread to avoid pipe buffer deadlock
+    import threading, io
+    _stderr_chunks = []
+    def _drain_stderr():
+        for chunk in iter(lambda: process.stderr.read(4096), b''):
+            _stderr_chunks.append(chunk)
+    _stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    _stderr_thread.start()
 
     print(f"\nRendering {total_frames} frames …")
     last_pct = -1
@@ -633,9 +641,10 @@ def create_adaptive_horizontal_panning(
 
     process.stdin.close()
     process.wait()
+    _stderr_thread.join(timeout=5)
 
     if process.returncode != 0:
-        stderr = process.stderr.read().decode()
+        stderr = b''.join(_stderr_chunks).decode(errors='replace')
         print(f"  ffmpeg error:\n{stderr[-500:]}")
         raise RuntimeError("ffmpeg encoding failed")
 
