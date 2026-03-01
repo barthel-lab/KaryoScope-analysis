@@ -1819,6 +1819,11 @@ def parse_args():
              "two-level grouping (e.g., satellite type and cell line).",
     )
     parser.add_argument(
+        "--filter-group", action="append", default=None,
+        help="Filter --read-list to rows where the first label-tier column matches "
+             "this value. Can be specified multiple times to include several groups.",
+    )
+    parser.add_argument(
         "--min-length",
         type=int,
         default=None,
@@ -3197,6 +3202,37 @@ def main():
             logger.info("  Grouping: %d group-subgroup pairs", len(group_subgroup_order))
         if metadata_columns:
             logger.info("  Heatmap columns: %s", metadata_columns)
+
+        # --filter-group: keep only reads whose group matches specified values.
+        # Must scan read_rows (not read_groups) because a read appearing in
+        # multiple groups has its read_groups entry overwritten by the last one.
+        if args.filter_group and tier_specs:
+            allowed = set(args.filter_group)
+            group_col = tier_specs[0][0]
+            subgroup_col = tier_specs[1][0] if len(tier_specs) >= 2 else None
+            # Collect IDs and rebuild read_groups from matching rows only
+            keep_ids = set()
+            filtered_groups = {}
+            seen_pairs = set()
+            filtered_order = []
+            for rid, meta in read_rows:
+                g = meta.get(group_col)
+                if g not in allowed:
+                    continue
+                keep_ids.add(rid)
+                s = meta.get(subgroup_col) if subgroup_col else None
+                filtered_groups[rid] = (g, s)
+                pair = (g, s)
+                if pair not in seen_pairs:
+                    seen_pairs.add(pair)
+                    filtered_order.append(pair)
+            before = len(reads)
+            reads = [r for r in reads if r[1] in keep_ids]
+            read_groups = filtered_groups
+            group_subgroup_order = filtered_order
+            logger.info("  --filter-group %s: %d -> %d reads, %d groups",
+                        ", ".join(sorted(allowed)), before, len(reads),
+                        len(group_subgroup_order))
 
     # Validate heatmap option
     if args.heatmap or heatmap_specs:
