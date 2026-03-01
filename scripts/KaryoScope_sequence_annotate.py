@@ -44,6 +44,13 @@ Usage:
     --bed results/raw_bed/*.bed.gz \\
     --readnames-dir /path/to/samples \\
     --output annotations.tsv.gz
+
+  # With canonical feature columns from colors files
+  python KaryoScope_sequence_annotate.py \\
+    --bed results/raw_bed/*.bed.gz \\
+    --colors-dir /path/to/KaryoScope-BIR/resources \\
+    --database KS_human_CHM13 \\
+    --output annotations.tsv.gz
 """
 
 import argparse
@@ -141,6 +148,43 @@ def extract_sample_name(filepath):
             return basename[:idx]
     # Fallback: first field before first dot
     return basename.split('.')[0]
+
+
+def load_canonical_features(colors_dir, database, featureset):
+    """Load canonical feature list from a colors file.
+
+    Parses {colors_dir}/{database}.{featureset}.colors.txt to extract the
+    ordered list of feature names. Strips '_specific' suffix from feature names
+    but keeps '_multigroup1' as-is. Deduplicates while preserving order.
+
+    Returns:
+        list of feature names in colors-file order, or None if file doesn't exist.
+    """
+    colors_path = os.path.join(colors_dir, f"{database}.{featureset}.colors.txt")
+    if not os.path.exists(colors_path):
+        return None
+
+    seen = set()
+    features = []
+    with open(colors_path, "r") as f:
+        for i, line in enumerate(f):
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            feature = parts[0]
+            # Skip header line
+            if i == 0 and feature.lower() == 'feature':
+                continue
+            # Strip _specific suffix
+            if feature.endswith('_specific'):
+                feature = feature[:-9]
+            if feature not in seen:
+                seen.add(feature)
+                features.append(feature)
+    return features
 
 
 # ---------------------------------------------------------------------------
@@ -640,6 +684,8 @@ def _print_params_and_command(args):
         ("readnames-dir", _fmt(args.readnames_dir, "readnames_dir"), None),
         ("samples", _fmt(args.samples, "samples"), None),
         ("reference", _fmt(args.reference, "reference"), None),
+        ("colors-dir", _fmt(args.colors_dir, "colors_dir"), None),
+        ("database", _fmt(args.database, "database"), None),
         ("log-file", _fmt(args.log_file, "log_file"), None),
     ]
 
@@ -683,6 +729,13 @@ def main():
                              "(default: auto-extracted from BED filenames)")
     parser.add_argument("--reference", default="CHM13",
                         help="Reference genome name for stats.tsv files (default: CHM13)")
+    parser.add_argument("--colors-dir", dest="colors_dir", default=None,
+                        help="Root resources directory containing colors files\n"
+                             "(e.g., /path/to/KaryoScope-BIR/resources).\n"
+                             "Must be used together with --database.")
+    parser.add_argument("--database", default=None,
+                        help="Database name (e.g., KS_human_CHM13).\n"
+                             "Must be used together with --colors-dir.")
     parser.add_argument("--log-file", dest="log_file", default=True,
                         type=lambda x: x.lower() not in ('false', '0', 'no'),
                         help="Save .log file (default: True)")
@@ -694,6 +747,12 @@ def main():
             _argparse_defaults[action.dest] = action.default
 
     args = parser.parse_args()
+
+    # Validate --colors-dir and --database: both must be provided together
+    if (args.colors_dir is None) != (args.database is None):
+        parser.error("--colors-dir and --database must be used together")
+    if args.colors_dir and not os.path.isdir(args.colors_dir):
+        parser.error(f"--colors-dir is not a directory: {args.colors_dir}")
 
     # 1. Set up logging
     output_prefix = _strip_tsv_extension(args.output)
@@ -800,24 +859,52 @@ def main():
         read_feature_bp, read_total_bp = compute_per_read_feature_bp(bed_df)
         fractions = compute_read_feature_fractions(bed_df)
         thresholds = compute_adaptive_thresholds(fractions)
-        feature_names_sorted = sorted(thresholds.keys())
+        # Determine feature list: canonical from colors file (if available) + BED-only extras
+        bed_features = sorted(thresholds.keys())
+        if args.colors_dir and args.database:
+            canonical = load_canonical_features(args.colors_dir, args.database, fs)
+            if canonical is not None:
+                extra = sorted(set(bed_features) - set(canonical))
+                feature_names_sorted = canonical + extra
+                if extra:
+                    print(f"  Canonical features: {len(canonical)} from colors file + {len(extra)} BED-only extras")
+                else:
+                    print(f"  Canonical features: {len(canonical)} from colors file")
+            else:
+                print(f"  WARNING: Colors file not found for {fs}, using BED-only features")
+                feature_names_sorted = bed_features
+        else:
+            feature_names_sorted = bed_features
 
         # Print threshold summary
         print(f"\n  Feature thresholds for {fs}:")
+        min_thresh = 0.001
         for feat in feature_names_sorted:
-            nonzero = fractions[feat][fractions[feat] > 0]
-            med = nonzero.median() if len(nonzero) > 0 else 0
-            n_nz = len(nonzero)
-            n_tot = len(fractions)
-            print(f"    {feat}: {thresholds[feat]*100:.2f}% (median {med*100:.1f}%, n_nonzero={n_nz}/{n_tot})")
-            threshold_rows.append({
-                'featureset': fs,
-                'feature': feat,
-                'threshold': thresholds[feat],
-                'median_nonzero': med if n_nz > 0 else 0,
-                'n_nonzero': n_nz,
-                'n_total': n_tot,
-            })
+            if feat in thresholds:
+                nonzero = fractions[feat][fractions[feat] > 0]
+                med = nonzero.median() if len(nonzero) > 0 else 0
+                n_nz = len(nonzero)
+                n_tot = len(fractions)
+                print(f"    {feat}: {thresholds[feat]*100:.2f}% (median {med*100:.1f}%, n_nonzero={n_nz}/{n_tot})")
+                threshold_rows.append({
+                    'featureset': fs,
+                    'feature': feat,
+                    'threshold': thresholds[feat],
+                    'median_nonzero': med if n_nz > 0 else 0,
+                    'n_nonzero': n_nz,
+                    'n_total': n_tot,
+                })
+            else:
+                # Canonical feature with no BED data
+                print(f"    {feat}: no data - canonical feature (default {min_thresh*100:.2f}%)")
+                threshold_rows.append({
+                    'featureset': fs,
+                    'feature': feat,
+                    'threshold': min_thresh,
+                    'median_nonzero': 0,
+                    'n_nonzero': 0,
+                    'n_total': len(fractions),
+                })
 
         # Compute per-read window densities for ALL reads at once
         print(f"  Computing window densities (window_size={window_size})...")
