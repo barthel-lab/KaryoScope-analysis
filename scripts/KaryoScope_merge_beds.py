@@ -63,6 +63,11 @@ parser.add_argument("--chromosome-acrocentric-merge", dest="chromosome_acrocentr
                          "Requires exactly 2 BED files: BED1=chromosome, BED2=acrocentric.\n"
                          "Acrocentric features (DJ, PHR, rDNA, SST1, PJ, array_multigroup1, acrocentric_multigroup1)\n"
                          "take priority; remaining positions filled with chromosome labels.")
+parser.add_argument("--telomere-acrocentric-merge", dest="telomere_acrocentric_merge", action="store_true",
+                    help="Priority merge mode: telomeric features from BED1 (subtelomeric) take priority,\n"
+                         "acrocentric features from BED2 fill gaps. Composite labels (e.g., DJ_TAR1,\n"
+                         "PHR_ITS) are created where TAR1/ITS overlap DJ/PHR/rDNA.\n"
+                         "Requires exactly 2 BED files: BED1=subtelomeric, BED2=acrocentric.")
 parser.add_argument("--collapse-non-acrocentric", dest="collapse_non_acrocentric",
                     action="store_true",
                     help="Remap specific non-acrocentric chromosome labels (chr1-12, chr16-20, chrX, chrY)\n"
@@ -85,12 +90,14 @@ class TeeLogger:
 
     def write(self, message):
         self.terminal.write(message)
-        self.log.write(message)
-        self.log.flush()
+        if not self.log.closed:
+            self.log.write(message)
+            self.log.flush()
 
     def flush(self):
         self.terminal.flush()
-        self.log.flush()
+        if not self.log.closed:
+            self.log.flush()
 
     def close(self):
         self.log.close()
@@ -181,6 +188,15 @@ ACROCENTRIC_PRIORITY_FEATURES = {
     'DJ', 'PHR', 'rDNA', 'SST1', 'PJ',
     'array_multigroup1', 'acrocentric_multigroup1'
 }
+
+# Top-priority telomeric features for telomere-acrocentric merge mode
+TELOMERE_ACRO_TOP_PRIORITY = {'canonical_telomere', 'noncanonical_telomere'}
+
+# Subtelomeric features that can form composites with acrocentric features
+TELOMERE_ACRO_COMPOSITE_SUBTEL = {'TAR1', 'ITS'}
+
+# Acrocentric features that produce composite labels when overlapping TAR1/ITS
+TELOMERE_ACRO_COMPOSITE_ACRO = {'DJ', 'PHR', 'rDNA'}
 
 # Specific non-acrocentric chromosomes to collapse (strict mode)
 STRICT_NON_ACROCENTRIC_CHROMOSOMES = {
@@ -715,6 +731,211 @@ def _chromosome_acrocentric_merge_pandas(df_chrom, df_acro):
     return pd.DataFrame(results, columns=['read', 'start', 'end', 'feature']).sort_values(['read', 'start'])
 
 
+def _resolve_telomere_acro_feature(subtel_feat, acro_feat):
+    """
+    Resolve feature label for a position with both subtelomeric and acrocentric annotations.
+
+    Priority:
+    1. canonical_telomere / noncanonical_telomere → always win
+    2. TAR1/ITS + DJ/PHR/rDNA → composite label (e.g., DJ_TAR1)
+    3. TAR1/ITS + other acro → keep subtel
+    4. Other subtel + informative acro → keep acro
+    5. Neither informative → nonacrocentric
+    """
+    subtel_is_top = subtel_feat in TELOMERE_ACRO_TOP_PRIORITY
+    subtel_is_composite = subtel_feat in TELOMERE_ACRO_COMPOSITE_SUBTEL
+    acro_is_informative = acro_feat in ACROCENTRIC_PRIORITY_FEATURES
+    acro_is_composite = acro_feat in TELOMERE_ACRO_COMPOSITE_ACRO
+
+    # Top-priority telomeric features always win
+    if subtel_is_top:
+        return subtel_feat
+
+    # TAR1/ITS overlapping composite-eligible acrocentric → composite label
+    if subtel_is_composite and acro_is_composite:
+        return f"{acro_feat}_{subtel_feat}"
+
+    # TAR1/ITS overlapping non-composite acrocentric → keep subtel
+    if subtel_is_composite:
+        return subtel_feat
+
+    # telomere_like_multigroup1 or other subtel + informative acro → acro wins
+    if acro_is_informative:
+        return acro_feat
+
+    # Both are background (nonsubtelomeric + nonacrocentric) → nonacrocentric
+    return 'nonacrocentric'
+
+
+def telomere_acrocentric_merge(df_subtel, df_acro):
+    """
+    Priority merge: telomeric features from subtelomeric BED take priority,
+    acrocentric features fill gaps. Composite labels are created where
+    TAR1/ITS overlap DJ/PHR/rDNA.
+
+    Args:
+        df_subtel: DataFrame from subtelomeric BED file
+        df_acro: DataFrame from acrocentric BED file
+
+    Returns:
+        DataFrame with merged features (single feature per interval)
+    """
+    try:
+        import pyranges as pr
+        return _telomere_acrocentric_merge_pyranges(df_subtel, df_acro)
+    except ImportError:
+        return _telomere_acrocentric_merge_pandas(df_subtel, df_acro)
+
+
+def _merge_adjacent_intervals(df):
+    """Merge adjacent intervals with the same read and feature label."""
+    if df.empty:
+        return df
+
+    df = df.sort_values(['read', 'start']).reset_index(drop=True)
+    merged = []
+    prev_read, prev_start, prev_end, prev_feat = df.iloc[0]
+
+    for _, row in df.iloc[1:].iterrows():
+        if row['read'] == prev_read and row['feature'] == prev_feat and row['start'] <= prev_end:
+            prev_end = max(prev_end, row['end'])
+        else:
+            merged.append((prev_read, prev_start, prev_end, prev_feat))
+            prev_read, prev_start, prev_end, prev_feat = row['read'], row['start'], row['end'], row['feature']
+
+    merged.append((prev_read, prev_start, prev_end, prev_feat))
+    return pd.DataFrame(merged, columns=['read', 'start', 'end', 'feature'])
+
+
+def _telomere_acrocentric_merge_pyranges(df_subtel, df_acro):
+    """Fast telomere-acrocentric merge using pyranges join."""
+    import pyranges as pr
+
+    common_reads = set(df_subtel['read'].unique()) & set(df_acro['read'].unique())
+    if not common_reads:
+        print("  Warning: No common reads between BED files")
+        return pd.DataFrame(columns=['read', 'start', 'end', 'feature'])
+
+    print(f"  Common reads: {len(common_reads):,}")
+    print(f"  Top-priority telomere features: {', '.join(sorted(TELOMERE_ACRO_TOP_PRIORITY))}")
+    print(f"  Composite-eligible pairs: {', '.join(f'{a}+{s}' for a in sorted(TELOMERE_ACRO_COMPOSITE_ACRO) for s in sorted(TELOMERE_ACRO_COMPOSITE_SUBTEL))}")
+
+    # Filter to common reads and ensure int types
+    df_subtel_f = df_subtel[df_subtel['read'].isin(common_reads)][['read', 'start', 'end', 'feature']].copy()
+    df_acro_f = df_acro[df_acro['read'].isin(common_reads)][['read', 'start', 'end', 'feature']].copy()
+    df_subtel_f['start'] = df_subtel_f['start'].astype(int)
+    df_subtel_f['end'] = df_subtel_f['end'].astype(int)
+    df_acro_f['start'] = df_acro_f['start'].astype(int)
+    df_acro_f['end'] = df_acro_f['end'].astype(int)
+
+    # Convert to pyranges
+    pr_subtel = pr.PyRanges(df_subtel_f.rename(columns={
+        'read': 'Chromosome', 'start': 'Start', 'end': 'End', 'feature': 'SubtelFeature'
+    }))
+    pr_acro = pr.PyRanges(df_acro_f.rename(columns={
+        'read': 'Chromosome', 'start': 'Start', 'end': 'End', 'feature': 'AcroFeature'
+    }))
+
+    # Join the two interval sets
+    pr_joined = pr_subtel.join(pr_acro)
+
+    if len(pr_joined) == 0:
+        print("  Warning: No overlap between subtelomeric and acrocentric BED files")
+        return pd.DataFrame(columns=['read', 'start', 'end', 'feature'])
+
+    # Convert to DataFrame and compute overlap coordinates
+    df_j = pr_joined.df.copy()
+    df_j['overlap_start'] = df_j[['Start', 'Start_b']].max(axis=1)
+    df_j['overlap_end'] = df_j[['End', 'End_b']].min(axis=1)
+    df_j = df_j[df_j['overlap_end'] > df_j['overlap_start']]
+
+    # Resolve feature labels
+    df_j['feature'] = df_j.apply(
+        lambda row: _resolve_telomere_acro_feature(row['SubtelFeature'], row['AcroFeature']),
+        axis=1
+    )
+
+    result = pd.DataFrame({
+        'read': df_j['Chromosome'],
+        'start': df_j['overlap_start'].astype(int),
+        'end': df_j['overlap_end'].astype(int),
+        'feature': df_j['feature']
+    })
+
+    # Merge adjacent intervals with same label
+    result = _merge_adjacent_intervals(result)
+
+    # Report feature counts
+    feature_counts = result['feature'].value_counts()
+    print(f"\n  Merged intervals: {len(result):,}")
+    print(f"  Unique features: {len(feature_counts):,}")
+    composite_feats = [f for f in feature_counts.index
+                       if '_TAR1' in f or '_ITS' in f]
+    if composite_feats:
+        print(f"  Composite features:")
+        for feat in composite_feats:
+            bp = (result[result['feature'] == feat]['end'] - result[result['feature'] == feat]['start']).sum()
+            print(f"    {feat}: {feature_counts[feat]:,} intervals, {bp:,} bp")
+
+    return result
+
+
+def _telomere_acrocentric_merge_pandas(df_subtel, df_acro):
+    """Fallback telomere-acrocentric merge using pandas (slower)."""
+    common_reads = set(df_subtel['read'].unique()) & set(df_acro['read'].unique())
+    if not common_reads:
+        print("  Warning: No common reads between BED files")
+        return pd.DataFrame(columns=['read', 'start', 'end', 'feature'])
+
+    print(f"  Common reads: {len(common_reads):,}")
+    print(f"  Top-priority telomere features: {', '.join(sorted(TELOMERE_ACRO_TOP_PRIORITY))}")
+    print("  Note: Install pyranges for faster processing")
+
+    # Filter to common reads and convert to int
+    df_subtel_f = df_subtel[df_subtel['read'].isin(common_reads)].copy()
+    df_acro_f = df_acro[df_acro['read'].isin(common_reads)].copy()
+    df_subtel_f['start'] = df_subtel_f['start'].astype(int)
+    df_subtel_f['end'] = df_subtel_f['end'].astype(int)
+    df_acro_f['start'] = df_acro_f['start'].astype(int)
+    df_acro_f['end'] = df_acro_f['end'].astype(int)
+
+    # Group by read
+    subtel_grouped = {read: grp[['start', 'end', 'feature']].values
+                      for read, grp in df_subtel_f.groupby('read')}
+    acro_grouped = {read: grp[['start', 'end', 'feature']].values
+                    for read, grp in df_acro_f.groupby('read')}
+
+    results = []
+    for read in common_reads:
+        subtel_intervals = subtel_grouped.get(read, [])
+        acro_intervals = acro_grouped.get(read, [])
+
+        for s_s, s_e, s_f in subtel_intervals:
+            for a_s, a_e, a_f in acro_intervals:
+                overlap_start = max(int(s_s), int(a_s))
+                overlap_end = min(int(s_e), int(a_e))
+                if overlap_end > overlap_start:
+                    feat = _resolve_telomere_acro_feature(str(s_f), str(a_f))
+                    results.append((read, overlap_start, overlap_end, feat))
+
+    result = pd.DataFrame(results, columns=['read', 'start', 'end', 'feature'])
+    result = _merge_adjacent_intervals(result)
+
+    # Report feature counts
+    feature_counts = result['feature'].value_counts()
+    print(f"\n  Merged intervals: {len(result):,}")
+    print(f"  Unique features: {len(feature_counts):,}")
+    composite_feats = [f for f in feature_counts.index
+                       if '_TAR1' in f or '_ITS' in f]
+    if composite_feats:
+        print(f"  Composite features:")
+        for feat in composite_feats:
+            bp = (result[result['feature'] == feat]['end'] - result[result['feature'] == feat]['start']).sum()
+            print(f"    {feat}: {feature_counts[feat]:,} intervals, {bp:,} bp")
+
+    return result
+
+
 def merge_two_beds(df1, df2, sep=":"):
     """Merge two BED DataFrames by position overlay."""
     try:
@@ -932,6 +1153,48 @@ if args.chromosome_acrocentric_merge:
     for feat, count in feature_counts.head(10).items():
         pct = count / len(merged_df) * 100
         print(f"    {feat}: {count:,} ({pct:.1f}%)")
+
+    merged_df = merged_df.sort_values(['read', 'start'])
+
+    print(f"\nWriting to: {args.output}")
+    if args.output.endswith('.gz'):
+        merged_df.to_csv(args.output, sep='\t', index=False, header=False, compression='gzip')
+    else:
+        merged_df.to_csv(args.output, sep='\t', index=False, header=False)
+
+    print("Done!")
+    sys.exit(0)
+
+# Handle telomere-acrocentric merge mode
+if args.telomere_acrocentric_merge:
+    if len(args.bed) != 2:
+        print("Error: --telomere-acrocentric-merge requires exactly 2 BED files", file=sys.stderr)
+        print("  BED1: subtelomeric features", file=sys.stderr)
+        print("  BED2: acrocentric features", file=sys.stderr)
+        sys.exit(1)
+
+    print("\n--- Telomere-Acrocentric Priority Merge Mode ---")
+    print("  Telomeric features take priority; composite labels at DJ/PHR/rDNA boundaries")
+
+    df_subtel = load_bed_file(args.bed[0])
+    print(f"  Subtelomeric intervals: {len(df_subtel):,}")
+
+    df_acro = load_bed_file(args.bed[1])
+    print(f"  Acrocentric intervals: {len(df_acro):,}")
+
+    merged_df = telomere_acrocentric_merge(df_subtel, df_acro)
+
+    if merged_df.empty:
+        print("Error: Merge resulted in no intervals", file=sys.stderr)
+        sys.exit(1)
+
+    # Count unique features
+    feature_counts = merged_df['feature'].value_counts()
+    print(f"\n  Top 10 features:")
+    for feat, count in feature_counts.head(10).items():
+        bp = (merged_df[merged_df['feature'] == feat]['end'] - merged_df[merged_df['feature'] == feat]['start']).sum()
+        pct = count / len(merged_df) * 100
+        print(f"    {feat}: {count:,} intervals, {bp:,} bp ({pct:.1f}%)")
 
     merged_df = merged_df.sort_values(['read', 'start'])
 
