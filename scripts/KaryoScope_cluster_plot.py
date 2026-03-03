@@ -3909,6 +3909,131 @@ def draw_bubble_legend(d, x_start, y_start, cluster_stats, text_color='white', m
                            fill=text_color, font_family='sans-serif', text_anchor='middle'))
 
 
+def draw_bubble_legend_vertical(d, x_start, y_start, cluster_stats, text_color='white',
+                                max_radius=8, min_radius=2):
+    """Draw enrichment bubble legend as a vertical column (for two-group mode).
+
+    Explains the three encoding dimensions of single enrichment bubbles:
+    size (# reads), opacity (FDR), and color (log2 odds ratio).
+
+    Returns:
+        float: Y position after the legend (for stacking more legends below).
+    """
+    import math
+
+    if not cluster_stats:
+        return y_start
+
+    sizes = [s['size'] for s in cluster_stats.values() if s['size'] > 0]
+    if not sizes:
+        return y_start
+    min_size = min(sizes)
+    max_size = max(sizes)
+    size_range = max_size - min_size if max_size > min_size else 1
+
+    swatch_size = 8
+    item_height = 11
+    section_gap = 14
+    current_y = y_start
+
+    # Title
+    d.append(draw.Text(
+        "Enrichment Bubbles", font_size=8, x=x_start, y=current_y,
+        fill=text_color, font_family='sans-serif', font_weight='bold'
+    ))
+    current_y += 4
+
+    # --- Size section ---
+    current_y += section_gap
+    d.append(draw.Text(
+        "Size: # reads", font_size=7, x=x_start + 3, y=current_y,
+        fill=text_color, font_family='sans-serif', font_style='italic'
+    ))
+
+    # Pick 3 representative sizes: small, medium, large
+    if size_range > 0:
+        size_values = [min_size, int(min_size + size_range * 0.5), max_size]
+        size_values = sorted(set(size_values))
+    else:
+        size_values = [min_size]
+
+    for size_val in size_values:
+        current_y += item_height
+        size_norm = (size_val - min_size) / size_range if size_range > 0 else 0.5
+        r = min_radius + size_norm * (max_radius - min_radius)
+        cx = x_start + 3 + swatch_size / 2
+        d.append(draw.Circle(cx, current_y - swatch_size / 2, r,
+                             fill='#888888', fill_opacity=0.8,
+                             stroke=text_color, stroke_width=0.3))
+        d.append(draw.Text(str(size_val), font_size=7, x=x_start + swatch_size + 6,
+                           y=current_y - swatch_size / 2 + 1,
+                           fill=text_color, font_family='sans-serif',
+                           text_anchor='start', dominant_baseline='middle'))
+
+    # --- Opacity section ---
+    current_y += section_gap
+    d.append(draw.Text(
+        "Opacity: FDR", font_size=7, x=x_start + 3, y=current_y,
+        fill=text_color, font_family='sans-serif', font_style='italic'
+    ))
+
+    alphas = [(0.0, "NS"), (0.5, "q<0.01"), (1.0, "q<1e\u207b\u00b9\u2070")]
+    for alpha, label in alphas:
+        current_y += item_height
+        cx = x_start + 3 + swatch_size / 2
+        d.append(draw.Circle(cx, current_y - swatch_size / 2, max_radius * 0.7,
+                             fill='#888888', fill_opacity=alpha,
+                             stroke=text_color, stroke_width=0.3))
+        d.append(draw.Text(label, font_size=7, x=x_start + swatch_size + 6,
+                           y=current_y - swatch_size / 2 + 1,
+                           fill=text_color, font_family='sans-serif',
+                           text_anchor='start', dominant_baseline='middle'))
+
+    # --- log2(OR) color section (bidirectional: blue -> white -> red) ---
+    current_y += section_gap
+    d.append(draw.Text(
+        "Color: log\u2082(OR)", font_size=7, x=x_start + 3, y=current_y,
+        fill=text_color, font_family='sans-serif', font_style='italic'
+    ))
+
+    # Draw vertical gradient bar: blue (top, -4) -> white (middle, 0) -> red (bottom, +4)
+    current_y += 4
+    bar_width = swatch_size + 4
+    bar_height = 50
+    bar_x = x_start + 3
+    bar_y = current_y
+    n_steps = 50
+    step_h = bar_height / n_steps
+    for i in range(n_steps):
+        t = (i / (n_steps - 1)) * 2 - 1  # -1 (blue/top) to 1 (red/bottom)
+        if t > 0:
+            r, g, b = 255, int(255 * (1 - t)), int(255 * (1 - t))
+        elif t < 0:
+            s = -t
+            r, g, b = int(255 * (1 - s)), int(255 * (1 - s)), 255
+        else:
+            r, g, b = 255, 255, 255
+        d.append(draw.Rectangle(
+            bar_x, bar_y + i * step_h, bar_width, step_h + 0.5,
+            fill=f'rgb({r},{g},{b})', stroke='none'
+        ))
+    # Border around gradient bar
+    d.append(draw.Rectangle(
+        bar_x, bar_y, bar_width, bar_height,
+        fill='none', stroke=text_color, stroke_width=0.5
+    ))
+    # Tick labels on the right side
+    label_x = bar_x + bar_width + 4
+    for val, yfrac in [("-4", 0.0), ("0", 0.5), ("+4", 1.0)]:
+        ty = bar_y + yfrac * bar_height + 1
+        d.append(draw.Text(val, font_size=7, x=label_x, y=ty,
+                           fill=text_color, font_family='sans-serif',
+                           text_anchor='start', dominant_baseline='middle'))
+    current_y += bar_height
+
+    return current_y + 14
+
+
 def draw_enrichment_text_legend(d, x_start, y_start, enrichment_colors, text_color='white'):
     """Draw a legend explaining the text color encoding for cluster labels.
 
@@ -6022,6 +6147,10 @@ def main():
                     d, color_legend_x, right_legend_current_y, grid_sample_names, sample_colors,
                     text_color=text_color, bubble_radius=grid_bubble_radius,
                     sample_display_names=sample_display_names)
+            elif args.enrichment_grid and cluster_stats:
+                right_legend_current_y = draw_bubble_legend_vertical(
+                    d, color_legend_x, right_legend_current_y, cluster_stats,
+                    text_color=text_color, max_radius=bubble_radius, min_radius=2)
 
             # Enrichment text legend at bottom of right column
             draw_enrichment_text_legend_vertical(d, color_legend_x, right_legend_current_y,
@@ -6483,6 +6612,12 @@ def main():
         draw_color_legends(d, bottom_legend_featuresets, featureset_colors, featureset_color_order,
                           fs_display_names, color_legend_y_start, left_margin, text_color,
                           displayed_features=displayed_features)
+
+        # Enrichment grid legend (size, opacity, color encoding)
+        if use_enrichment_grid_horiz and grid_sample_names_horiz:
+            grid_legend_x = left_margin + 300
+            draw_grid_legend(d, grid_legend_x, legend_y, grid_sample_names_horiz, sample_colors,
+                            text_color=text_color, bubble_radius=grid_bubble_radius_horiz)
 
         # --- Save ---
         d.save_svg(svg_path)

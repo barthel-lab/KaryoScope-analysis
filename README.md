@@ -87,6 +87,10 @@ mkdocs build
 
 The documentation will be available at `http://127.0.0.1:8000/`
 
+### Fonts
+
+Plot outputs use the **Basic Sans** font family, bundled in the `fonts/` directory. The font is registered automatically by scripts that generate figures. No manual installation is required.
+
 ## Contributing
 
 This repository is actively maintained by the Barthel Lab. For questions or issues, please open an issue on GitHub.

@@ -6,6 +6,7 @@ This guide walks through running KaryoScope clustering analysis on the Core-4 ex
 
 - Python 3.11+
 - Required packages: numpy, pandas, scipy, scikit-learn, matplotlib, pyranges
+- **Basic Sans** font family (bundled in the `fonts/` directory — registered automatically)
 
 ## Installation
 

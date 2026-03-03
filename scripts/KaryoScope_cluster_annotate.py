@@ -725,11 +725,12 @@ def auto_label_cluster(row, featureset_prefix):
     tar1_dmax = row.get(f'{pfx}_dmax__TAR1', 0)
     rdna_dmax = row.get('acrocentric_dmax__rDNA', 0)
     ct        = row.get(f'{pfx}_bppct__ct', 0)
+    ct_dmax   = row.get(f'{pfx}_dmax__ct', 0)
 
     # Arm metrics: detect whether reads extend into a chromosome arm (or SegDup)
     p_arm_dmax = row.get(f'{pfx}_dmax__p_arm', 0)
     q_arm_dmax = row.get(f'{pfx}_dmax__q_arm', 0)
-    has_arm = max(p_arm_dmax, q_arm_dmax) >= ARM_PRESENT or ct >= CT_ENRICH
+    has_arm = max(p_arm_dmax, q_arm_dmax) >= ARM_PRESENT or ct >= CT_ENRICH or ct_dmax >= DMAX_HIGH
 
     its_readpct  = row.get(f'{pfx}_readpct__ITS', 0)
     tar1_readpct = row.get(f'{pfx}_readpct__TAR1', 0)
@@ -785,7 +786,7 @@ def auto_label_cluster(row, featureset_prefix):
             quals.append('ITS')
         if rdna_dmax >= ENRICH_DMAX:
             quals.append('rDNA')
-        if ct >= CT_ENRICH:
+        if ct >= CT_ENRICH or ct_dmax >= ENRICH_DMAX:
             quals.append('SegDup')
         return _format_quals(quals)
 

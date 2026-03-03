@@ -37,11 +37,25 @@ from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 import matplotlib
 import matplotlib.colors as mcolors
+import matplotlib.font_manager as fm
 matplotlib.use('Agg')
+
+# Register Basic Sans font if available
+from pathlib import Path
+_FONT_DIR = Path(__file__).resolve().parent.parent / "fonts"
+if _FONT_DIR.exists():
+    for _font_file in _FONT_DIR.glob("BasicSans-*.otf"):
+        fm.fontManager.addfont(str(_font_file))
+_HOME_FONT_DIR = Path.home() / "Documents" / "Barthel-Custom-Powerpoint-Theme" / "fonts"
+if _HOME_FONT_DIR.exists():
+    for _font_file in _HOME_FONT_DIR.glob("BasicSans-*.otf"):
+        fm.fontManager.addfont(str(_font_file))
 
 # Keep text editable in output files (not converted to paths)
 plt.rcParams['pdf.fonttype'] = 42
 plt.rcParams['svg.fonttype'] = 'none'
+plt.rcParams['font.family'] = 'sans-serif'
+plt.rcParams['font.sans-serif'] = ['Basic Sans', 'Arial', 'Helvetica', 'DejaVu Sans']
 
 # --- Argument parsing ---
 parser = argparse.ArgumentParser(
@@ -401,10 +415,10 @@ def get_plot_style(bg_mode):
     """Return style configuration for given background mode."""
     if bg_mode == 'black':
         return {
-            'bg_color': '#1a1a1a',
+            'bg_color': '#000000',
             'text_color': 'white',
-            'grid_color': '#404040',
-            'annotation_bg': '#333333',
+            'grid_color': '#333333',
+            'annotation_bg': '#222222',
             'annotation_edge': 'white',
             'edge_color': 'white',
             'style': 'dark_background'
@@ -427,9 +441,11 @@ def apply_plot_style(bg_mode):
         plt.style.use('dark_background')
     else:
         plt.style.use('default')
-    # Re-apply fonttype settings (style.use resets them)
+    # Re-apply settings that style.use resets
     plt.rcParams['pdf.fonttype'] = 42
     plt.rcParams['svg.fonttype'] = 'none'
+    plt.rcParams['font.family'] = 'sans-serif'
+    plt.rcParams['font.sans-serif'] = ['Basic Sans', 'Arial', 'Helvetica', 'DejaVu Sans']
     return style
 
 def get_backgrounds_to_generate():
