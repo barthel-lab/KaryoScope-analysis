@@ -1083,8 +1083,13 @@ def load_color_files(colors_dir, database, featuresets):
     return featureset_colors, featureset_color_order
 
 
-def load_bed_data(sample_bed_paths, database, featuresets, smoothness, reads_needed):
+def load_bed_data(sample_bed_paths, database, featuresets, smoothness, reads_needed,
+                   raw_bed_files=None):
     """Load BED data for specified reads.
+
+    Tries pattern-based per-sample BED file lookup first. If no reads are found
+    and raw_bed_files is provided, falls back to reading those files directly
+    (useful for concatenated BED inputs).
 
     Returns:
         dict: read_data[read][featureset] = list of features
@@ -1110,29 +1115,43 @@ def load_bed_data(sample_bed_paths, database, featuresets, smoothness, reads_nee
                 else:
                     continue
 
-            open_func = gzip.open if bed_path.endswith(".gz") else open
-            mode = "rt" if bed_path.endswith(".gz") else "r"
+            _read_bed_file(bed_path, reads_needed, read_data, fs)
 
-            with open_func(bed_path, mode) as f:
-                for line in f:
-                    parts = line.strip().split()
-                    if len(parts) < 4:
-                        continue  # Skip malformed BED lines
-                    scaffold, start, stop, feature = parts[:4]
-                    try:
-                        start, stop = int(start), int(stop)
-                    except ValueError:
-                        continue  # Skip lines with non-integer coordinates
-
-                    if scaffold in reads_needed:
-                        read_data[scaffold][fs].append({
-                            'start': start,
-                            'stop': stop,
-                            'feature': feature
-                        })
+    # Fallback: if pattern-based lookup found nothing, read raw BED files directly
+    if not read_data and raw_bed_files:
+        print(f"  Pattern-based lookup found 0 reads, falling back to raw BED files...")
+        # Use first featureset as default for raw BED data
+        fs = featuresets[0] if featuresets else 'region'
+        for bed_path in raw_bed_files:
+            if os.path.exists(bed_path):
+                _read_bed_file(bed_path, reads_needed, read_data, fs)
 
     print(f"  Loaded data for {len(read_data)} reads")
     return read_data
+
+
+def _read_bed_file(bed_path, reads_needed, read_data, featureset):
+    """Read a single BED file and populate read_data for matching reads."""
+    open_func = gzip.open if bed_path.endswith(".gz") else open
+    mode = "rt" if bed_path.endswith(".gz") else "r"
+
+    with open_func(bed_path, mode) as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) < 4:
+                continue
+            scaffold, start, stop, feature = parts[:4]
+            try:
+                start, stop = int(start), int(stop)
+            except ValueError:
+                continue
+
+            if scaffold in reads_needed:
+                read_data[scaffold][featureset].append({
+                    'start': start,
+                    'stop': stop,
+                    'feature': feature
+                })
 
 
 def load_custom_bed_files(custom_bed_files, reads_needed, read_data=None):
@@ -5011,7 +5030,7 @@ def plot_structural_mode(args, matrix_data):
             rep = pick_cluster_rep(c_data, c_type)
 
             cluster_reps.append({
-                'read': rep['sequence'],
+                'sequence': rep['sequence'],
                 'cluster': cid,
                 'type': c_type,
                 'sample': rep['sample'] if 'sample' in rep else 'unknown',
@@ -5035,7 +5054,8 @@ def plot_structural_mode(args, matrix_data):
         canvas_width = panel_width + 2 * margin_x
 
         reads_needed = set(r['sequence'] for r in selected_reads)
-        read_bed_data = load_bed_data(sample_bed_paths, database, featuresets, args.smoothness, reads_needed)
+        read_bed_data = load_bed_data(sample_bed_paths, database, featuresets, args.smoothness, reads_needed,
+                                      raw_bed_files=args.bed_files)
 
         # Local clustering
         local_Z = None

@@ -267,7 +267,7 @@ def run_structure_mode(in_data, args, seq_feature_data, seq_length_dict,
             print(f"  Skipping {chrom} (only {n_reads} read)")
             for r in chrom_read_names:
                 all_cluster_assignments.append({
-                    'read': r, 'chromosome': chrom,
+                    'sequence': r, 'chromosome': chrom,
                     'cluster': f"{chrom}_Major", 'cluster_type': 'Major',
                     'norm_divergence': 0.0, 'raw_divergence': 0.0,
                     'enrichment': 'Major', 'sample': read_sample_map.get(r, 'unknown')
@@ -423,7 +423,7 @@ def run_structure_mode(in_data, args, seq_feature_data, seq_length_dict,
                 full_cluster_id += f"_{outlier_id_map[cid]}"
 
             all_cluster_assignments.append({
-                'read': r, 'chromosome': chrom,
+                'sequence': r, 'chromosome': chrom,
                 'cluster': full_cluster_id, 'cluster_type': c_type,
                 'norm_divergence': float(norm_divergences[i]),
                 'raw_divergence': float(raw_divergences[i]),
