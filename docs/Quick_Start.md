@@ -16,7 +16,7 @@ git clone https://github.com/barthel-lab/KaryoScope-analysis.git
 cd KaryoScope-analysis
 
 # Install dependencies
-pip install -r requirements.txt
+pip3 install -r requirements.txt
 ```
 
 ## Example Data
@@ -63,7 +63,7 @@ Merge subtelomeric and region features for each sample using `--telomere-satelli
 mkdir -p results/merged_bed
 
 for sample in HeLa U2OS IMR90; do
-  python scripts/KaryoScope_merge_beds.py \
+  python3 scripts/KaryoScope_merge_beds.py \
     --bed data/raw_bed/${sample}.telogator.1.KS_human_CHM13.subtelomeric.smoothed.features.bed.gz \
          data/raw_bed/${sample}.telogator.1.KS_human_CHM13.region.smoothed.features.bed.gz \
     --output results/merged_bed/${sample}.region_subtelomere_flat.merged.bed.gz \
@@ -91,7 +91,7 @@ done
 
 ## Step 2: Create Sample Metadata
 
-The sample metadata file (`data/samples.tsv`) defines sample groups and colors for visualization. It is included with the example data:
+The sample metadata file (`results/samples.tsv`) defines sample groups and colors for visualization. It is included with the example data:
 
 ```
 sample	group	color
@@ -107,12 +107,12 @@ IMR90	Primary	#60A5FA
 Run hierarchical clustering with block-weighted normalization and automatic k-selection:
 
 ```bash
-python scripts/KaryoScope_cluster_analysis.py \
+python3 scripts/KaryoScope_cluster_analysis.py \
   --bed results/merged_bed/HeLa.region_subtelomere_flat.merged.bed.gz \
        results/merged_bed/U2OS.region_subtelomere_flat.merged.bed.gz \
        results/merged_bed/IMR90.region_subtelomere_flat.merged.bed.gz \
   --output-prefix results/Core3 \
-  --sample-metadata data/samples.tsv \
+  --sample-metadata results/samples.tsv \
   --comparison-mode per-sample \
   --matrix-type count_log1p_zscore_blockweight \
   --k-selection cosine-silhouette \
@@ -151,7 +151,7 @@ Compute per-read feature metrics from all featureset BED files. This step analyz
 
 ```bash
 for sample in HeLa U2OS IMR90; do
-  python scripts/KaryoScope_sequence_annotate.py \
+  python3 scripts/KaryoScope_sequence_annotate.py \
     --bed data/raw_bed/${sample}.telogator.1.KS_human_CHM13.acrocentric.smoothed.features.bed.gz \
          data/raw_bed/${sample}.telogator.1.KS_human_CHM13.chromosome.smoothed.features.bed.gz \
          data/raw_bed/${sample}.telogator.1.KS_human_CHM13.gene.smoothed.features.bed.gz \
@@ -184,7 +184,7 @@ First, combine per-sample sequence annotations into a single file, then annotate
 
 ```bash
 # Combine per-sample annotations
-python scripts/KaryoScope_cluster_annotate.py \
+python3 scripts/KaryoScope_cluster_annotate.py \
   --prefix results/Core3 \
   --sequence-annotations results/Core3.combined_annotations.tsv \
   --output results/Core3.cluster_annotations.tsv \
@@ -211,7 +211,7 @@ python scripts/KaryoScope_cluster_annotate.py \
 Generate a publication-quality cluster visualization showing representative reads per cluster organized by the hierarchical clustering dendrogram:
 
 ```bash
-python scripts/KaryoScope_cluster_plot.py \
+python3 scripts/KaryoScope_cluster_plot.py \
   --cluster-analysis-prefix results/Core3 \
   --bed results/merged_bed/HeLa.region_subtelomere_flat.merged.bed.gz \
        results/merged_bed/U2OS.region_subtelomere_flat.merged.bed.gz \
