@@ -100,6 +100,12 @@ U2OS	ALT	#FBBF24
 IMR90	Primary	#60A5FA
 ```
 
+To create this file with proper tab delimiters, run:
+
+```bash
+printf 'sample\tgroup\tcolor\nHeLa\tTelomerase\t#F07167\nU2OS\tALT\t#FBBF24\nIMR90\tPrimary\t#60A5FA\n' > results/samples.tsv
+```
+
 ---
 
 ## Step 3: Run Clustering Analysis
