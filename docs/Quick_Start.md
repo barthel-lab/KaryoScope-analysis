@@ -223,7 +223,7 @@ python3 scripts/KaryoScope_cluster_plot.py \
        results/merged_bed/U2OS.region_subtelomere_flat.merged.bed.gz \
        results/merged_bed/IMR90.region_subtelomere_flat.merged.bed.gz \
   --colors data/colors/KS_human_CHM13 \
-  --cluster-labels results/Core3.cluster_annotations.tsv \
+  --database KS_human_CHM13 \
   --output results/Core3.cluster_plot.svg \
   --featuresets region_subtelomere_flat \
   --background both \
@@ -242,6 +242,7 @@ python3 scripts/KaryoScope_cluster_plot.py \
 
 | Parameter | Value | Description |
 |-----------|-------|-------------|
+| `--database` | `KS_human_CHM13` | Database name for color file lookup |
 | `--vertical` | — | Vertical layout (reads as columns) |
 | `--orient-telomere-top` | — | Place telomere end at top of each read |
 | `--n-per-cluster` | `1` | Show 1 representative read per cluster |
