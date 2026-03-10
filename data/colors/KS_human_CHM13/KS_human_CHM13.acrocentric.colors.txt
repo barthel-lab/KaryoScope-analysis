@@ -1,0 +1,9 @@
+feature	color
+acrocentric_multigroup1	#B0C4DE
+array_multigroup1	#FF0000
+DJ_specific	#FFA500
+PJ_specific	#FFFF00
+rDNA_specific	#964B00
+SST1_specific	#00FF00
+PHR_specific	#0000FF
+nonacrocentric_specific	#808080

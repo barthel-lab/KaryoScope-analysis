@@ -1,0 +1,6 @@
+FIRE	#FF4500
+FIRE_none	#333333
+FIRE_low	#7a2200
+FIRE_medium	#cc3600
+FIRE_high	#FF4500
+unannotated	#333333

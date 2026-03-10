@@ -1,0 +1,9 @@
+5mC	#9932CC
+5mC_none	#333333
+5mC_low	#4a1a60
+5mC_medium	#731d99
+5mC_high	#9932CC
+unannotated	#333333
+no_data	#666666
+5mC+no_data	#666666
+5mC+LINKER+no_data	#666666

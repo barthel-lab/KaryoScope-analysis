@@ -1,0 +1,4 @@
+feature	color
+exon_specific	#090088
+intron_specific	#198450
+intergenic_specific	#E89EB8

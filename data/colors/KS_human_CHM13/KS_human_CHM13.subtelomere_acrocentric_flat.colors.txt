@@ -1,0 +1,25 @@
+feature	color
+# Top-priority subtelomeric
+canonical_telomere	#008000
+noncanonical_telomere	#00FFFF
+# Composite (acrocentric x subtelomeric boundary)
+DJ_TAR1	#FF6B35
+DJ_ITS	#FFB347
+PHR_TAR1	#9B30FF
+PHR_ITS	#4169E1
+rDNA_TAR1	#C71585
+# Subtelomeric
+TAR1	#FF00FF
+ITS	#FFFF00
+telomere_like_multigroup1	#FFA500
+# Acrocentric
+DJ	#FFA500
+PHR	#0000FF
+rDNA	#964B00
+SST1	#00FF00
+PJ	#FFD700
+array_multigroup1	#FF0000
+acrocentric_multigroup1	#B0C4DE
+# Background
+nonacrocentric	#808080
+novel	#ffffff

@@ -1,0 +1,6 @@
+FIRE	#FF4500
+LINKER	#32CD32
+unannotated	#333333
+no_data	#666666
+LINKER+no_data	#666666
+FIRE+no_data	#666666

@@ -1,0 +1,6 @@
+LINKER	#32CD32
+LINKER_none	#333333
+LINKER_low	#1a6a1a
+LINKER_medium	#28a028
+LINKER_high	#32CD32
+unannotated	#333333

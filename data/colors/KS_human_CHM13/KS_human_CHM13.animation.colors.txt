@@ -1,0 +1,31 @@
+feature	color
+# Telomere features - CHANGED to avoid overlap with satellites
+# canonical_telomere was #008000, overlaps with hsat1B greens
+# noncanonical_telomere was #0000FF, overlaps with hsat3 blue
+canonical_telomere	#40D392
+noncanonical_telomere	#10B981
+ITS	#FFFF00
+TAR1	#FF00FF
+# Satellite/Region features - UNCHANGED from KaryoScope-NHA
+active	#fa0000
+inactive	#ff9200
+divergent	#990000
+monomeric	#ffcc99
+hsat1A	#91ff00
+hsat1B	#00994d
+hsat2	#0081fa
+hsat3	#0000fa
+bsat	#fa99ff
+gsat	#ac33c7
+censat	#00cccc
+ct	#B8AFA2
+centromeric_multigroup1	#B0C4DE
+asat_multigroup1	#fa0000
+hor_multigroup1	#fa0000
+hsat_multigroup1	#B0C4DE
+hsat1_multigroup1	#B0C4DE
+arm_multigroup1	#808080
+p_arm	#808080
+q_arm	#808080
+noncentromeric	#964B00
+novel	#ffffff

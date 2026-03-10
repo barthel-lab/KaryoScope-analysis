@@ -1,0 +1,35 @@
+feature	color
+# Telomere features - greens
+canonical_telomere	#40D392
+noncanonical_telomere	#10B981
+# ITS and TAR1 - distinct yellows/oranges
+ITS	#FBBF24
+TAR1	#F07167
+# Active centromere satellites - reds/corals
+active	#E11D48
+inactive	#FB923C
+divergent	#7C2D12
+monomeric	#FED7AA
+# HSat satellites - blues
+hsat1A	#22D3EE
+hsat1B	#06B6D4
+hsat2	#3B82F6
+hsat3	#6366F1
+# Other satellites
+bsat	#E879F9
+gsat	#A855F7
+censat	#14B8A6
+ct	#94A3B8
+# Multigroup features - muted tones
+centromeric_multigroup1	#CBD5E1
+asat_multigroup1	#DC2626
+hor_multigroup1	#B91C1C
+hsat_multigroup1	#A5B4FC
+hsat1_multigroup1	#818CF8
+arm_multigroup1	#6B7280
+# Chromosome arms
+p_arm	#9CA3AF
+q_arm	#4B5563
+# Other
+noncentromeric	#78716C
+novel	#525252

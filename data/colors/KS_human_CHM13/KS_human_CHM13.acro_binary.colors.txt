@@ -1,0 +1,5 @@
+feature	color
+acrocentric	#F07167
+non_acrocentric	#60A5FA
+novel	#444444
+categorized	#B0C4DE

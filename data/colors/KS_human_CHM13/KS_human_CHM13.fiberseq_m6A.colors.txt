@@ -1,0 +1,9 @@
+m6A	#00CED1
+m6A_none	#333333
+m6A_low	#1a5a5a
+m6A_medium	#00999a
+m6A_high	#00CED1
+unannotated	#333333
+no_data	#666666
+m6A+no_data	#666666
+LINKER+m6A+no_data	#666666
