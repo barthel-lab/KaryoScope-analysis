@@ -336,10 +336,7 @@ def draw_feature_bar(d, bed_entries, x_start, y_center, bar_height,
 
     ratio = bar_width / max_bp if max_bp > 0 else 1.0
 
-    # Draw background
-    d.append(draw.Rectangle(x_start, y_center - bar_height / 2,
-                            bar_width, bar_height,
-                            fill='#E8E8E8', fill_opacity=0.3))
+    # No background — bars drawn directly on white canvas
 
     # Find the min start to normalize positions
     min_start = min(e['start'] for e in bed_entries)
@@ -698,15 +695,7 @@ def main():
     for ci, chrom in enumerate(CHROM_ORDER):
         chrom_color_map[chrom] = CHROM_BAND_COLORS[ci % len(CHROM_BAND_COLORS)]
 
-    band_x = margin_left + dendro_width
-    band_width = label_width + bar_panel_width + margin_right
-    if not is_dark:
-        for i, seq in enumerate(ordered_seqs):
-            chrom = seq_to_chrom[seq]
-            yc = row_y_centers[i]
-            band_color = chrom_color_map.get(chrom, '#F5F5F5')
-            d.append(draw.Rectangle(band_x, yc - row_height / 2, band_width,
-                                    row_height, fill=band_color, fill_opacity=0.4))
+    # (Chromosome bands removed for pure white background)
 
     # ── Labels between dendrogram and bars ─────────────────────────────────
     label_x = margin_left + dendro_width + 4
