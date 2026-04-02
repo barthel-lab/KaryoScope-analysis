@@ -103,6 +103,11 @@ def parse_args():
                    help="Minimum silhouette score at k=2 to allow splitting a chromosome. "
                         "Chromosomes below this threshold are set to k=1 (all Major). "
                         "Stage 2 centroid scan still applies. (default: 0.0, no filtering)")
+    p.add_argument("--annotations", dest="annotations", default=None,
+                   help="TSV file from KS_allchr_annotate.py to add structural "
+                        "annotations at the end of outlier bars")
+    p.add_argument("--hide-subtle", dest="hide_subtle", action="store_true",
+                   help="Hide annotations for 'edge pattern difference' outliers")
     p.add_argument("--background", default="white",
                    choices=["white", "black"],
                    help="Background color (default: white)")
@@ -546,6 +551,28 @@ def main():
         reps_df = select_representatives(asgn)
         print(f"Selected {len(reps_df)} cluster representatives")
 
+    # ── Filter out subtle outliers if --hide-subtle + --annotations ─────
+    if args.hide_subtle and args.annotations:
+        annot_df = pd.read_csv(args.annotations, sep='\t')
+        subtle_keys = set()
+        for _, row in annot_df.iterrows():
+            if row['structural_difference'] == 'edge pattern difference':
+                subtle_keys.add((row['chrom'], row['sample']))
+
+        before = len(reps_df)
+        def is_subtle(row):
+            if row['cluster_type'] == 'Major':
+                return False
+            sample = row['sample']
+            if sample == 'pangenome' and '#' in row['sequence']:
+                sample = row['sequence'].split('#')[0]
+            return (row['chromosome'], sample) in subtle_keys
+
+        reps_df = reps_df[~reps_df.apply(is_subtle, axis=1)]
+        removed = before - len(reps_df)
+        if removed:
+            print(f"  Filtered {removed} subtle outliers (--hide-subtle)")
+
     # Sort by chromosome order, then Major first, then by divergence
     chrom_rank = {c: i for i, c in enumerate(CHROM_ORDER)}
     reps_df['_chrom_rank'] = reps_df['chromosome'].map(chrom_rank).fillna(99)
@@ -673,7 +700,8 @@ def main():
         y += row_height / 2
 
     total_height = y + margin_bottom
-    total_width = margin_left + dendro_width + label_width + bar_panel_width + margin_right
+    annot_width = 500 if args.annotations else 0
+    total_width = margin_left + dendro_width + label_width + bar_panel_width + annot_width + margin_right
 
     print(f"\n  Canvas: {total_width} x {total_height} px")
     print(f"  Rows: {n_rows}, row height: {row_height}px, bar height: {bar_height}px")
@@ -739,7 +767,84 @@ def main():
         dot_color = '#FF4444' if ctype == 'Outlier' else '#888888'
         d.append(draw.Circle(bars_x - 6, yc, 2.5, fill=dot_color))
 
-    # (Labels are now drawn between dendrogram and bars above)
+    # ── Structural annotations (right of bars) ─────────────────────────────
+    if args.annotations:
+        annot_df = pd.read_csv(args.annotations, sep='\t')
+        annot_map = {}
+        for _, row in annot_df.iterrows():
+            annot_map[(row['chrom'], row['sample'])] = row['structural_difference']
+
+        # Shorten descriptions for display
+        def shorten(desc):
+            """Convert verbose descriptions to compact labels."""
+            parts = [p.strip() for p in desc.split(';')]
+            short = []
+            for p in parts:
+                p = p.replace('_specific', '').replace('_multigroup1', '')
+                p = p.replace('rearranged: ', '').replace(' swapped positions', ' swap')
+                p = p.replace('lost ', '-').replace('gained ', '+')
+                p = p.replace(' block', '')
+                p = p.replace('inverted block order', 'inverted')
+                p = p.replace('different block arrangement', 'rearranged')
+                p = p.replace('edge pattern difference', 'edge diff')
+                p = p.replace(' and ', '/')
+                p = p.replace('transitions: ', 'trans ')
+                # Shorten abundance: "hor down (20% to 3%)" -> "hor 20->3%"
+                import re as _re
+                m = _re.match(r'(\w+) (?:up|down) \((\d+)% to (\d+)%\)', p)
+                if m:
+                    p = f"{m.group(1)} {m.group(2)}->{m.group(3)}%"
+                m = _re.match(r'no (\w+) \((\d+)% to 0%\)', p)
+                if m:
+                    p = f"-{m.group(1)}"
+                m = _re.match(r'(\w+) \(0% to (\d+)%\)', p)
+                if m:
+                    p = f"+{m.group(1)}"
+                short.append(p)
+            return '  '.join(short)
+
+        # Color by change type
+        def annot_color(desc):
+            if 'lost' in desc or 'no ' in desc or '-' in desc:
+                return '#CC2222'  # red for deletions
+            if 'gained' in desc or '+' in desc:
+                return '#22AA22'  # green for gains
+            if 'rearranged' in desc or 'swap' in desc or 'inverted' in desc:
+                return '#8833CC'  # purple for rearrangements
+            return '#666666'  # gray for subtle
+
+        bar_ratio = bar_panel_width / max_bp if max_bp > 0 else 1.0
+
+        for i, seq in enumerate(ordered_seqs):
+            ctype = seq_to_type.get(seq, 'Major')
+            if ctype != 'Outlier':
+                continue
+            chrom = seq_to_chrom[seq]
+            sample = seq_to_sample.get(seq, 'unknown')
+            if sample == 'pangenome' and '#' in seq:
+                sample = seq.split('#')[0]
+
+            desc = annot_map.get((chrom, sample), '')
+            if not desc:
+                continue
+            if args.hide_subtle and desc == 'edge pattern difference':
+                continue
+
+            yc = row_y_centers[i]
+
+            # Compute actual bar end position
+            entries = seq_bed_data.get(seq, [])
+            if entries:
+                min_s = min(e['start'] for e in entries)
+                max_e = max(e['stop'] for e in entries)
+                bar_end_x = bars_x + (max_e - min_s) * bar_ratio
+            else:
+                bar_end_x = bars_x
+
+            short_desc = shorten(desc)
+            color = annot_color(desc)
+            d.append(draw.Text(short_desc, 9, bar_end_x + 6, yc + 3,
+                               fill=color, font_family='sans-serif'))
 
     # ── Scale bar ─────────────────────────────────────────────────────────
     scale_y = total_height - margin_bottom + 20
