@@ -91,6 +91,8 @@ def parse_args():
                    help="Also export PNG (requires rsvg-convert)")
     p.add_argument("--all-haplotypes", dest="all_haplotypes", action="store_true",
                    help="Show ALL haplotypes instead of one representative per cluster")
+    p.add_argument("--dendro-order", dest="dendro_order", action="store_true",
+                   help="Use raw dendrogram leaf order instead of chr1→chrX ordering")
     p.add_argument("--background", default="white",
                    choices=["white", "black"],
                    help="Background color (default: white)")
@@ -457,14 +459,25 @@ def main():
     print(f"  Linkage computed ({args.linkage_method})")
 
     # ── Compute max bp for bar scaling ────────────────────────────────────
-    max_bp = 0
+    # Use 95th percentile to avoid letting huge arm-spanning outliers
+    # compress all normal centromere bars into slivers.
+    all_spans = []
     for seq in seq_names:
         entries = seq_bed_data.get(seq, [])
         if entries:
             min_s = min(e['start'] for e in entries)
             max_e = max(e['stop'] for e in entries)
-            max_bp = max(max_bp, max_e - min_s)
-    print(f"  Max centromere span: {max_bp:,} bp")
+            all_spans.append(max_e - min_s)
+    if all_spans:
+        max_bp = int(np.percentile(all_spans, 95))
+        abs_max = max(all_spans)
+        print(f"  Centromere spans: median {int(np.median(all_spans))/1e6:.1f} Mb, "
+              f"95th pct {max_bp/1e6:.1f} Mb, max {abs_max/1e6:.1f} Mb")
+        if abs_max > max_bp * 3:
+            print(f"  Warning: {sum(1 for s in all_spans if s > max_bp)} haplotypes "
+                  f"exceed 95th pct — bars will be clipped")
+    else:
+        max_bp = 10_000_000
 
     # ── Load colors ───────────────────────────────────────────────────────
     color_map = load_colors(args.colors, args.featureset)
@@ -488,9 +501,32 @@ def main():
     margin_left = 20
     margin_right = 30
 
-    # Compute y-positions with chromosome gaps
-    # Reorder reps_df by dendrogram leaf order
-    ordered_indices = leaf_order.tolist()
+    # ── Leaf ordering ────────────────────────────────────────────────────
+    raw_leaf_order = leaf_order.tolist()
+
+    if args.dendro_order:
+        # Use raw dendrogram leaf order (clusters by composition similarity)
+        ordered_indices = raw_leaf_order
+        print("  Leaf order: raw dendrogram")
+    else:
+        # Constrained: chr1→chrX with within-chrom dendrogram ordering
+        from collections import OrderedDict
+        chrom_leaves = OrderedDict()
+        seq_to_chrom_tmp = dict(zip(reps_df['sequence'], reps_df['chromosome']))
+        for pos, orig_idx in enumerate(raw_leaf_order):
+            seq = seq_names[orig_idx]
+            chrom = seq_to_chrom_tmp[seq]
+            chrom_leaves.setdefault(chrom, []).append(orig_idx)
+
+        ordered_indices = []
+        for chrom in CHROM_ORDER:
+            if chrom in chrom_leaves:
+                ordered_indices.extend(chrom_leaves[chrom])
+        for chrom, indices in chrom_leaves.items():
+            if chrom not in CHROM_ORDER:
+                ordered_indices.extend(indices)
+        print("  Leaf order: chr1→chrX (constrained)")
+
     ordered_seqs = [seq_names[i] for i in ordered_indices]
 
     # Build seq -> chrom lookup
@@ -541,26 +577,29 @@ def main():
             d.append(draw.Rectangle(band_x, yc - row_height / 2, band_width,
                                     row_height, fill=band_color, fill_opacity=0.4))
 
-    # ── Chromosome labels (at contiguous run boundaries) ─────────────────
-    label_x = margin_left + dendro_width + 5
-    # Find contiguous runs of same chromosome in leaf order
-    chrom_runs = []  # [(chrom, y_start, y_end), ...]
-    run_start = 0
-    for i in range(1, len(ordered_seqs) + 1):
-        if i == len(ordered_seqs) or seq_to_chrom[ordered_seqs[i]] != seq_to_chrom[ordered_seqs[run_start]]:
-            chrom = seq_to_chrom[ordered_seqs[run_start]]
-            ys = row_y_centers[run_start] - row_height / 2
-            ye = row_y_centers[i - 1] + row_height / 2
-            chrom_runs.append((chrom, ys, ye, i - run_start))
-            run_start = i
+    # ── Labels between dendrogram and bars ─────────────────────────────────
+    label_x = margin_left + dendro_width + 4
 
-    # Only label runs with >= 2 rows (to avoid clutter from isolated outliers)
-    for chrom, ys, ye, count in chrom_runs:
-        if count >= 2:
-            mid_y = (ys + ye) / 2
-            d.append(draw.Text(chrom, 9, label_x, mid_y + 3,
-                               fill=text_color, font_weight='bold',
-                               font_family='sans-serif'))
+    # Chromosome label for each row (between dendrogram and bars)
+    # Format: "chrN Major n=X" or "chrN [sample] n=X"
+    # where n is the cluster size (so all n values per chrom sum to total haplotypes)
+    for i, seq in enumerate(ordered_seqs):
+        yc = row_y_centers[i]
+        chrom = seq_to_chrom[seq]
+        ctype = seq_to_type.get(seq, 'Major')
+        sample = seq_to_sample.get(seq, 'unknown')
+        if sample == 'pangenome' and '#' in seq:
+            sample = seq.split('#')[0]
+        size = int(seq_to_size.get(seq, 1))
+
+        if ctype == 'Major':
+            label = f"{chrom} Major n={size}"
+            d.append(draw.Text(label, 8, label_x, yc + 3,
+                               fill='#888888', font_family='sans-serif'))
+        else:
+            label = f"{chrom} [{sample}] n={size}"
+            d.append(draw.Text(label, 7, label_x, yc + 3,
+                               fill='#FF4444', font_family='monospace'))
 
     # ── Draw dendrogram ──────────────────────────────────────────────────
     draw_dendrogram_panel(d, Z, leaf_order, row_y_centers,
@@ -580,22 +619,7 @@ def main():
         dot_color = '#FF4444' if ctype == 'Outlier' else '#888888'
         d.append(draw.Circle(bars_x - 6, yc, 2.5, fill=dot_color))
 
-    # ── Hover-style labels for outliers (right side) ─────────────────────
-    if not args.all_haplotypes:
-        for i, seq in enumerate(ordered_seqs):
-            ctype = seq_to_type.get(seq, 'Major')
-            if ctype == 'Outlier':
-                yc = row_y_centers[i]
-                sample = seq_to_sample.get(seq, 'unknown')
-                if sample == 'pangenome' and '#' in seq:
-                    sample = seq.split('#')[0]
-                cluster = seq_to_cluster.get(seq, '')
-                chrom = seq_to_chrom.get(seq, '')
-                clean_cid = cluster.replace(f"{chrom}_", "")
-                size = seq_to_size.get(seq, 1)
-                label = f"[{sample}] {clean_cid} (n={size})"
-                d.append(draw.Text(label, 7, bars_x + bar_panel_width + 4, yc + 3,
-                                   fill='#FF4444', font_family='monospace'))
+    # (Labels are now drawn between dendrogram and bars above)
 
     # ── Scale bar ─────────────────────────────────────────────────────────
     scale_y = total_height - margin_bottom + 20

@@ -44,7 +44,7 @@ These options must be present in every call to KaryoScope_cluster_analysis.py:
   --analysis-mode structure
   --edges directional
   --no-abundance
-  --max-sequence-length 500000000
+  --max-sequence-length 50000000
   --exclude-features "novel"
 
 Matrix type (choose one — all three share the log1p base transform):
@@ -117,11 +117,25 @@ validation, do NOT switch to z-score variants — they cannot detect chr5.
 See screenshot: screenshor4claude/screenshot1.png
 
 1. Bar height too small — target: at least 8px per haplotype row
+   Status: FIXED (--row-height 12, --bar-height 10)
 2. Unexplained gap between dendrogram and bar panel — must be zero gap;
    both panels should share the same y-axis with no whitespace between them
+   Status: FIXED (dendrogram tips flush with bars)
 3. Tangled dendrogram — likely caused by per-chromosome distance calculation
    being reused without recalculation. Recalculate distance globally across
    all chromosomes before drawing the all-chromosome dendrogram.
+   Status: FIXED (global distance matrix recomputed)
+4. Chromosome labels should appear BETWEEN the dendrogram and the bar panel,
+   not at the right end of the bars.
+   Status: FIXED (labels in column between dendrogram and bars)
+5. Chromosomes should be ordered chr1 → chrX in the dendrogram. Use a
+   constrained ordering that groups chromosomes sequentially (chr1, chr2, …).
+   It is acceptable if a few outliers slightly break the order.
+   Status: FIXED (default: chr1→chrX; use --dendro-order for raw tree order)
+6. Labels must show cluster size: "chrN Major n=X" or "chrN [sample] n=X".
+   The representative is 1 of n haplotypes in that cluster.
+   All n values for a chromosome must sum to the total haplotype count.
+   Status: FIXED
 
 # Behaviour rules
 
