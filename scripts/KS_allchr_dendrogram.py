@@ -93,6 +93,12 @@ def parse_args():
                    help="Show ALL haplotypes instead of one representative per cluster")
     p.add_argument("--dendro-order", dest="dendro_order", action="store_true",
                    help="Use raw dendrogram leaf order instead of chr1→chrX ordering")
+    p.add_argument("--centroid-scan", dest="centroid_scan",
+                   action=argparse.BooleanOptionalAction, default=True,
+                   help="Stage 2: scan Major clusters for high-divergence outliers "
+                        "missed by clustering (default: on)")
+    p.add_argument("--centroid-sd", dest="centroid_sd", type=float, default=3.0,
+                   help="SD threshold for centroid scan outlier detection (default: 3.0)")
     p.add_argument("--background", default="white",
                    choices=["white", "black"],
                    help="Background color (default: white)")
@@ -408,6 +414,73 @@ def main():
     asgn = asgn[~asgn['chromosome'].isin(EXCLUDED_CHROMS)]
     print(f"Loaded {len(asgn)} haplotypes across "
           f"{asgn['chromosome'].nunique()} chromosomes (after exclusion)")
+
+    # ── Stage 2: centroid scan for missed outliers in Major clusters ─────
+    if args.centroid_scan:
+        print(f"\nStage 2: centroid scan (threshold={args.centroid_sd} SD)...")
+        # Need BED features for Major members to build per-chrom matrices
+        major_seqs_all = set(asgn[asgn['cluster_type'] == 'Major']['sequence'])
+        major_feature_data, _, _ = load_bed_features(
+            args.bed, major_seqs_all, args.exclude_features)
+
+        stage2_total = 0
+        for chrom in CHROM_ORDER:
+            chrom_df = asgn[asgn['chromosome'] == chrom]
+            major_df = chrom_df[chrom_df['cluster_type'] == 'Major']
+            major_seqs = [s for s in major_df['sequence'] if s in major_feature_data]
+
+            if len(major_seqs) < 5:
+                continue
+
+            # Build per-chromosome edge matrix for Major members
+            chrom_feats = sorted(set(
+                f for s in major_seqs for f, _ in major_feature_data.get(s, [])))
+            if not chrom_feats:
+                continue
+
+            chrom_matrix, _ = build_global_matrix(
+                major_seqs, major_feature_data, chrom_feats,
+                args.edge_mode, args.matrix_type)
+
+            centroid = chrom_matrix.mean(axis=0)
+            distances = np.linalg.norm(chrom_matrix - centroid, axis=1)
+            mean_d, std_d = distances.mean(), distances.std()
+
+            if std_d == 0:
+                continue
+
+            cutoff = mean_d + args.centroid_sd * std_d
+            flagged = []
+            for i, seq in enumerate(major_seqs):
+                if distances[i] > cutoff:
+                    sd_val = (distances[i] - mean_d) / std_d
+                    flagged.append((seq, distances[i], sd_val))
+
+            if flagged:
+                flagged.sort(key=lambda x: -x[1])
+                stage2_total += len(flagged)
+                print(f"  {chrom}: {len(flagged)} rescued from Major "
+                      f"(n={len(major_seqs)})")
+                for seq, dist, sd in flagged:
+                    sample = seq.split('#')[0] if '#' in seq else seq
+                    print(f"    {sample} ({sd:.1f} SD)")
+
+                    # Reclassify in asgn: create new outlier cluster
+                    existing_outliers = chrom_df[
+                        chrom_df['cluster_type'] != 'Major']['cluster'].unique()
+                    next_outlier_num = len(existing_outliers) + 1
+                    # Check if we already added stage2 outliers for this chrom
+                    stage2_mask = asgn['cluster'].str.contains(
+                        f'{chrom}_Outlier_S2_', na=False)
+                    n_existing_s2 = asgn[stage2_mask]['cluster'].nunique()
+                    new_cluster = f"{chrom}_Outlier_S2_{n_existing_s2 + 1}"
+
+                    mask = asgn['sequence'] == seq
+                    asgn.loc[mask, 'cluster'] = new_cluster
+                    asgn.loc[mask, 'cluster_type'] = 'Outlier'
+                    asgn.loc[mask, 'enrichment'] = 'Outlier'
+
+        print(f"  Stage 2 total: {stage2_total} outliers rescued")
 
     # ── Select representatives ────────────────────────────────────────────
     if args.all_haplotypes:
