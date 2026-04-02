@@ -99,6 +99,10 @@ def parse_args():
                         "missed by clustering (default: on)")
     p.add_argument("--centroid-sd", dest="centroid_sd", type=float, default=3.0,
                    help="SD threshold for centroid scan outlier detection (default: 3.0)")
+    p.add_argument("--sil-threshold", dest="sil_threshold", type=float, default=0.0,
+                   help="Minimum silhouette score at k=2 to allow splitting a chromosome. "
+                        "Chromosomes below this threshold are set to k=1 (all Major). "
+                        "Stage 2 centroid scan still applies. (default: 0.0, no filtering)")
     p.add_argument("--background", default="white",
                    choices=["white", "black"],
                    help="Background color (default: white)")
@@ -414,6 +418,60 @@ def main():
     asgn = asgn[~asgn['chromosome'].isin(EXCLUDED_CHROMS)]
     print(f"Loaded {len(asgn)} haplotypes across "
           f"{asgn['chromosome'].nunique()} chromosomes (after exclusion)")
+
+    # ── Silhouette threshold: collapse weak splits to k=1 ────────────────
+    if args.sil_threshold > 0:
+        print(f"\nSilhouette threshold filter (min={args.sil_threshold})...")
+        # Load BED features for all haplotypes to compute per-chrom silhouette
+        all_seqs_set = set(asgn['sequence'])
+        all_feat_data, _, _ = load_bed_features(
+            args.bed, all_seqs_set, args.exclude_features)
+
+        collapsed = 0
+        for chrom in CHROM_ORDER:
+            chrom_df = asgn[asgn['chromosome'] == chrom]
+            if chrom_df['cluster'].nunique() <= 1:
+                continue
+
+            chrom_seqs = [s for s in sorted(chrom_df['sequence']) if s in all_feat_data]
+            if len(chrom_seqs) < 5:
+                continue
+
+            # Build matrix and compute silhouette at k=2
+            chrom_feats = sorted(set(
+                f for s in chrom_seqs for f, _ in all_feat_data.get(s, [])))
+            if not chrom_feats:
+                continue
+
+            chrom_matrix, _ = build_global_matrix(
+                chrom_seqs, all_feat_data, chrom_feats,
+                args.edge_mode, args.matrix_type)
+
+            from scipy.cluster.hierarchy import linkage as _linkage, fcluster as _fcluster
+            from sklearn.metrics import silhouette_score as _sil_score
+            _dist = pdist(chrom_matrix, metric='euclidean')
+            _Z = _linkage(_dist, method='ward')
+            _labels = _fcluster(_Z, 2, criterion='maxclust')
+            if len(set(_labels)) >= 2:
+                sil = _sil_score(chrom_matrix, _labels)
+            else:
+                sil = 0.0
+
+            if sil < args.sil_threshold:
+                # Collapse: set all to Major
+                n_outlier = (chrom_df['cluster_type'] != 'Major').sum()
+                major_cluster = f"{chrom}_Major"
+                mask = asgn['chromosome'] == chrom
+                asgn.loc[mask, 'cluster'] = major_cluster
+                asgn.loc[mask, 'cluster_type'] = 'Major'
+                asgn.loc[mask, 'enrichment'] = 'Major'
+                collapsed += 1
+                print(f"  {chrom}: sil={sil:.3f} < {args.sil_threshold} -> "
+                      f"collapsed {n_outlier} outliers to Major")
+            else:
+                print(f"  {chrom}: sil={sil:.3f} >= {args.sil_threshold} -> kept")
+
+        print(f"  Collapsed {collapsed} chromosomes to k=1")
 
     # ── Stage 2: centroid scan for missed outliers in Major clusters ─────
     if args.centroid_scan:
