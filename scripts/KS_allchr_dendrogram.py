@@ -50,6 +50,29 @@ CHROM_BAND_COLORS = [
     '#FAFFF0', '#F0FAFF', '#FFF5F5', '#F5FFF0'
 ]
 
+# Distinct colors for chromosome identity blocks (maximally separated hues,
+# ordered so adjacent chromosomes in CHROM_ORDER get dissimilar colors)
+CHROM_BLOCK_COLORS = [
+    '#E63946',  # chr1  red
+    '#2A9D8F',  # chr2  teal
+    '#E9C46A',  # chr3  gold
+    '#264653',  # chr4  dark teal
+    '#F4A261',  # chr5  orange
+    '#6A4C93',  # chr6  purple
+    '#1982C4',  # chr7  blue
+    '#8AC926',  # chr8  lime
+    '#FF595E',  # chr9  coral
+    '#457B9D',  # chr10 steel blue
+    '#F72585',  # chr11 magenta
+    '#4CC9F0',  # chr12 sky blue
+    '#B5179E',  # chr16 deep magenta
+    '#90BE6D',  # chr17 sage green
+    '#F9844A',  # chr18 tangerine
+    '#577590',  # chr19 slate
+    '#43AA8B',  # chr20 mint
+    '#9B5DE5',  # chrX  violet
+]
+
 # ─── Argument parsing ─────────────────────────────────────────────────────────
 
 def parse_args():
@@ -651,6 +674,7 @@ def main():
     bar_panel_width = args.bar_panel_width
     chrom_gap = args.chrom_gap
     label_width = 120  # chromosome labels
+    chrom_block_width = 14  # colored chromosome identity block
     margin_top = 60
     margin_bottom = 220  # legend space
     margin_left = 20
@@ -701,7 +725,7 @@ def main():
 
     total_height = y + margin_bottom
     annot_width = 500 if args.annotations else 0
-    total_width = margin_left + dendro_width + label_width + bar_panel_width + annot_width + margin_right
+    total_width = margin_left + dendro_width + label_width + chrom_block_width + bar_panel_width + annot_width + margin_right
 
     print(f"\n  Canvas: {total_width} x {total_height} px")
     print(f"  Rows: {n_rows}, row height: {row_height}px, bar height: {bar_height}px")
@@ -754,10 +778,26 @@ def main():
                           x_base=margin_left, width=dendro_width,
                           line_color=line_color)
 
-    # ── Draw feature bars ────────────────────────────────────────────────
-    bars_x = margin_left + dendro_width + label_width
+    # ── Draw chromosome identity blocks + feature bars ─────────────────
+    block_x = margin_left + dendro_width + label_width
+    bars_x = block_x + chrom_block_width
+
+    # Build chromosome -> block color mapping
+    chrom_block_map = {}
+    for ci, chrom in enumerate(CHROM_ORDER):
+        chrom_block_map[chrom] = CHROM_BLOCK_COLORS[ci % len(CHROM_BLOCK_COLORS)]
+
     for i, seq in enumerate(ordered_seqs):
         yc = row_y_centers[i]
+        chrom = seq_to_chrom[seq]
+
+        # Chromosome identity block
+        block_color = chrom_block_map.get(chrom, '#CCCCCC')
+        d.append(draw.Rectangle(block_x, yc - bar_height / 2,
+                                chrom_block_width - 2, bar_height,
+                                fill=block_color))
+
+        # Feature bar
         bed_entries = seq_bed_data.get(seq, [])
         draw_feature_bar(d, bed_entries, bars_x, yc, bar_height,
                          bar_panel_width, color_map, max_bp)
@@ -765,7 +805,7 @@ def main():
         # Cluster type indicator (small dot)
         ctype = seq_to_type.get(seq, 'Major')
         dot_color = '#FF4444' if ctype == 'Outlier' else '#888888'
-        d.append(draw.Circle(bars_x - 6, yc, 2.5, fill=dot_color))
+        d.append(draw.Circle(block_x - 6, yc, 2.5, fill=dot_color))
 
     # ── Structural annotations (right of bars) ─────────────────────────────
     if args.annotations:
@@ -869,8 +909,20 @@ def main():
     d.append(draw.Text("Outlier", 10, margin_left + 90, legend_y + 24,
                         fill='#FF4444', font_family='sans-serif'))
 
+    # Chromosome block legend
+    chrom_legend_x = margin_left + 160
+    for ci, chrom in enumerate(CHROM_ORDER):
+        col = ci // 6
+        row = ci % 6
+        cx = chrom_legend_x + col * 80
+        cy = legend_y + 5 + row * 16
+        d.append(draw.Rectangle(cx, cy, 10, 10,
+                                fill=chrom_block_map[chrom]))
+        d.append(draw.Text(chrom, 9, cx + 14, cy + 9,
+                           fill=text_color, font_family='sans-serif'))
+
     # Feature color legend
-    draw_legend(d, color_map, margin_left + 180, legend_y + 5, text_color)
+    draw_legend(d, color_map, chrom_legend_x + 3 * 80 + 20, legend_y + 5, text_color)
 
     # ── Save ──────────────────────────────────────────────────────────────
     d.save_svg(args.output)

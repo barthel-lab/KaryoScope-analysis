@@ -40,7 +40,37 @@ chr13, chr14, chr15, chr21, chr22, chrY (all acrocentrics + chrY)
 
 # Pipeline
 
+## Pipeline logic (how the steps connect)
+
+Step 1 and Step 2 each build their OWN feature matrix from the raw BED
+file independently. Step 1's matrix is discarded after producing labels.
+
+  Step 1: BED --> [per-chr matrix in RAM] --> cluster labels (TSV)
+  Step 2: BED + labels (TSV) --> [new global matrix in RAM] --> dendrogram (SVG)
+
+Step 1 loops chromosome-by-chromosome. Each chromosome gets its own
+matrix, its own clustering, its own k selection. The output TSV has
+every haplotype labelled Major or Outlier with a divergence score.
+
+Step 2 reads that TSV for labels only (no matrix values carried over).
+It picks one representative per cluster (centroid-proximal for Major,
+most divergent for Outlier), pools all 18 chromosomes into one global
+matrix, and computes a single unified dendrogram.
+
+Why different matrix types between steps:
+  - Step 1 uses blockweight (equalises edge vs abundance within a
+    single chromosome's feature space)
+  - Step 2 uses plain zscore (blockweight across chromosomes would
+    distort per-chromosome structural signal; plain zscore standardises
+    each transition column without chromosome-specific reweighting)
+
 ## Step 1: Clustering (KaryoScope_cluster_analysis.py)
+
+Per-chromosome clustering to determine Major/Outlier labels.
+Loops through each chromosome independently: builds a feature matrix
+encoding directional transition counts between adjacent repeat blocks,
+applies Ward's linkage, selects optimal k via silhouette (k=2-10).
+Largest cluster = Major; rest = Outlier.
 
 Required flags — never omit these:
 
@@ -54,10 +84,20 @@ Required flags — never omit these:
 
 ## Step 2: Dendrogram (KS_allchr_dendrogram.py)
 
-Three-stage outlier detection pipeline:
-  1. Silhouette-optimal k per chromosome (stage 1 clustering)
+Takes Step 1 labels, selects one representative per cluster, builds a
+NEW global matrix from raw BED across all chromosomes, computes a
+unified dendrogram. No per-chromosome clustering loop here — the main
+dendrogram is one global computation.
+
+Three-stage outlier refinement (applied before dendrogram construction):
+  1. Silhouette-optimal k per chromosome (from Step 1 labels)
   2. Silhouette threshold filter — collapse weak splits to k=1
   3. Centroid scan — flag Major members > N SD from centroid (stage 2)
+
+Representative selection logic:
+  - Major: haplotype with lowest raw_divergence (most typical)
+  - Outlier: haplotype with highest raw_divergence (most extreme)
+  - Override with --all-haplotypes to show every haplotype
 
 Recommended parameters:
   --matrix-type count_log1p_zscore
@@ -65,7 +105,7 @@ Recommended parameters:
   --centroid-sd 5
 
 Why this combination:
-  - zscore_blockweight clustering produces clean Major/Outlier splits
+  - zscore_blockweight clustering (Step 1) produces clean Major/Outlier splits
   - sil-threshold 0.5 suppresses forced splits on chromosomes without
     genuine structure (chr1, chr2, chr4, chr5, chr6, chr7, chr9, chr10,
     chr17, chr20 all get collapsed to k=1)
@@ -94,6 +134,40 @@ chromosome's Major. Reports:
 3. Filtered (subtle "edge pattern difference" outliers removed entirely)
 
 See full commands in logs/session.md.
+
+## Methods text (for manuscript)
+
+Centromeric sequences from all HPRC haplotypes were annotated using
+KaryoScope against the CHM13 reference k-mer database. Analysis was
+restricted to 18 non-acrocentric autosomes plus chrX (excluding chr13,
+chr14, chr15, chr21, chr22, and chrY due to insufficient haplotype
+representation). Annotations labelled "novel" were excluded.
+
+Structural outlier detection proceeded in two stages. First, for each
+chromosome independently, we constructed a feature matrix encoding
+directional transition counts between adjacent repeat blocks (e.g.,
+aSat->HSat3). Counts were log-transformed, z-score normalised, and
+reweighted by block number to balance edge and abundance contributions.
+Ward's method hierarchical clustering was applied and the optimal k was
+selected by maximising the silhouette coefficient (k = 2-10). The
+largest cluster was designated Major; remaining clusters were designated
+Outlier. Second, a silhouette threshold filter was applied: chromosomes
+with silhouette score below 0.5 at k = 2 were collapsed to k = 1,
+suppressing forced splits on structurally homogeneous chromosomes. A
+centroid-distance scan then flagged individual haplotypes within Major
+clusters exceeding 5 standard deviations from the centroid as stage-2
+outliers, rescuing rare singletons (prevalence <0.3%) that clustering
+alone cannot isolate.
+
+To visualise all chromosomes jointly, one representative per cluster was
+selected (centroid-proximal for Major, most divergent for Outlier). A
+new global feature matrix was constructed from the raw BED annotations
+using log-transformed, z-score-normalised directional transition counts
+across all representatives, and a unified dendrogram was computed via
+Ward's linkage. Each outlier was structurally annotated by comparing its
+repeat block order and composition against the Major representative,
+reporting rearrangements, gains/losses, and abundance shifts exceeding
+15%.
 
 # Scripts
 
@@ -168,6 +242,7 @@ See screenshot: screenshor4claude/screenshot1.png
 7. Non-white background under bars — FIXED (pure white, no fills)
 8. Annotation text readability — FIXED (short labels, color-coded,
    positioned at bar end, 9px sans-serif)
+9. Add a colored block between the labels and bars. see `/Users/ychen/Documents/GitHub/KaryoScope-analysis/screenshor4claude/chromosome_block.png`. each chromosome should have their unique color. avoid similar next to each other. 
 
 # Behaviour rules
 
