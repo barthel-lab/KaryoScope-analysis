@@ -17,12 +17,13 @@ BED output columns:
   (working directory — all new scripts and outputs go here)
 
 ## Current task
-Build an all-chromosome dendrogram that identifies structural outliers
+1. Build an all-chromosome dendrogram that identifies structural outliers
 across the HPRC pangenome centromere dataset. The goal is to find rare
 centromere structural variants (deletions, inversions, rearrangements)
 validated against FISH data, while avoiding false outliers from normal
 population variation.
 
+2. A stacked bar chart showing total number of haploty perchromosme. Each bar shows two groups, nuber of outliers haplotypes and major haplotypes. For example: chr1 have 138 major, and 1 outliter; chr5 have 354 major haplotype and 4 outliers. the totla haplotypes per chromosome should match `/Users/ychen/Documents/GitHub/KaryoScope/results/figureA/filter.pdf`
 # Data
 
 ## Input
@@ -228,6 +229,14 @@ Silhouette threshold x centroid SD:
 
 Without stage 2, chr5 fails at every configuration.
 Without sil filter, chromosomes with sil<0.3 produce forced splits.
+
+## Known data discrepancy: chr5 haplotype count (358 vs 359)
+
+The reference PDF (filter.pdf) shows 359 chr5 haplotypes post-QC, but
+the clustering pipeline reports 358. The missing sequence is
+HG03050#1#CM098762.1, which spans 123.2 Mb (nearly the full chromosome).
+The --max-sequence-length 50000000 flag in the clustering script correctly
+filters it out. This is expected behavior, not a bug.
 
 # Known cosmetic issues
 

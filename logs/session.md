@@ -137,4 +137,52 @@ python3 scripts/KS_allchr_dendrogram.py \
 4. Annotations focus on structural changes, not subtle abundance shifts
 5. --hide-subtle removes entire rows, not just annotation text
 
-## DONE: 2026-04-01 22:30
+## 2026-04-07 — Add chromosome identity blocks (cosmetic issue #9)
+
+Added colored chromosome identity blocks between labels and feature bars.
+Each of the 18 chromosomes gets a distinct color (maximally separated hues
+so adjacent rows are visually distinguishable). Block is 12px wide, drawn
+right before the feature bar.
+
+Changes:
+- scripts/KS_allchr_dendrogram.py: CHROM_BLOCK_COLORS palette (18 colors),
+  chrom_block_width layout variable, block drawing loop, chromosome legend
+- CLAUDE.md: documented cosmetic issue #9
+
+Re-generated all 3 plot variants:
+- allchr_dendrogram.svg (66 rows, clean)
+- allchr_dendrogram_annotated.svg (66 rows, annotated)
+- allchr_dendrogram_filtered.svg (57 rows, subtle removed)
+
+All 3 FISH validations PASS (chr3, chr5, chr9).
+Committed as e960d4f, pushed to pangenome_structure_V2.
+
+## 2026-04-07 — Stacked bar chart (CLAUDE.md task 2)
+
+Created scripts/KS_allchr_barplot.py: stacked bar chart showing Major vs
+Outlier haplotype counts per chromosome. Reuses sil-threshold + centroid-scan
+logic from dendrogram script (imports shared functions).
+
+Per-chromosome totals validated against reference PDF
+(/Users/ychen/Documents/GitHub/KaryoScope/results/figureA/filter.pdf):
+all 18 chromosomes match (4551 total haplotypes).
+
+Summary: 3730 Major, 821 Outlier across 18 chromosomes.
+Chromosomes with most outliers: chr12 (233), chr8 (206), chr11 (178),
+chr3 (124), chrX (41).
+
+Output: agent_results/allchr_barplot.svg (13 KB)
+
+## 2026-04-07 — chr5 haplotype count discrepancy (358 vs 359)
+
+Reference PDF (filter.pdf) shows 359 chr5 haplotypes post-QC, but the
+clustering assignments TSV has 358. The missing sequence is
+HG03050#1#CM098762.1 which spans 123.2 Mb — nearly the full chromosome,
+not just the centromere region. The clustering script's
+--max-sequence-length 50000000 flag correctly filters it out.
+This is expected behavior, not a bug.
+
+Also added major count labels to the barplot (user requested both
+Major and Outlier counts visible on each bar).
+
+## DONE: 2026-04-07 16:40
