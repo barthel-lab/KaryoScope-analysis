@@ -18,6 +18,7 @@ Usage:
 
 import matplotlib
 matplotlib.rcParams['svg.fonttype'] = 'none'
+matplotlib.rcParams['font.family'] = 'Helvetica'
 
 import pandas as pd
 import numpy as np
@@ -66,6 +67,17 @@ def build_allele_matrix(df, chrom):
         matrix.loc[row["h1"], row["h2"]] += 1
 
     return matrix, paired_samples, unpaired, pairs
+
+
+def build_2x2_matrix(pairs):
+    """Collapse per-cluster pairs into a 2x2 Major vs Outlier matrix."""
+    labels = ["Major", "Outlier"]
+    mat = pd.DataFrame(0, index=labels, columns=labels)
+    for _, row in pairs.iterrows():
+        h1_label = "Major" if row["h1"] == "Major" else "Outlier"
+        h2_label = "Major" if row["h2"] == "Major" else "Outlier"
+        mat.loc[h1_label, h2_label] += 1
+    return mat
 
 
 def plot_heatmaps(matrices, output_dir):
@@ -129,6 +141,75 @@ def plot_heatmaps(matrices, output_dir):
 
     svg_path = os.path.join(output_dir, "allchr_allele_heatmap.svg")
     png_path = os.path.join(output_dir, "allchr_allele_heatmap.png")
+    fig.savefig(svg_path, bbox_inches="tight")
+    fig.savefig(png_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {svg_path}")
+    print(f"Saved: {png_path}")
+    return svg_path, png_path
+
+
+def plot_2x2_heatmaps(matrices, output_dir):
+    """Plot 2x2 grid of simplified Major/Outlier heatmaps for 4 chromosomes."""
+    chroms = ["chr3", "chr8", "chr11", "chr12"]
+
+    fig, axes = plt.subplots(2, 2, figsize=(10, 9))
+    fig.suptitle(
+        "Allele-specific assignment: Major vs Outlier (h1 vs h2)",
+        fontsize=14,
+        fontweight="bold",
+        y=0.98,
+    )
+
+    for idx, chrom in enumerate(chroms):
+        ax = axes[idx // 2][idx % 2]
+        pairs = matrices[chrom]["pairs"]
+        n_paired = matrices[chrom]["n_paired"]
+        mat = build_2x2_matrix(pairs)
+
+        # Symmetrise for display
+        sym = mat.values + mat.values.T
+        np.fill_diagonal(sym, np.diag(mat.values))
+        sym_df = pd.DataFrame(sym, index=mat.index, columns=mat.columns)
+
+        vmax = sym_df.values.max()
+        if vmax == 0:
+            vmax = 1
+
+        im = ax.imshow(
+            sym_df.values,
+            cmap="YlOrRd",
+            aspect="equal",
+            vmin=0,
+            vmax=vmax,
+        )
+
+        ax.set_xticks(range(2))
+        ax.set_xticklabels(["Major", "Outlier"], fontsize=11)
+        ax.set_yticks(range(2))
+        ax.set_yticklabels(["Major", "Outlier"], fontsize=11)
+
+        for i in range(2):
+            for j in range(2):
+                val = sym_df.values[i, j]
+                color = "white" if val > vmax * 0.6 else "black"
+                ax.text(
+                    j, i, str(int(val)),
+                    ha="center", va="center",
+                    fontsize=16, fontweight="bold",
+                    color=color,
+                )
+
+        ax.set_title(f"{chrom}  (n={n_paired} paired)", fontsize=12)
+        ax.set_xlabel("Haplotype 2")
+        ax.set_ylabel("Haplotype 1")
+
+        plt.colorbar(im, ax=ax, shrink=0.8, label="# samples")
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    svg_path = os.path.join(output_dir, "allchr_allele_heatmap_2x2.svg")
+    png_path = os.path.join(output_dir, "allchr_allele_heatmap_2x2.png")
     fig.savefig(svg_path, bbox_inches="tight")
     fig.savefig(png_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -315,6 +396,7 @@ def main():
 
     print_summary(matrices, args.output_dir)
     plot_heatmaps(matrices, args.output_dir)
+    plot_2x2_heatmaps(matrices, args.output_dir)
 
 
 if __name__ == "__main__":

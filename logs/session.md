@@ -283,3 +283,21 @@ Output files:
 - agent_results/allchr_allele_pairs.tsv (per-sample h1/h2 assignments)
 - agent_results/allchr_allele_cooccurrence.tsv (co-occurrence long format)
 - scripts/KS_allchr_allele_heatmap.py (new script)
+
+### 2026-04-13 — SVG text editability fix + simplified 2x2 heatmap
+
+Problem: SVG text rendered as path outlines (matplotlib default), not
+editable in Illustrator.
+
+Fix: Added `matplotlib.rcParams['svg.fonttype'] = 'none'` and
+`matplotlib.rcParams['font.family'] = 'Helvetica'` to
+KS_allchr_allele_heatmap.py.
+
+Also added a simplified 2x2 Major-vs-Outlier heatmap (collapsing all
+outlier subclusters into one "Outlier" category) for cleaner
+presentation of monoallelic vs biallelic patterns.
+
+Output files:
+- agent_results/allchr_allele_heatmap.svg (full cluster matrix, now editable)
+- agent_results/allchr_allele_heatmap_2x2.svg (simplified Major/Outlier)
+- Both also exported as PNG

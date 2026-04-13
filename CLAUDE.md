@@ -40,6 +40,8 @@ population variation.
    Script: scripts/KS_allchr_allele_heatmap.py
    TSVs: allchr_allele_summary.tsv, allchr_allele_pairs.tsv,
           allchr_allele_cooccurrence.tsv
+   Simplified 2x2 (Major vs Outlier): allchr_allele_heatmap_2x2.svg
+   Font: Helvetica, svg.fonttype='none' (editable in Illustrator)
 # Data
 
 ## Input
