@@ -16,6 +16,9 @@ Usage:
     --sil-threshold 0.5 --centroid-sd 5
 """
 
+import matplotlib
+matplotlib.rcParams['svg.fonttype'] = 'none'
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
