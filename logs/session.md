@@ -185,4 +185,101 @@ This is expected behavior, not a bug.
 Also added major count labels to the barplot (user requested both
 Major and Outlier counts visible on each bar).
 
-## DONE: 2026-04-07 16:40
+## Session summary — 2026-04-07
+
+Completed today:
+1. Cosmetic issue #9: added colored chromosome identity blocks between
+   labels and bars in dendrogram (CHROM_BLOCK_COLORS palette, 18 distinct
+   hues). Re-generated all 3 plot variants. Committed e960d4f.
+2. Task 2: created KS_allchr_barplot.py — stacked bar chart of Major vs
+   Outlier haplotype counts per chromosome. Shows both counts on bars.
+   Totals validated against filter.pdf reference.
+3. Investigated chr5 358 vs 359 discrepancy. Root cause: HG03050#1
+   spans 123.2 Mb, filtered by --max-sequence-length 50000000. Documented
+   in CLAUDE.md and session log. Not a bug.
+
+All changes committed (95c482c) and pushed to pangenome_structure_V2.
+All 3 FISH validations PASS (chr3, chr5, chr9).
+
+Files produced:
+- agent_results/allchr_dendrogram.svg (clean, 66 rows)
+- agent_results/allchr_dendrogram_annotated.svg (annotated, 66 rows)
+- agent_results/allchr_dendrogram_filtered.svg (filtered, 57 rows)
+- agent_results/allchr_barplot.svg (stacked bar chart, 18 chromosomes)
+- scripts/KS_allchr_barplot.py (new script)
+
+## DONE: 2026-04-07 16:45
+
+## 2026-04-08 — Human-readable NucFlag QC filter names
+
+Replaced cryptic X_n_ filter labels with human-readable names based on
+NucFlag wiki (https://github.com/logsdon-lab/NucFlag/wiki):
+
+  X_n_COLLAPSE     -> No Collapsed Regions
+  X_n_COLLAPSE_VAR -> No Collapsed Regions (with Variants)
+  X_n_Err          -> No Erroneous Regions
+
+Updated 3 files in the KaryoScope repo:
+- results/figureA/generate_filter_flowchart.R: flowchart boxes, arrow
+  labels, and table column sub-headers now use readable names.
+  Regenerated filter.pdf.
+- workflow/scripts/QCfilter_apply.R: report output uses readable names
+  with original X_n_ codes in parentheses for traceability.
+- workflow/scripts/QCfilter_explore.emp.R: plot labels updated
+  (Erroneous, Collapsed, Collapsed (with Variants), Misjoined).
+
+## 2026-04-08 — Reordered filters + heatmap panel
+
+User requested manual filter order by importance instead of automatic
+weak-to-strong ranking:
+  1. No Erroneous Regions (removes 1,131 / 18.4% — biggest impact)
+  2. No Collapsed Regions (removes 142 / 2.3%)
+  3. No Collapsed Regions with Variants (removes 215 / 3.5%)
+
+Replaced Panel 2 (plain table) with a % retained heatmap:
+  - Color ramp: red (low retention) -> yellow -> white -> green (high)
+  - Each cell shows absolute count + (% retained)
+  - Acrocentrics (chr13-15, chr21-22) clearly stand out as most filtered
+  - Angled x-axis labels for readability
+
+Files changed (all in KaryoScope repo):
+- results/figureA/generate_filter_flowchart.R: manual filter_order,
+  heatmap replaces table, angled x-axis labels
+- results/figureA/filter.pdf: regenerated
+
+## DONE: 2026-04-08
+
+## 2026-04-13 — Allele-specific outlier analysis (chr3, chr8, chr11, chr12)
+
+User observed chr3, chr8, chr11, chr12 have more outliers than other
+chromosomes in the barplot. Wanted to know if outliers are allele-specific:
+do they affect one haplotype (monoallelic) or both (biallelic)?
+
+Created scripts/KS_allchr_allele_heatmap.py:
+- Pairs haplotypes by sample (h1/h2) for each chromosome
+- Builds co-occurrence matrix: h1 cluster x h2 cluster
+- Plots 2x2 heatmap grid (symmetrised for display)
+- Imports apply_sil_and_centroid from KS_allchr_barplot.py to ensure
+  cluster labels match the barplot exactly (same filtering pipeline)
+
+Results:
+  chr3:  51 paired, 7.8% both Major, 43.1% monoallelic, 49.0% biallelic
+         (84% of biallelic in different clusters — independent variation)
+  chr8:  138 paired, 17.4% both Major, 48.6% monoallelic, 34.1% biallelic
+         (50/50 same vs different cluster)
+  chr11: 173 paired, 31.2% both Major, 49.7% monoallelic, 19.1% biallelic
+         (91% biallelic in same cluster — Outlier_2 is a common subtype)
+  chr12: 165 paired, 19.4% both Major, 41.8% monoallelic, 38.8% biallelic
+         (50/50 same vs different cluster)
+
+Note: sil-threshold 0.5 + centroid-sd 5 filtering did not change labels
+for these 4 chromosomes (their silhouette scores are all above 0.5, and
+no stage-2 outliers were added). Results identical with or without filter.
+
+Output files:
+- agent_results/allchr_allele_heatmap.svg (heatmap grid)
+- agent_results/allchr_allele_heatmap.png (for validation)
+- agent_results/allchr_allele_summary.tsv (per-chrom summary counts)
+- agent_results/allchr_allele_pairs.tsv (per-sample h1/h2 assignments)
+- agent_results/allchr_allele_cooccurrence.tsv (co-occurrence long format)
+- scripts/KS_allchr_allele_heatmap.py (new script)

@@ -1,0 +1,5 @@
+chromosome	n_paired	n_unpaired	both_major	h1_outlier_h2_major	h1_major_h2_outlier	both_outlier	monoallelic_outlier	biallelic_outlier	biallelic_same_cluster	biallelic_diff_cluster
+chr3	51	76	4	8	14	25	22	25	4	21
+chr8	138	66	24	32	35	47	67	47	23	24
+chr11	173	48	54	49	37	33	86	33	30	3
+chr12	165	51	32	30	39	64	69	64	32	32
