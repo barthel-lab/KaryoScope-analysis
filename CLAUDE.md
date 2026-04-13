@@ -23,7 +23,23 @@ centromere structural variants (deletions, inversions, rearrangements)
 validated against FISH data, while avoiding false outliers from normal
 population variation.
 
-2. A stacked bar chart showing total number of haploty perchromosme. Each bar shows two groups, nuber of outliers haplotypes and major haplotypes. For example: chr1 have 138 major, and 1 outliter; chr5 have 354 major haplotype and 4 outliers. the totla haplotypes per chromosome should match `/Users/ychen/Documents/GitHub/KaryoScope/results/figureA/filter.pdf`
+2. A stacked bar chart showing total number of haplotypes per chromosome.
+   Each bar shows Major (blue) and Outlier (red) counts.
+   Status: DONE — agent_results/allchr_barplot.svg
+   Script: scripts/KS_allchr_barplot.py
+
+3. Update filter.pdf (in KaryoScope repo) with human-readable NucFlag
+   QC filter names and heatmap panel.
+   Status: DONE — flowchart order: Erroneous -> Collapsed -> Collapsed
+   (with Variants). Panel 2 replaced with % retained heatmap.
+   Script: KaryoScope/results/figureA/generate_filter_flowchart.R
+
+4. Allele-specific outlier analysis for chr3, chr8, chr11, chr12.
+   Pairs h1/h2 by sample to check if outliers are monoallelic or biallelic.
+   Status: DONE — agent_results/allchr_allele_heatmap.svg
+   Script: scripts/KS_allchr_allele_heatmap.py
+   TSVs: allchr_allele_summary.tsv, allchr_allele_pairs.tsv,
+          allchr_allele_cooccurrence.tsv
 # Data
 
 ## Input
@@ -180,6 +196,9 @@ reporting rearrangements, gains/losses, and abundance shifts exceeding
 - scripts/KS_allchr_dendrogram.py   all-chromosome dendrogram with
                                      sil filter + two-stage outlier detection
 - scripts/KS_allchr_annotate.py     structural annotation of outliers
+- scripts/KS_allchr_barplot.py      stacked bar chart (Major vs Outlier counts)
+- scripts/KS_allchr_allele_heatmap.py  allele-specific outlier co-occurrence
+                                        (imports filtering from barplot)
 
 # Validation criteria
 
