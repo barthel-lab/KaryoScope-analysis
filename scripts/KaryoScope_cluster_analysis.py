@@ -1938,6 +1938,87 @@ else:
     cluster_linkage = None
     print(f"  Only 1 cluster, skipping linkage computation")
 
+# Extract above-cut linkage from the original tree
+# The last (n_clusters - 1) rows of linkage_matrix describe the merges above the cut.
+# We remap node indices so leaves (0..n_clusters-1) correspond to cluster IDs.
+above_cut_linkage = None
+above_cut_cluster_order = None
+if n_clusters > 1:
+    n_reads = len(seq_names)
+    # The cut happens at the (n_reads - n_clusters)th merge (0-indexed)
+    cut_row = n_reads - n_clusters
+    above_rows = linkage_matrix[cut_row:]  # last n_clusters-1 rows
+
+    # Map original node indices to cluster leaf indices (0..n_clusters-1)
+    # Each subtree below the cut corresponds to one cluster.
+    # Find which cluster each leaf-subtree maps to by walking down from the cut.
+    node_to_cluster_leaf = {}
+    # Nodes below the cut point: indices 0..n_reads-1 are original reads,
+    # n_reads..(n_reads+cut_row-1) are internal merges below the cut.
+    # Any node index < n_reads + cut_row is "below cut" = a leaf in the above-cut tree.
+    leaf_counter = 0
+    below_cut_threshold = n_reads + cut_row  # node indices below this are leaves
+
+    # Determine which cluster each below-cut subtree belongs to
+    # by checking cluster_labels of any read in the subtree
+    def get_cluster_for_node(node_idx):
+        """Find which cluster a below-cut node belongs to."""
+        if node_idx < n_reads:
+            return int(cluster_labels[node_idx])
+        row = int(node_idx - n_reads)
+        if row < len(linkage_matrix):
+            return get_cluster_for_node(int(linkage_matrix[row, 0]))
+        return -1
+
+    # Build the remapped above-cut linkage
+    above_cut_leaves = []  # (original_node_idx, cluster_id) for each leaf
+    remapped_rows = []
+
+    # First pass: identify all leaf nodes referenced in above-cut rows
+    leaf_nodes_in_above = set()
+    for row in above_rows:
+        idx1, idx2 = int(row[0]), int(row[1])
+        if idx1 < below_cut_threshold:
+            leaf_nodes_in_above.add(idx1)
+        if idx2 < below_cut_threshold:
+            leaf_nodes_in_above.add(idx2)
+
+    # Assign leaf indices 0..n_clusters-1 to below-cut nodes
+    leaf_node_to_idx = {}
+    above_cut_cluster_order = []
+    for node in sorted(leaf_nodes_in_above):
+        cid = get_cluster_for_node(node)
+        leaf_node_to_idx[node] = len(above_cut_cluster_order)
+        above_cut_cluster_order.append(cid)
+
+    # Also map above-cut internal nodes
+    internal_offset = len(above_cut_cluster_order)
+    above_node_to_idx = {}
+    for i, row in enumerate(above_rows):
+        original_node = n_reads + cut_row + i
+        above_node_to_idx[original_node] = internal_offset + i
+
+    # Build remapped linkage with correct leaf counts
+    # Track how many cluster-leaves are under each node
+    node_leaf_count = {}
+    for leaf_idx in range(len(above_cut_cluster_order)):
+        node_leaf_count[leaf_idx] = 1  # each cluster-leaf counts as 1
+
+    for row in above_rows:
+        idx1, idx2, dist, count = int(row[0]), int(row[1]), row[2], row[3]
+        new_idx1 = leaf_node_to_idx.get(idx1, above_node_to_idx.get(idx1, -1))
+        new_idx2 = leaf_node_to_idx.get(idx2, above_node_to_idx.get(idx2, -1))
+        if new_idx1 >= 0 and new_idx2 >= 0:
+            new_count = node_leaf_count.get(new_idx1, 1) + node_leaf_count.get(new_idx2, 1)
+            new_node_idx = internal_offset + len(remapped_rows)
+            node_leaf_count[new_node_idx] = new_count
+            remapped_rows.append([new_idx1, new_idx2, dist, new_count])
+
+    if remapped_rows:
+        above_cut_linkage = np.array(remapped_rows)
+        print(f"  Extracted above-cut linkage: {len(remapped_rows)} merges, "
+              f"{len(above_cut_cluster_order)} cluster leaves")
+
 # Create DataFrame and apply FDR correction
 cluster_df = pd.DataFrame(cluster_analysis)
 
@@ -2069,6 +2150,9 @@ save_dict = {
 }
 if cluster_linkage is not None:
     save_dict['cluster_linkage'] = cluster_linkage
+if above_cut_linkage is not None:
+    save_dict['above_cut_linkage'] = above_cut_linkage
+    save_dict['above_cut_cluster_order'] = np.array(above_cut_cluster_order)
 if svd_components_export is not None:
     save_dict['svd_components'] = svd_components_export
     save_dict['svd_explained_variance_ratio'] = svd_explained_variance_ratio_export

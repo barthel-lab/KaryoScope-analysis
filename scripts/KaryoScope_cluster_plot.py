@@ -5888,8 +5888,125 @@ def main():
     read_to_original_enrichment = {}
 
     if feature_matrix_data is not None and not args.no_reorder:
-        cluster_reads, cluster_dendro_data, read_to_original_cluster, read_to_original_enrichment = \
-            compute_cluster_dendrogram_order(feature_matrix_data, cluster_reads)
+        # Check for above-cut linkage (extracted from original clustering tree)
+        if (feature_matrix_data is not None
+                and 'above_cut_linkage' in feature_matrix_data
+                and 'above_cut_cluster_order' in feature_matrix_data):
+            from scipy.cluster.hierarchy import leaves_list, to_tree
+
+            above_cut_Z = feature_matrix_data['above_cut_linkage']
+            above_cut_order = [int(c) for c in feature_matrix_data['above_cut_cluster_order']]
+            displayed_ids = set(cluster_reads.keys())
+            hidden_ids = set(above_cut_order) - displayed_ids
+
+            # Build read mappings
+            for cluster_id, data in cluster_reads.items():
+                for read, sample in data['reads']:
+                    read_to_original_cluster[read] = cluster_id
+                    read_to_original_enrichment[read] = data['enrichment']
+
+            if len(hidden_ids) == 0:
+                # All clusters displayed — use above-cut linkage directly
+                leaf_order = leaves_list(above_cut_Z)
+                final_order = [above_cut_order[i] for i in leaf_order]
+
+                cluster_dendro_data = {
+                    'linkage': above_cut_Z,
+                    'cluster_order': final_order,
+                    'leaf_order': list(leaf_order)
+                }
+                print(f"  Using above-cut linkage directly "
+                      f"({len(above_cut_Z)} merges, {len(final_order)} clusters)")
+            elif len(displayed_ids) > 1:
+                # Some clusters filtered — extract subtree preserving original distances
+                # Walk the tree and collapse hidden leaves into their siblings
+                n_leaves = len(above_cut_order)
+                cid_to_leaf = {cid: i for i, cid in enumerate(above_cut_order)}
+
+                # Build tree from linkage
+                tree = to_tree(above_cut_Z)
+
+                # Collect displayed leaves under each node
+                def get_displayed_leaves(node):
+                    if node.is_leaf():
+                        cid = above_cut_order[node.id]
+                        return [node.id] if cid in displayed_ids else []
+                    return get_displayed_leaves(node.left) + get_displayed_leaves(node.right)
+
+                # Extract subtree: for each internal node, if both children have
+                # displayed leaves, keep the merge. If only one side has displayed
+                # leaves, skip this merge (collapse).
+                new_leaf_map = {}  # old leaf idx -> new leaf idx
+                new_leaves = []
+                for old_idx in range(n_leaves):
+                    cid = above_cut_order[old_idx]
+                    if cid in displayed_ids:
+                        new_leaf_map[old_idx] = len(new_leaves)
+                        new_leaves.append(cid)
+
+                def extract_subtree(node):
+                    """Returns (new_node_idx, height) for the subtree."""
+                    if node.is_leaf():
+                        cid = above_cut_order[node.id]
+                        if cid in displayed_ids:
+                            return new_leaf_map[node.id], 0
+                        return None, 0
+
+                    left_result, left_h = extract_subtree(node.left)
+                    right_result, right_h = extract_subtree(node.right)
+
+                    if left_result is None and right_result is None:
+                        return None, 0
+                    if left_result is None:
+                        return right_result, right_h
+                    if right_result is None:
+                        return left_result, left_h
+
+                    # Both sides have displayed leaves — keep this merge
+                    # Count = number of displayed leaves under this node
+                    left_count = 1 if left_result < len(new_leaves) else int(merge_rows[left_result - len(new_leaves)][3])
+                    right_count = 1 if right_result < len(new_leaves) else int(merge_rows[right_result - len(new_leaves)][3])
+                    merge_rows.append([left_result, right_result, node.dist, left_count + right_count])
+                    new_idx = len(new_leaves) + len(merge_rows) - 1
+                    return new_idx, node.dist
+
+                merge_rows = []
+                extract_subtree(tree)
+
+                if merge_rows:
+                    import numpy as np
+                    subset_Z = np.array(merge_rows)
+                    subset_leaf_order = leaves_list(subset_Z)
+                    final_order = [new_leaves[i] for i in subset_leaf_order]
+
+                    cluster_dendro_data = {
+                        'linkage': subset_Z,
+                        'cluster_order': final_order,
+                        'leaf_order': list(subset_leaf_order)
+                    }
+                    print(f"  Extracted above-cut subtree for displayed clusters "
+                          f"({len(merge_rows)} merges, {len(final_order)} clusters, "
+                          f"{len(hidden_ids)} hidden)")
+                else:
+                    cluster_dendro_data = None
+                    print(f"  Could not extract subtree, skipping dendrogram")
+            else:
+                cluster_dendro_data = None
+                print(f"  Only {len(displayed_ids)} displayed cluster(s), skipping dendrogram")
+
+            # Reorder cluster_reads by dendrogram order
+            if cluster_dendro_data is not None:
+                new_cluster_reads = OrderedDict()
+                for cid in cluster_dendro_data['cluster_order']:
+                    if cid in cluster_reads:
+                        new_cluster_reads[cid] = cluster_reads[cid]
+                for cid in cluster_reads:
+                    if cid not in new_cluster_reads:
+                        new_cluster_reads[cid] = cluster_reads[cid]
+                cluster_reads = new_cluster_reads
+        else:
+            cluster_reads, cluster_dendro_data, read_to_original_cluster, read_to_original_enrichment = \
+                compute_cluster_dendrogram_order(feature_matrix_data, cluster_reads)
     elif args.no_reorder:
         print("  Dendrogram reordering disabled (--no-reorder)")
 
