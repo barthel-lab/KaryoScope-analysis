@@ -2046,6 +2046,7 @@ matrix_file = f"{args.output_prefix}.feature_matrix.npz"
 save_dict = {
     'adj_matrix': adj_matrix,
     'seq_names': np.array(seq_names),
+    'read_names': np.array(seq_names),
     'cluster_labels': cluster_labels,
     'linkage_method': args.linkage_method,
     'cluster_ids_ordered': np.array(cluster_ids_ordered),

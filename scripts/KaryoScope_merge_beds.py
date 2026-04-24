@@ -175,7 +175,7 @@ def apply_feature_filter(df, keep_patterns, collapse_label):
 
 
 # Priority features for telomere-satellite merge mode
-TELOMERE_PRIORITY_FEATURES = {'canonical_telomere', 'noncanonical_telomere', 'TAR1', 'ITS'}
+TELOMERE_PRIORITY_FEATURES = {'canonical_telomere', 'noncanonical_telomere', 'TAR1', 'ITS', 'telomere_like'}
 
 # Priority features for 3-way priority merge mode (includes telomere_like_multigroup1)
 SUBTEL_PRIORITY_FEATURES = {'canonical_telomere', 'noncanonical_telomere', 'TAR1', 'ITS', 'telomere_like_multigroup1'}

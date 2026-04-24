@@ -210,6 +210,12 @@ def parse_args():
                         help="TSV file with curated representative selection. Must have 'cluster_id' and "
                              "'curated_rep_i' columns. curated_rep_i indicates which rank (1-based) to plot "
                              "for each cluster. If not specified, plots rank 1 for each cluster.")
+    parser.add_argument("--use-centroids", dest="use_centroids", action="store_true",
+                        help="Use centroid reads (closest to cluster mean in feature space) instead of "
+                             "annotation-selected representatives")
+    parser.add_argument("--fresh-dendrogram", dest="fresh_dendrogram", action="store_true",
+                        help="Compute dendrogram fresh from displayed reads' feature vectors "
+                             "(like KS_allchr_dendrogram.py) instead of using pre-computed cluster linkage")
     parser.add_argument("--show-read-indices", dest="show_read_indices", action="store_true",
                         help="Show read index labels (1, 2, 3, ...) next to each read (default: hidden)")
     parser.add_argument("--show-threshold", dest="show_threshold", action="store_true",
@@ -299,6 +305,8 @@ def _print_params_and_command(args, database, featuresets, background_color):
         ("hide-brackets", _fmt(args.hide_brackets, "hide_brackets"), None),
         ("hide-dendrogram", _fmt(args.hide_dendrogram, "hide_dendrogram"), None),
         ("full-dendrogram", _fmt(args.full_dendrogram, "full_dendrogram"), None),
+        ("fresh-dendrogram", _fmt(args.fresh_dendrogram, "fresh_dendrogram"), None),
+        ("use-centroids", _fmt(args.use_centroids, "use_centroids"), None),
         ("no-reorder", _fmt(args.no_reorder, "no_reorder"), None),
         ("target-width", _fmt(args.target_width, "target_width"), None),
         ("target-height", _fmt(args.target_height, "target_height"), None),
@@ -833,7 +841,7 @@ def load_curated_representatives(curated_reps_file, cluster_labels_file=None):
     return selected_reads
 
 
-def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order=None, max_reps=None, reads_file=None, curated_reps_file=None, cluster_labels_file=None):
+def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order=None, max_reps=None, reads_file=None, curated_reps_file=None, cluster_labels_file=None, use_centroids=False, cluster_analysis_file=None):
     """Load read assignments from TSV file.
 
     Representative read selection should be done beforehand using KaryoScope_select_representatives.py.
@@ -847,6 +855,8 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
         reads_file: Path to file with read names to include (one per line)
         curated_reps_file: Path to TSV with cluster_id, rank, read columns for selecting specific reads
         cluster_labels_file: Path to TSV/Excel with curated_rep_i column (optional)
+        use_centroids: If True, use centroid reads from cluster_analysis.tsv instead of annotation reps
+        cluster_analysis_file: Path to cluster_analysis.tsv (needed for centroid reads)
 
     Returns:
         tuple: (cluster_reads OrderedDict, unique_enrichments set)
@@ -879,8 +889,19 @@ def load_representative_reads(reps_file, cluster_enrichments=None, cluster_order
         except Exception:
             pass  # Silently ignore if rank loading fails
 
+    # Use centroid reads from cluster_analysis.tsv if requested
+    if use_centroids and cluster_analysis_file and os.path.exists(cluster_analysis_file):
+        ca_df = pd.read_csv(cluster_analysis_file, sep='\t')
+        if 'centroid_read' in ca_df.columns:
+            centroid_reads = set(ca_df['centroid_read'].dropna().astype(str).tolist())
+            centroid_reads.discard('')
+            reps_df = reps_df[reps_df['sequence'].isin(centroid_reads)]
+            print(f"  Using {len(centroid_reads)} centroid reads from {cluster_analysis_file}")
+        else:
+            print(f"  Warning: no centroid_read column in {cluster_analysis_file}, falling back to default")
+
     # Load curated representatives if provided (takes precedence over reads_file)
-    if curated_reps_file and os.path.exists(curated_reps_file):
+    elif curated_reps_file and os.path.exists(curated_reps_file):
         allowed_reads = load_curated_representatives(curated_reps_file, cluster_labels_file)
         if allowed_reads:
             reps_df = reps_df[reps_df['sequence'].isin(allowed_reads)]
@@ -1608,6 +1629,89 @@ def compute_full_dendrogram(feature_matrix_data, displayed_reads):
 
     except Exception as e:
         print(f"  Warning: Could not compute full dendrogram: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def compute_fresh_dendrogram(displayed_reads, read_bed_data, featureset):
+    """Compute dendrogram fresh from BED feature vectors (like KS_allchr_dendrogram.py).
+
+    Builds an edge-only feature matrix from the actual BED intervals of displayed reads,
+    computes pairwise distances and Ward linkage. No optimal leaf ordering — preserves
+    the natural tree structure.
+
+    Args:
+        displayed_reads: List of read names to include
+        read_bed_data: Dict of read -> {featureset: [{start, stop, feature}, ...]}
+        featureset: Which featureset to use for building the matrix
+
+    Returns:
+        full_dendro_data dict or None
+    """
+    from scipy.cluster.hierarchy import linkage, leaves_list
+    from scipy.spatial.distance import pdist
+    from sklearn.preprocessing import StandardScaler
+
+    try:
+        # Build edge-only feature matrix from BED data
+        # Collect features for each read
+        seq_edges = {}
+        all_edge_set = set()
+        for read in displayed_reads:
+            if read not in read_bed_data:
+                continue
+            entries = read_bed_data[read].get(featureset, [])
+            entries = sorted(entries, key=lambda x: x['start'])
+            features = [e['feature'] for e in entries
+                        if e['feature'] != 'novel']
+            edges = []
+            for i in range(len(features) - 1):
+                edge = tuple(sorted([features[i], features[i+1]]))
+                edges.append(edge)
+            seq_edges[read] = edges
+            all_edge_set.update(edges)
+
+        valid_reads = [r for r in displayed_reads if r in seq_edges]
+        if len(valid_reads) < 2:
+            print(f"  Not enough reads for fresh dendrogram ({len(valid_reads)} reads)")
+            return None
+
+        all_edges = sorted(all_edge_set)
+        edge_to_idx = {e: i for i, e in enumerate(all_edges)}
+
+        # Build matrix
+        import numpy as np
+        matrix = np.zeros((len(valid_reads), len(all_edges)), dtype=np.float32)
+        for i, read in enumerate(valid_reads):
+            for edge in seq_edges[read]:
+                matrix[i, edge_to_idx[edge]] += 1
+
+        # log1p + zscore
+        matrix = np.log1p(matrix)
+        scaler = StandardScaler()
+        matrix = scaler.fit_transform(matrix)
+
+        # Compute linkage — no optimal_leaf_ordering
+        dist = pdist(matrix, metric='euclidean')
+        Z = linkage(dist, method='ward')
+        leaf_order = leaves_list(Z)
+        ordered_reads = [valid_reads[i] for i in leaf_order]
+
+        full_dendro_data = {
+            'linkage': Z,
+            'read_order': ordered_reads,
+            'read_names': valid_reads,
+            'n_reads': len(valid_reads),
+            'leaf_order': leaf_order
+        }
+
+        print(f"  Computed fresh dendrogram for {len(valid_reads)} reads "
+              f"({len(all_edges)} edge features)")
+        return full_dendro_data
+
+    except Exception as e:
+        print(f"  Warning: Could not compute fresh dendrogram: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -3477,15 +3581,8 @@ def draw_enrichment_bubbles(d, cluster_y_start, cluster_y_end, x_center, cluster
 
         color = f'rgb({r},{g},{b})'
 
-        # q_value -> alpha (more significant = more opaque)
-        # Use -log10(q_value), capped at 10 (q=1e-10)
-        if q_value > 0:
-            neg_log_q = -math.log10(q_value)
-        else:
-            neg_log_q = 10  # Very significant
-        neg_log_q = min(10, max(0, neg_log_q))
-        # Map to alpha: 0.0 (q=1, NS) to 1.0 (q<=1e-10)
-        alpha = neg_log_q / 10
+        # q_value -> binary alpha (significant = full, NS = faded)
+        alpha = 1.0 if q_value < 0.1 else 0.15
 
         # Draw the bubble
         stroke_color = '#000000' if background_color == 'white' else '#FFFFFF'
@@ -3496,7 +3593,8 @@ def draw_enrichment_bubbles(d, cluster_y_start, cluster_y_end, x_center, cluster
         ))
 
 
-def _compute_bubble_style(pct, pval, odds, base_color, bubble_radius, max_log2_or=4.0):
+def _compute_bubble_style(pct, pval, odds, base_color, bubble_radius, max_log2_or=4.0,
+                          fdr=None, fdr_threshold=0.1):
     """Compute bubble color, radius, and alpha from enrichment statistics.
 
     Args:
@@ -3506,6 +3604,8 @@ def _compute_bubble_style(pct, pval, odds, base_color, bubble_radius, max_log2_o
         base_color: Base hex color for the sample
         bubble_radius: Maximum bubble radius
         max_log2_or: Maximum log2(OR) for color intensity scaling
+        fdr: FDR-corrected q-value for the cluster (if provided, uses binary alpha)
+        fdr_threshold: FDR threshold for significance (default 0.1)
 
     Returns:
         tuple: (color, radius, alpha)
@@ -3524,13 +3624,17 @@ def _compute_bubble_style(pct, pval, odds, base_color, bubble_radius, max_log2_o
     else:
         t = 0
 
-    # Alpha based on significance (NS = fully transparent / hidden)
-    if pval > 0 and pval < 1:
-        neg_log_p = -math.log10(pval)
-        neg_log_p = min(10, max(0, neg_log_p))
-        alpha = neg_log_p / 10
+    # Alpha: binary based on cluster-level FDR
+    if fdr is not None:
+        alpha = 1.0 if fdr < fdr_threshold else 0.15
     else:
-        alpha = 0.0 if pval >= 1 else 1.0
+        # Fallback to gradient if no FDR provided
+        if pval > 0 and pval < 1:
+            neg_log_p = -math.log10(pval)
+            neg_log_p = min(10, max(0, neg_log_p))
+            alpha = neg_log_p / 10
+        else:
+            alpha = 0.0 if pval >= 1 else 1.0
 
     # For samples with low percentage, use gray
     if pct < 5:
@@ -3620,6 +3724,7 @@ def draw_enrichment_grid(d, cluster_pos_start, cluster_pos_end, grid_start, clus
         cluster_center = (pos_start + pos_end) / 2
 
         # Draw a bubble for each sample
+        cluster_fdr = stats.get('q_value')
         for i, sample in enumerate(sample_order):
             sample_stats = per_sample.get(sample, {})
             pct = sample_stats.get('pct', 0)
@@ -3627,7 +3732,8 @@ def draw_enrichment_grid(d, cluster_pos_start, cluster_pos_end, grid_start, clus
             odds = sample_stats.get('odds', 1.0)
 
             base_color = sample_colors.get(sample, '#888888')
-            color, radius, alpha = _compute_bubble_style(pct, pval, odds, base_color, bubble_radius)
+            color, radius, alpha = _compute_bubble_style(pct, pval, odds, base_color, bubble_radius,
+                                                         fdr=cluster_fdr)
 
             # Position depends on orientation
             sample_pos = grid_start + bubble_radius + i * (bubble_radius * 2 + bubble_spacing)
@@ -5578,7 +5684,9 @@ def main():
         max_reps=max_reps,
         reads_file=args.reads_file,
         curated_reps_file=args.curated_reps,
-        cluster_labels_file=args.cluster_labels
+        cluster_labels_file=args.cluster_labels,
+        use_centroids=args.use_centroids,
+        cluster_analysis_file=cluster_analysis_file if args.use_centroids else None,
     )
 
     # Load feature matrix
@@ -5619,6 +5727,15 @@ def main():
 
     # Load custom BED files
     read_data = load_custom_bed_files(custom_bed_files, all_reads_needed, read_data)
+
+    # Compute fresh dendrogram if requested (deferred from above, needs BED data)
+    if getattr(args, 'fresh_dendrogram', False) and read_data:
+        all_displayed_reads = []
+        for cluster_id, data in cluster_reads.items():
+            for read, sample in data['reads']:
+                all_displayed_reads.append(read)
+        full_dendro_data = compute_fresh_dendrogram(
+            all_displayed_reads, read_data, featuresets[0] if featuresets else None)
 
     # --- Generate colors ---
     # Get all unique samples
@@ -5678,9 +5795,11 @@ def main():
         cluster_dendro_data = None
         print("  Dendrogram hidden (--hide-dendrogram)")
 
-    # Compute full dendrogram if requested
+    # Compute full dendrogram if requested (fresh_dendrogram is deferred until after BED loading)
     full_dendro_data = None
-    if getattr(args, 'full_dendrogram', False) and feature_matrix_data is not None:
+    if getattr(args, 'fresh_dendrogram', False):
+        pass  # Deferred: computed after BED data is loaded below
+    elif getattr(args, 'full_dendrogram', False) and feature_matrix_data is not None:
         # Collect all displayed reads
         all_displayed_reads = []
         for cluster_id, data in cluster_reads.items():
