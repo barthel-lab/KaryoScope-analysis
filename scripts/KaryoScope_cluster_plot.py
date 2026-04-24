@@ -195,7 +195,7 @@ def parse_args():
                         help="Column name for custom labels in --cluster-labels file (default: curated_annotation)")
     parser.add_argument("--vertical", dest="vertical", action="store_true",
                         help="Rotate plot 90 degrees (dendrogram on left, reads vertical)")
-    parser.add_argument("--show-matrix", dest="show_matrix", action="store_true",
+    parser.add_argument("--show-matrix", "--sample-count-matrix", dest="show_matrix", action="store_true",
                         help="Show sample × cluster read count matrix (vertical mode only)")
     parser.add_argument("--show-bar-plots", dest="show_bar_plots", action="store_true",
                         help="Show stacked bar plots (sample column sums and cluster row sums). "
@@ -238,7 +238,15 @@ def parse_args():
                         help="Show clade ID in structural plot labels (e.g., [C20])")
     parser.add_argument("--show-clade-count", action="store_true",
                         help="Show count of reads in each clade (e.g., [n=15])")
-    parser.add_argument("--enrichment-grid", dest="enrichment_grid", action="store_true",
+    parser.add_argument("--show-group-matrix", "--group-count-matrix", dest="show_group_matrix", action="store_true",
+                        help="Show group-level composition matrix (e.g., ALT vs TEL counts per cluster). "
+                             "Positioned between the sample matrix and the feature bars. "
+                             "Requires --show-matrix and sample metadata with group column.")
+    parser.add_argument("--show-group-enrichment", "--group-enrichment-grid", dest="show_group_enrichment", action="store_true",
+                        help="Show group-level enrichment grid with Fisher's exact test bubbles. "
+                             "Bubble style matches sample enrichment grid. "
+                             "Requires --show-matrix and sample metadata with group column.")
+    parser.add_argument("--enrichment-grid", "--sample-enrichment-grid", dest="enrichment_grid", action="store_true",
                         help="Show enrichment as a grid of bubbles (one per sample) instead of single bubble. "
                              "Bubble size = sample %%, opacity = -log10(p-value), color = sample color. "
                              "Requires per-sample comparison mode in cluster analysis.")
@@ -305,6 +313,8 @@ def _print_params_and_command(args, database, featuresets, background_color):
         ("filter-enrichment", _fmt(args.filter_enrichment, "filter_enrichment"), None),
         ("vertical", _fmt(args.vertical, "vertical"), None),
         ("show-matrix", _fmt(args.show_matrix, "show_matrix"), None),
+        ("show-group-matrix", _fmt(args.show_group_matrix, "show_group_matrix"), None),
+        ("show-group-enrichment", _fmt(args.show_group_enrichment, "show_group_enrichment"), None),
         ("show-bar-plots", _fmt(args.show_bar_plots, "show_bar_plots"), None),
         ("column-tracks", _fmt(args.column_tracks, "column_tracks"), None),
         ("show-read-indices", _fmt(args.show_read_indices, "show_read_indices"), None),
@@ -3240,6 +3250,282 @@ def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_me
     }
 
 
+def draw_group_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, matrix_data,
+                      group_colors, x_start, cell_width, cell_height, text_color,
+                      background_color='black', header_y=None):
+    """Draw group-level composition matrix (aggregated from sample matrix).
+
+    Shows counts per group (e.g., ALT vs TEL) for each cluster, positioned
+    between the sample matrix and the feature bars.
+
+    Args:
+        d: Drawing object
+        cluster_ids: List of cluster IDs
+        cluster_y_start: Dict of cluster_id -> y start position
+        cluster_y_end: Dict of cluster_id -> y end position
+        matrix_data: Dict returned from draw_sample_matrix
+        group_colors: Dict of group_name -> hex color
+        x_start: X position for group matrix start
+        cell_width: Width of each cell
+        cell_height: Height of each cell
+        text_color: Color for text
+        background_color: Background color ('black' or 'white')
+        header_y: Y position for column headers
+
+    Returns:
+        dict with 'width' key indicating total width of the group matrix
+    """
+    import math
+
+    all_samples = matrix_data.get('all_samples', [])
+    sample_groups = matrix_data.get('sample_groups', {})
+    cluster_sample_counts = matrix_data.get('cluster_sample_counts', {})
+
+    if not sample_groups:
+        return {'width': 0}
+
+    # Get unique groups in order (preserve sample order)
+    seen = set()
+    unique_groups = []
+    for sample in all_samples:
+        group = sample_groups.get(sample, 'Unknown')
+        if group not in seen:
+            seen.add(group)
+            unique_groups.append(group)
+
+    if not unique_groups:
+        return {'width': 0}
+
+    n_groups = len(unique_groups)
+    group_gap = 3  # Small gap between group columns
+    total_group_width = n_groups * cell_width + (n_groups - 1) * group_gap
+
+    # Aggregate counts by group for each cluster
+    cluster_group_counts = {}
+    max_count = 1
+    for cluster_id in cluster_ids:
+        sample_counts = cluster_sample_counts.get(cluster_id, {})
+        group_counts = {}
+        for group in unique_groups:
+            total = sum(sample_counts.get(s, 0) for s in all_samples if sample_groups.get(s) == group)
+            group_counts[group] = total
+            max_count = max(max_count, total)
+        cluster_group_counts[cluster_id] = group_counts
+
+    # Draw column headers (rotated group names)
+    if header_y is None:
+        header_y = min(cluster_y_start.values()) - 5 if cluster_y_start else 30
+    for i, group in enumerate(unique_groups):
+        x = x_start + i * (cell_width + group_gap) + cell_width / 2
+        d.append(draw.Text(
+            group, font_size=7, x=x, y=header_y,
+            fill=text_color, font_family='sans-serif',
+            dominant_baseline='central',
+            transform=f"rotate(-90 {x} {header_y})",
+            text_anchor='start'
+        ))
+
+    # Draw cells for each cluster
+    for cluster_id in cluster_y_start:
+        if cluster_id not in cluster_group_counts:
+            continue
+
+        y_mid = (cluster_y_start[cluster_id] + cluster_y_end[cluster_id]) / 2
+        y = y_mid - cell_height / 2
+
+        for i, group in enumerate(unique_groups):
+            x = x_start + i * (cell_width + group_gap)
+            count = cluster_group_counts[cluster_id].get(group, 0)
+
+            # Use same gradient as sample matrix (yellow on black, blue on white)
+            if count == 0:
+                fill_color = '#1a1a1a' if background_color == 'black' else '#f5f5f5'
+                intensity = 0
+            else:
+                if max_count > 1:
+                    intensity = math.log1p(count) / math.log1p(max_count)
+                else:
+                    intensity = 1.0
+
+                if background_color == 'white':
+                    r = int(224 - intensity * (224 - 30))
+                    g = int(231 - intensity * (231 - 64))
+                    b = int(255 - intensity * (255 - 175))
+                    fill_color = f'#{r:02x}{g:02x}{b:02x}'
+                else:
+                    r = int(51 + intensity * (255 - 51))
+                    g = int(51 + intensity * (255 - 51))
+                    b = int(51 * (1 - intensity))
+                    fill_color = f'#{r:02x}{g:02x}{b:02x}'
+
+            grid_stroke = '#333333' if background_color == 'white' else '#FFFFFF'
+            d.append(draw.Rectangle(
+                x, y, cell_width, cell_height,
+                fill=fill_color, stroke=grid_stroke, stroke_width=0.5
+            ))
+
+            # Draw count text
+            if count > 0:
+                if background_color == 'white':
+                    count_text_color = '#ffffff' if intensity > 0.4 else '#000000'
+                else:
+                    count_text_color = '#000000' if intensity > 0.4 else '#ffffff'
+                font_size = 5 if cell_width >= 10 else 4
+                d.append(draw.Text(
+                    str(count), font_size=font_size,
+                    x=x + cell_width / 2, y=y + cell_height / 2 + 2,
+                    fill=count_text_color, font_family='sans-serif',
+                    text_anchor='middle'
+                ))
+            else:
+                d.append(draw.Text(
+                    '0', font_size=4,
+                    x=x + cell_width / 2, y=y + cell_height / 2 + 1.5,
+                    fill='#666666', font_family='sans-serif',
+                    text_anchor='middle'
+                ))
+
+    return {'width': total_group_width}
+
+
+def draw_group_enrichment_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, matrix_data,
+                                  group_colors, x_start, cell_width, cell_height, text_color,
+                                  background_color='black', header_y=None):
+    """Draw group-level enrichment matrix using Fisher's exact test.
+
+    For each cluster x group combination, tests whether the group is enriched
+    in that cluster compared to the overall dataset using a one-sided Fisher's
+    exact test.
+
+    Args:
+        d: Drawing object
+        cluster_ids: List of cluster IDs
+        cluster_y_start: Dict of cluster_id -> y start position
+        cluster_y_end: Dict of cluster_id -> y end position
+        matrix_data: Dict returned from draw_sample_matrix
+        group_colors: Dict of group_name -> hex color
+        x_start: X position for enrichment matrix start
+        cell_width: Width of each cell
+        cell_height: Height of each cell
+        text_color: Color for text
+        background_color: Background color ('black' or 'white')
+        header_y: Y position for column headers
+
+    Returns:
+        dict with 'width' key indicating total width of the enrichment matrix
+    """
+    import math
+    from scipy.stats import fisher_exact
+
+    all_samples = matrix_data.get('all_samples', [])
+    sample_groups = matrix_data.get('sample_groups', {})
+    cluster_sample_counts = matrix_data.get('cluster_sample_counts', {})
+
+    if not sample_groups:
+        return {'width': 0}
+
+    # Get unique groups in order (preserve sample order)
+    seen = set()
+    unique_groups = []
+    for sample in all_samples:
+        group = sample_groups.get(sample, 'Unknown')
+        if group not in seen:
+            seen.add(group)
+            unique_groups.append(group)
+
+    if not unique_groups:
+        return {'width': 0}
+
+    n_groups = len(unique_groups)
+    group_gap = 3  # Small gap between group columns
+    total_group_width = n_groups * cell_width + (n_groups - 1) * group_gap
+
+    # Aggregate counts by group for each cluster
+    cluster_group_counts = {}
+    for cluster_id in cluster_ids:
+        sample_counts = cluster_sample_counts.get(cluster_id, {})
+        group_counts = {}
+        for group in unique_groups:
+            total = sum(sample_counts.get(s, 0) for s in all_samples if sample_groups.get(s) == group)
+            group_counts[group] = total
+        cluster_group_counts[cluster_id] = group_counts
+
+    # Total reads per group across all clusters
+    group_totals = {}
+    for group in unique_groups:
+        group_totals[group] = sum(
+            cluster_group_counts.get(cid, {}).get(group, 0) for cid in cluster_ids
+        )
+
+    # Total reads per cluster
+    cluster_totals = {}
+    for cid in cluster_ids:
+        cluster_totals[cid] = sum(cluster_group_counts.get(cid, {}).values())
+
+    # Grand total
+    grand_total = sum(cluster_totals.values())
+
+    # Cap for -log10(p-value) scaling
+    LOG10_CAP = 5.0
+
+    # Draw column headers (rotated group names)
+    if header_y is None:
+        header_y = min(cluster_y_start.values()) - 5 if cluster_y_start else 30
+    for i, group in enumerate(unique_groups):
+        x = x_start + i * (cell_width + group_gap) + cell_width / 2
+        d.append(draw.Text(
+            group, font_size=7, x=x, y=header_y,
+            fill=text_color, font_family='sans-serif',
+            dominant_baseline='central',
+            transform=f"rotate(-90 {x} {header_y})",
+            text_anchor='start'
+        ))
+
+    # Draw bubbles for each cluster (mirroring sample enrichment grid style)
+    bubble_radius = cell_height / 2 - 1
+    for cluster_id in cluster_y_start:
+        if cluster_id not in cluster_group_counts:
+            continue
+
+        y_mid = (cluster_y_start[cluster_id] + cluster_y_end[cluster_id]) / 2
+
+        for i, group in enumerate(unique_groups):
+            x_center = x_start + i * (cell_width + group_gap) + cell_width / 2
+
+            group_in_cluster = cluster_group_counts[cluster_id].get(group, 0)
+            other_in_cluster = cluster_totals[cluster_id] - group_in_cluster
+            group_outside_cluster = group_totals[group] - group_in_cluster
+            other_outside_cluster = grand_total - group_in_cluster - other_in_cluster - group_outside_cluster
+
+            # 2x2 contingency table for one-sided Fisher's exact test (greater)
+            table = [[group_in_cluster, other_in_cluster],
+                     [group_outside_cluster, other_outside_cluster]]
+
+            try:
+                odds_ratio, p_value = fisher_exact(table, alternative='greater')
+            except Exception:
+                odds_ratio, p_value = 1.0, 1.0
+
+            # Percentage of cluster from this group
+            cluster_total = cluster_totals.get(cluster_id, 1)
+            pct = (group_in_cluster / cluster_total * 100) if cluster_total > 0 else 0
+
+            # Use same bubble style as sample enrichment grid
+            base_color = group_colors.get(group, '#888888')
+            color, radius, alpha = _compute_bubble_style(
+                pct, p_value, odds_ratio, base_color, bubble_radius)
+
+            stroke_color = '#000000' if background_color == 'white' else '#FFFFFF'
+            d.append(draw.Circle(
+                x_center, y_mid, radius,
+                fill=color, fill_opacity=alpha,
+                stroke=stroke_color, stroke_width=0.3
+            ))
+
+
+    return {'width': total_group_width}
+
+
 def draw_matrix_legend(d, x_start, y_start, max_count, text_color='white', background_color='black'):
     """Draw a legend for the matrix color scale (log-scaled).
 
@@ -3633,12 +3919,8 @@ def draw_cluster_labels_vertical(d, cluster_y_start, cluster_y_end, x_start, tex
         else:
             label_text = f"Cluster {cluster_id}"
 
-        # Get color based on enrichment if available
-        if enrichment_colors and cluster_enrichments and cluster_id in cluster_enrichments:
-            enrichment = cluster_enrichments[cluster_id]
-            color = enrichment_colors.get(enrichment, text_color)
-        else:
-            color = text_color
+        # Use neutral text color (black/white) for all cluster labels
+        color = text_color
 
         d.append(draw.Text(
             label_text,
@@ -3875,7 +4157,8 @@ def draw_enrichment_grid(d, cluster_pos_start, cluster_pos_end, grid_start, clus
         label_x = min(cluster_pos_start.values()) - 5 if cluster_pos_start else 50
         for i, sample in enumerate(sample_order):
             y_center = grid_start + bubble_radius + i * (bubble_radius * 2 + bubble_spacing)
-            color = sample_colors.get(sample, text_color)
+            # Use neutral text color (black/white) instead of sample-specific colors
+            color = text_color
             d.append(draw.Text(
                 sample, font_size=8, x=label_x, y=y_center,
                 fill=color, font_family='sans-serif',
@@ -3945,7 +4228,8 @@ def draw_enrichment_grid_header(d, x_start, y_pos, sample_order, sample_colors,
     """
     for i, sample in enumerate(sample_order):
         x_center = x_start + bubble_radius + i * (bubble_radius * 2 + bubble_spacing)
-        color = sample_colors.get(sample, text_color)
+        # Use neutral text color (black/white) instead of sample-specific colors
+        color = text_color
 
         # Draw rotated sample name
         label = sample_display_names.get(sample, sample) if sample_display_names else sample
@@ -6134,7 +6418,7 @@ def main():
         # Vertical layout parameters
         dendrogram_width = 100 if cluster_dendro_data is not None else 0
         bubble_radius = 8
-        dendrogram_to_bubble_gap = 1  # Gap from dendrogram tip to bubble left edge
+        dendrogram_to_bubble_gap = 18  # Gap from dendrogram tip to bubble left edge
         bubble_to_bars_gap = 5  # Gap from bubble right edge to feature bars
 
         # Check if enrichment grid mode should be used
@@ -6197,9 +6481,27 @@ def main():
             row_bar_width = 60 if args.show_bar_plots else 0
             print(f"  Matrix enabled: {n_samples} samples (cell size: {cell_size}px)")
 
+        # Compute group matrix width if enabled
+        group_matrix_width = 0
+        if args.show_group_matrix and args.show_matrix and meta_df is not None and 'group' in meta_df.columns:
+            n_unique_groups = meta_df['group'].nunique()
+            group_matrix_gap = 3  # gap between group columns
+            group_matrix_width = n_unique_groups * cell_width + (n_unique_groups - 1) * group_matrix_gap + 15
+            print(f"  Group matrix enabled: {n_unique_groups} groups")
+
+        # Compute group enrichment matrix width if enabled
+        group_enrichment_width = 0
+        if args.show_group_enrichment and args.show_matrix and meta_df is not None and 'group' in meta_df.columns:
+            n_unique_groups_enr = meta_df['group'].nunique()
+            group_enrichment_gap = 3
+            group_enrichment_width = n_unique_groups_enr * cell_width + (n_unique_groups_enr - 1) * group_enrichment_gap + 15
+            print(f"  Group enrichment matrix enabled: {n_unique_groups_enr} groups")
+
         matrix_block_width = (matrix_width + row_bar_width + 15) if args.show_matrix else 0
         matrix_x_start = base_left_margin  # Matrix starts right after enrichment
-        left_margin = base_left_margin + matrix_block_width  # Feature bars start after matrix
+        group_matrix_x_start = base_left_margin + matrix_block_width  # Group matrix after sample matrix
+        group_enrichment_x_start = base_left_margin + matrix_block_width + group_matrix_width  # Enrichment after group matrix
+        left_margin = base_left_margin + matrix_block_width + group_matrix_width + group_enrichment_width  # Feature bars start after all
 
         # Calculate y positions (reads stacked vertically)
         read_y_positions = {}
@@ -6489,6 +6791,22 @@ def main():
                                          cluster_enrichments, row_bar_x_start, row_bar_width - 10,
                                          text_color, background_color, sample_colors=sample_colors,
                                          axis_y=header_baseline_y)
+
+            # Draw group matrix if enabled (between sample matrix and feature bars)
+            if args.show_group_matrix and args.show_matrix and matrix_data:
+                cluster_ids_for_group = list(cluster_y_start.keys())
+                draw_group_matrix(d, cluster_ids_for_group, cluster_y_start, cluster_y_end,
+                                  matrix_data, group_colors, group_matrix_x_start,
+                                  cell_width, cell_height, text_color, background_color,
+                                  header_y=header_baseline_y)
+
+            # Draw group enrichment matrix if enabled (after group matrix, before feature bars)
+            if args.show_group_enrichment and args.show_matrix and matrix_data:
+                cluster_ids_for_enrichment = list(cluster_y_start.keys())
+                draw_group_enrichment_matrix(d, cluster_ids_for_enrichment, cluster_y_start, cluster_y_end,
+                                             matrix_data, group_colors, group_enrichment_x_start,
+                                             cell_width, cell_height, text_color, background_color,
+                                             header_y=header_baseline_y)
 
             # Draw enrichment bubbles/grid (to the RIGHT of dendrogram tips, before feature bars)
             # Dendrogram tips are at 50 + dendrogram_width (consistent with draw_cluster_dendrogram_vertical)
