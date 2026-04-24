@@ -2371,18 +2371,28 @@ def draw_cluster_dendrogram_vertical(d, cluster_dendro_data, cluster_y_start, cl
     # The dendrogram occupies x=50 to x=50+dendrogram_width
     dendro_base_x = 50 + dendrogram_width
 
-    # Use log-scaled distances if range is large (>10x), so all merges are visible
-    import math
-    use_log_scale = (max_distance / max(min_distance, 1e-10)) > 10
-    if use_log_scale:
-        log_max = math.log1p(max_distance)
-        def distance_to_x(dist):
-            """Convert distance to X pixel coordinate using log scale."""
-            return dendro_base_x - (math.log1p(dist) / log_max) * (dendrogram_width - 15)
-    else:
-        def distance_to_x(dist):
-            """Convert distance to X pixel coordinate (higher distance = further left)."""
-            return dendro_base_x - (dist / max_distance) * (dendrogram_width - 15)
+    # Axis break: compress the empty range [0, min_distance) into a small gap
+    # with diagonal break marks. Branches only exist at distances >= min_distance.
+    break_gap_px = 12  # pixels for the break gap (// marks)
+    branch_width = dendrogram_width - 15 - break_gap_px  # remaining space for actual branches
+    branch_width = max(branch_width, 50)  # ensure minimum
+
+    # Distance range for branches: [min_distance, max_distance]
+    branch_range = max_distance - min_distance if max_distance > min_distance else 1
+
+    # Break position: where the // marks go (right edge minus break gap)
+    break_x = dendro_base_x - break_gap_px
+
+    def distance_to_x(dist):
+        """Convert distance to X coordinate. Distances < min_distance map to tip area.
+        Distances >= min_distance map proportionally to the branch area left of the break."""
+        if dist <= 0:
+            return dendro_base_x  # leaf tips at right edge
+        if dist < min_distance:
+            return break_x  # compress to break point
+        # Map [min_distance, max_distance] to [break_x - branch_width, break_x]
+        frac = (dist - min_distance) / branch_range
+        return break_x - frac * branch_width
 
     # Line color based on background
     line_color = '#000000' if background_color == 'white' else '#FFFFFF'
@@ -2460,12 +2470,17 @@ def draw_cluster_dendrogram_vertical(d, cluster_dendro_data, cluster_y_start, cl
 
     print(f"  Drew vertical dendrogram for {n_clusters} clusters")
 
-    return max_distance, dendro_base_x, dendrogram_width
+    return max_distance, dendro_base_x, dendrogram_width, min_distance, break_x, branch_width, break_gap_px
 
 
 def draw_dendrogram_scale_axis(d, max_distance, dendro_base_x, dendrogram_width,
-                                axis_y, background_color, n_ticks=5):
+                                axis_y, background_color, n_ticks=5,
+                                min_distance=0, break_x=None, branch_width=None, break_gap_px=12):
     """Draw a horizontal scale axis for the dendrogram showing genetic distance.
+
+    When break info is provided, draws an axis with a break (//) between the
+    tip (distance=0) and the first merge (min_distance), with ticks only in
+    the branch range.
 
     Args:
         d: Drawing object
@@ -2475,42 +2490,92 @@ def draw_dendrogram_scale_axis(d, max_distance, dendro_base_x, dendrogram_width,
         axis_y: Y coordinate for the axis
         background_color: Background color for contrast
         n_ticks: Number of tick marks
+        min_distance: Minimum merge distance (cut point)
+        break_x: X coordinate of the break point
+        branch_width: Pixel width of the branch area
+        break_gap_px: Pixel width of the break gap
     """
     line_color = '#000000' if background_color == 'white' else '#FFFFFF'
-    usable_width = dendrogram_width - 15
 
-    def distance_to_x(dist):
-        return dendro_base_x - (dist / max_distance) * usable_width
+    if break_x is not None and branch_width is not None and min_distance > 0:
+        # Axis with break
+        branch_range = max_distance - min_distance if max_distance > min_distance else 1
 
-    x_start = distance_to_x(max_distance)
-    x_end = distance_to_x(0)
+        def dist_to_x(dist):
+            if dist < min_distance:
+                return break_x
+            frac = (dist - min_distance) / branch_range
+            return break_x - frac * branch_width
 
-    # Axis line
-    d.append(draw.Line(x_start, axis_y, x_end, axis_y, stroke=line_color, stroke_width=1))
+        # Left axis segment (branches: min_distance to max_distance)
+        x_left = dist_to_x(max_distance)
+        x_right_branch = dist_to_x(min_distance)  # = break_x
+        d.append(draw.Line(x_left, axis_y, x_right_branch, axis_y, stroke=line_color, stroke_width=1))
 
-    # Tick marks and labels
-    for i in range(n_ticks + 1):
-        dist_val = max_distance * i / n_ticks
-        x = distance_to_x(dist_val)
-        d.append(draw.Line(x, axis_y, x, axis_y - 4, stroke=line_color, stroke_width=1))
-        # Format label
-        if max_distance >= 10:
-            label = f"{dist_val:.0f}"
-        elif max_distance >= 1:
-            label = f"{dist_val:.1f}"
-        else:
-            label = f"{dist_val:.2f}"
-        d.append(draw.Text(
-            label, font_size=7, x=x, y=axis_y - 7,
-            fill=line_color, font_family='sans-serif', text_anchor='middle'
-        ))
+        # Right axis segment (tip: 0)
+        x_tip = dendro_base_x
+        d.append(draw.Line(x_tip, axis_y, x_tip, axis_y, stroke=line_color, stroke_width=1))
 
-    # Axis label
-    mid_x = (x_start + x_end) / 2
-    d.append(draw.Text(
-        'Cluster Distance', font_size=7, x=mid_x, y=axis_y - 16,
-        fill=line_color, font_family='sans-serif', text_anchor='middle'
-    ))
+        # Break marks (//) between break_x and dendro_base_x
+        break_center_x = (break_x + dendro_base_x) / 2
+        slash_len = 4
+        slash_gap = 2
+        for offset in [-slash_gap, slash_gap]:
+            cx = break_center_x + offset
+            d.append(draw.Line(cx - slash_len/2, axis_y + 3,
+                              cx + slash_len/2, axis_y - 3,
+                              stroke=line_color, stroke_width=1))
+
+        # Tick at tip (0)
+        d.append(draw.Line(x_tip, axis_y, x_tip, axis_y - 4, stroke=line_color, stroke_width=1))
+        d.append(draw.Text('0', font_size=7, x=x_tip, y=axis_y - 7,
+                           fill=line_color, font_family='sans-serif', text_anchor='middle'))
+
+        # Ticks in branch range only
+        for i in range(n_ticks + 1):
+            dist_val = min_distance + branch_range * i / n_ticks
+            x = dist_to_x(dist_val)
+            d.append(draw.Line(x, axis_y, x, axis_y - 4, stroke=line_color, stroke_width=1))
+            if max_distance >= 10:
+                label = f"{dist_val:.0f}"
+            elif max_distance >= 1:
+                label = f"{dist_val:.1f}"
+            else:
+                label = f"{dist_val:.2f}"
+            d.append(draw.Text(label, font_size=7, x=x, y=axis_y - 7,
+                               fill=line_color, font_family='sans-serif', text_anchor='middle'))
+
+        # Axis label
+        mid_x = (x_left + x_right_branch) / 2
+        d.append(draw.Text('Cluster Distance', font_size=7, x=mid_x, y=axis_y - 16,
+                           fill=line_color, font_family='sans-serif', text_anchor='middle'))
+    else:
+        # Simple axis without break
+        usable_width = dendrogram_width - 15
+
+        def dist_to_x(dist):
+            return dendro_base_x - (dist / max_distance) * usable_width
+
+        x_start = dist_to_x(max_distance)
+        x_end = dist_to_x(0)
+        d.append(draw.Line(x_start, axis_y, x_end, axis_y, stroke=line_color, stroke_width=1))
+
+        for i in range(n_ticks + 1):
+            dist_val = max_distance * i / n_ticks
+            x = dist_to_x(dist_val)
+            d.append(draw.Line(x, axis_y, x, axis_y - 4, stroke=line_color, stroke_width=1))
+            if max_distance >= 10:
+                label = f"{dist_val:.0f}"
+            elif max_distance >= 1:
+                label = f"{dist_val:.1f}"
+            else:
+                label = f"{dist_val:.2f}"
+            d.append(draw.Text(label, font_size=7, x=x, y=axis_y - 7,
+                               fill=line_color, font_family='sans-serif', text_anchor='middle'))
+
+        mid_x = (x_start + x_end) / 2
+        d.append(draw.Text('Cluster Distance', font_size=7, x=mid_x, y=axis_y - 16,
+                           fill=line_color, font_family='sans-serif', text_anchor='middle'))
 
 
 def smooth_features_to_pixels(colored_features, bar_length, ratio, oversample=1):
@@ -6336,9 +6401,11 @@ def main():
                     left_margin, dendrogram_width, background_color,
                     cut_distance=dendro_cut_distance)
                 if dendro_result is not None:
-                    d_max_dist, d_base_x, d_width = dendro_result
+                    d_max_dist, d_base_x, d_width, d_min_dist, d_break_x, d_branch_width, d_break_gap = dendro_result
                     draw_dendrogram_scale_axis(d, d_max_dist, d_base_x, d_width,
-                                               header_baseline_y, background_color)
+                                               header_baseline_y, background_color,
+                                               min_distance=d_min_dist, break_x=d_break_x,
+                                               branch_width=d_branch_width, break_gap_px=d_break_gap)
 
             # Draw scale bar above first featureset column (for column_tracks or show_matrix modes)
             if args.column_tracks or args.show_matrix:
