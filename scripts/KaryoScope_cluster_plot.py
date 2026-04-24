@@ -215,7 +215,14 @@ def parse_args():
                              "annotation-selected representatives")
     parser.add_argument("--fresh-dendrogram", dest="fresh_dendrogram", action="store_true",
                         help="Compute dendrogram fresh from displayed reads' feature vectors "
-                             "(like KS_allchr_dendrogram.py) instead of using pre-computed cluster linkage")
+                             "(like KS_allchr_dendrogram.py) instead of using pre-computed cluster linkage. "
+                             "WARNING: reorders individual reads, may break enrichment grid.")
+    parser.add_argument("--fresh-cluster-dendrogram", dest="fresh_cluster_dendrogram", action="store_true",
+                        help="Compute cluster-level dendrogram fresh from displayed reads' feature vectors. "
+                             "Reorders cluster blocks (not individual reads) so enrichment grid stays intact.")
+    parser.add_argument("--dendro-linkage", dest="dendro_linkage_method", default="average",
+                        choices=["ward", "average", "complete", "weighted", "single"],
+                        help="Linkage method for fresh cluster dendrogram (default: average)")
     parser.add_argument("--show-read-indices", dest="show_read_indices", action="store_true",
                         help="Show read index labels (1, 2, 3, ...) next to each read (default: hidden)")
     parser.add_argument("--show-threshold", dest="show_threshold", action="store_true",
@@ -306,6 +313,8 @@ def _print_params_and_command(args, database, featuresets, background_color):
         ("hide-dendrogram", _fmt(args.hide_dendrogram, "hide_dendrogram"), None),
         ("full-dendrogram", _fmt(args.full_dendrogram, "full_dendrogram"), None),
         ("fresh-dendrogram", _fmt(args.fresh_dendrogram, "fresh_dendrogram"), None),
+        ("fresh-cluster-dendrogram", _fmt(args.fresh_cluster_dendrogram, "fresh_cluster_dendrogram"), None),
+        ("dendro-linkage", _fmt(args.dendro_linkage_method, "dendro_linkage_method"), None),
         ("use-centroids", _fmt(args.use_centroids, "use_centroids"), None),
         ("no-reorder", _fmt(args.no_reorder, "no_reorder"), None),
         ("target-width", _fmt(args.target_width, "target_width"), None),
@@ -1717,6 +1726,97 @@ def compute_fresh_dendrogram(displayed_reads, read_bed_data, featureset):
         return None
 
 
+def compute_fresh_cluster_dendrogram(cluster_reads, read_bed_data, featureset,
+                                     linkage_method='average'):
+    """Compute cluster-level dendrogram from displayed reads' BED feature vectors.
+
+    For each cluster, builds a mean feature vector from all displayed reads in that
+    cluster, then computes linkage on cluster centroids. This reorders cluster
+    blocks while keeping reads within each cluster grouped together.
+
+    Args:
+        cluster_reads: OrderedDict of cluster_id -> {'reads': [(read, sample), ...], ...}
+        read_bed_data: Dict of read -> {featureset: [{start, stop, feature}, ...]}
+        featureset: Which featureset to use
+        linkage_method: Linkage method for scipy (default: 'average'/UPGMA)
+
+    Returns:
+        cluster_dendro_data dict compatible with draw_cluster_dendrogram_vertical, or None
+    """
+    from scipy.cluster.hierarchy import linkage, leaves_list
+    from scipy.spatial.distance import pdist
+    from sklearn.preprocessing import StandardScaler
+
+    try:
+        # Build per-read edge vectors
+        all_edge_set = set()
+        cluster_read_edges = {}  # cluster_id -> list of edge Counter dicts
+
+        for cluster_id, data in cluster_reads.items():
+            read_edges_list = []
+            for read, sample in data['reads']:
+                if read not in read_bed_data:
+                    continue
+                entries = read_bed_data[read].get(featureset, [])
+                entries = sorted(entries, key=lambda x: x['start'])
+                features = [e['feature'] for e in entries if e['feature'] != 'novel']
+                edges = {}
+                for i in range(len(features) - 1):
+                    edge = tuple(sorted([features[i], features[i+1]]))
+                    edges[edge] = edges.get(edge, 0) + 1
+                    all_edge_set.add(edge)
+                read_edges_list.append(edges)
+            cluster_read_edges[cluster_id] = read_edges_list
+
+        cluster_ids = [cid for cid in cluster_reads.keys() if cluster_read_edges.get(cid)]
+        if len(cluster_ids) < 2:
+            print(f"  Not enough clusters for fresh cluster dendrogram ({len(cluster_ids)})")
+            return None
+
+        all_edges = sorted(all_edge_set)
+        edge_to_idx = {e: i for i, e in enumerate(all_edges)}
+
+        # Build per-cluster mean feature vectors
+        import numpy as np
+        cluster_matrix = np.zeros((len(cluster_ids), len(all_edges)), dtype=np.float32)
+        for i, cid in enumerate(cluster_ids):
+            if not cluster_read_edges[cid]:
+                continue
+            read_vectors = np.zeros((len(cluster_read_edges[cid]), len(all_edges)), dtype=np.float32)
+            for j, edges in enumerate(cluster_read_edges[cid]):
+                for edge, count in edges.items():
+                    read_vectors[j, edge_to_idx[edge]] = count
+            # log1p per read, then mean across reads
+            read_vectors = np.log1p(read_vectors)
+            cluster_matrix[i] = read_vectors.mean(axis=0)
+
+        # z-score normalize cluster vectors
+        scaler = StandardScaler()
+        cluster_matrix = scaler.fit_transform(cluster_matrix)
+
+        # Compute linkage
+        dist = pdist(cluster_matrix, metric='euclidean')
+        Z = linkage(dist, method=linkage_method)
+        leaf_order = leaves_list(Z)
+        reordered_cluster_ids = [cluster_ids[i] for i in leaf_order]
+
+        cluster_dendro_data = {
+            'linkage': Z,
+            'cluster_order': reordered_cluster_ids,
+            'leaf_order': list(range(len(reordered_cluster_ids)))
+        }
+
+        print(f"  Computed fresh cluster dendrogram for {len(cluster_ids)} clusters "
+              f"({len(all_edges)} edge features, linkage={linkage_method})")
+        return cluster_dendro_data
+
+    except Exception as e:
+        print(f"  Warning: Could not compute fresh cluster dendrogram: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
 def draw_full_dendrogram(d, full_dendro_data, read_y_positions, read_names_displayed,
                          left_margin, dendrogram_width, background_color):
     """Draw complete hierarchical dendrogram showing all reads as leaves.
@@ -2265,14 +2365,24 @@ def draw_cluster_dendrogram_vertical(d, cluster_dendro_data, cluster_y_start, cl
 
     max_distance = linkage_matrix[:, 2].max() if len(linkage_matrix) > 0 else 1
     max_distance = max(max_distance, 1)
+    min_distance = linkage_matrix[:, 2].min() if len(linkage_matrix) > 0 else 0
 
     # Dendrogram base X (rightmost point, where leaves attach)
     # The dendrogram occupies x=50 to x=50+dendrogram_width
     dendro_base_x = 50 + dendrogram_width
 
-    def distance_to_x(dist):
-        """Convert distance to X pixel coordinate (higher distance = further left)."""
-        return dendro_base_x - (dist / max_distance) * (dendrogram_width - 15)
+    # Use log-scaled distances if range is large (>10x), so all merges are visible
+    import math
+    use_log_scale = (max_distance / max(min_distance, 1e-10)) > 10
+    if use_log_scale:
+        log_max = math.log1p(max_distance)
+        def distance_to_x(dist):
+            """Convert distance to X pixel coordinate using log scale."""
+            return dendro_base_x - (math.log1p(dist) / log_max) * (dendrogram_width - 15)
+    else:
+        def distance_to_x(dist):
+            """Convert distance to X pixel coordinate (higher distance = further left)."""
+            return dendro_base_x - (dist / max_distance) * (dendrogram_width - 15)
 
     # Line color based on background
     line_color = '#000000' if background_color == 'white' else '#FFFFFF'
@@ -5736,6 +5846,24 @@ def main():
                 all_displayed_reads.append(read)
         full_dendro_data = compute_fresh_dendrogram(
             all_displayed_reads, read_data, featuresets[0] if featuresets else None)
+
+    # Compute fresh cluster-level dendrogram if requested
+    if getattr(args, 'fresh_cluster_dendrogram', False) and read_data:
+        fresh_cdendro = compute_fresh_cluster_dendrogram(
+            cluster_reads, read_data, featuresets[0] if featuresets else None,
+            linkage_method=getattr(args, 'dendro_linkage_method', 'average'))
+        if fresh_cdendro is not None:
+            # Reorder cluster_reads by fresh dendrogram order
+            new_cluster_reads = OrderedDict()
+            for cid in fresh_cdendro['cluster_order']:
+                if cid in cluster_reads:
+                    new_cluster_reads[cid] = cluster_reads[cid]
+            # Add any clusters not in dendrogram (e.g. too small)
+            for cid in cluster_reads:
+                if cid not in new_cluster_reads:
+                    new_cluster_reads[cid] = cluster_reads[cid]
+            cluster_reads = new_cluster_reads
+            cluster_dendro_data = fresh_cdendro
 
     # --- Generate colors ---
     # Get all unique samples
