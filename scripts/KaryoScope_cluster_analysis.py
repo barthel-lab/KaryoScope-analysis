@@ -31,7 +31,7 @@ from collections import defaultdict, Counter
 from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
 from scipy.spatial.distance import pdist, squareform
 from scipy.stats import fisher_exact, false_discovery_control
-from sklearn.metrics import silhouette_score, calinski_harabasz_score
+from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
 from sklearn.decomposition import TruncatedSVD
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
@@ -85,12 +85,13 @@ parser.add_argument("--min-k", dest="min_k", type=int, default=40,
 parser.add_argument("--max-k", dest="max_k", type=int, default=300,
                     help="Maximum number of clusters to test during auto-detection (default: 300)")
 parser.add_argument("--k-selection", dest="k_selection", default="composite-knee",
-                    choices=["composite", "silhouette", "cosine-silhouette", "calinski", "composite-knee"],
+                    choices=["composite", "silhouette", "cosine-silhouette", "calinski", "davies-bouldin", "composite-knee"],
                     help="Metric for selecting optimal k:\n"
                          "  composite: max weighted combination of silhouette + enrichment\n"
                          "  silhouette: cluster cohesion (favors fewer, tighter clusters)\n"
                          "  cosine-silhouette: cosine silhouette score (favors fewer, tighter clusters)\n"
                          "  calinski: Calinski-Harabasz index\n"
+                         "  davies-bouldin: Davies-Bouldin index (lower is better)\n"
                          "  composite-knee: knee/elbow of composite score curve (default, diminishing returns)")
 parser.add_argument("--min-cluster-size", dest="min_cluster_size", type=int, default=3,
                     help="Minimum cluster size to consider (default: 3)")
@@ -1459,10 +1460,12 @@ if args.n_clusters is None:
                 silhouette = silhouette_score(adj_matrix, labels, random_state=42)
                 cosine_silhouette = silhouette_score(adj_matrix, labels, metric='cosine', random_state=42)
             calinski_harabasz = calinski_harabasz_score(adj_matrix, labels)
+            davies_bouldin = davies_bouldin_score(adj_matrix, labels)
         else:
             silhouette = 0
             cosine_silhouette = 0
             calinski_harabasz = 0
+            davies_bouldin = float('inf')
 
         # Count clusters meeting minimum size
         cluster_sizes = Counter(labels)
@@ -1525,6 +1528,7 @@ if args.n_clusters is None:
             'silhouette': silhouette,
             'cosine_silhouette': cosine_silhouette,
             'calinski_harabasz': calinski_harabasz,
+            'davies_bouldin': davies_bouldin,
             'valid_clusters': valid_clusters,
             'any_enriched': any_enriched,
             'strong_enriched': strong_enriched,
@@ -1582,15 +1586,21 @@ if args.n_clusters is None:
         ax1.axvline(x=best_cosine_k, color='#F07167', linestyle='--', alpha=0.5, label=f'Best Cosine k={best_cosine_k}')
         ax1.legend(fontsize=7)
 
-        # 2. Calinski-Harabasz index (higher is better)
+        # 2. Calinski-Harabasz + Davies-Bouldin (dual axis)
         ax2 = axes[0, 1]
-        ax2.plot(stats_df['k'], stats_df['calinski_harabasz'], '-o', markersize=3, color='#60A5FA')
+        ax2.plot(stats_df['k'], stats_df['calinski_harabasz'], '-o', markersize=3, color='#60A5FA', label='Calinski-Harabasz')
         ax2.set_xlabel('Number of clusters (k)')
-        ax2.set_ylabel('Calinski-Harabasz Index')
-        ax2.set_title('Calinski-Harabasz (higher = better)')
+        ax2.set_ylabel('Calinski-Harabasz Index', color='#60A5FA')
+        ax2.set_title('CH (higher=better) / DB (lower=better)')
         best_ch_k = int(stats_df.loc[stats_df['calinski_harabasz'].idxmax(), 'k'])
-        ax2.axvline(x=best_ch_k, color='#40D392', linestyle='--', alpha=0.5, label=f'Best k={best_ch_k}')
-        ax2.legend()
+        ax2.axvline(x=best_ch_k, color='#60A5FA', linestyle='--', alpha=0.5, label=f'CH best k={best_ch_k}')
+        ax2_twin = ax2.twinx()
+        db_finite = stats_df[stats_df['davies_bouldin'] < float('inf')]
+        ax2_twin.plot(db_finite['k'], db_finite['davies_bouldin'], '-o', markersize=3, color='#F07167', label='Davies-Bouldin')
+        ax2_twin.set_ylabel('Davies-Bouldin Index', color='#F07167')
+        best_db_plot_k = int(db_finite.loc[db_finite['davies_bouldin'].idxmin(), 'k']) if len(db_finite) > 0 else best_ch_k
+        ax2.axvline(x=best_db_plot_k, color='#F07167', linestyle='--', alpha=0.5, label=f'DB best k={best_db_plot_k}')
+        ax2.legend(fontsize=7, loc='upper left')
 
         # 3. Enrichment ratios
         ax3 = axes[0, 2]
@@ -1762,6 +1772,8 @@ if args.n_clusters is None:
     print(f"    Silhouette:        k={best_silhouette_k} (score={stats_df['silhouette'].max():.4f})")
     print(f"    Cosine Silhouette: k={best_cosine_k} (score={stats_df['cosine_silhouette'].max():.4f})")
     print(f"    Calinski-Harabasz: k={best_ch_k} (score={stats_df['calinski_harabasz'].max():.1f})")
+    best_db_k = int(stats_df.loc[stats_df['davies_bouldin'].idxmin(), 'k'])
+    print(f"    Davies-Bouldin:    k={best_db_k} (score={stats_df['davies_bouldin'].min():.4f})")
     print(f"    Composite:         k={best_composite_k} (score={stats_df['composite_score'].max():.4f})")
     print(f"    Composite-knee:    k={best_knee_raw_k} (raw), k={best_knee_k} (smoothed, window={window_size})")
 
@@ -1775,6 +1787,9 @@ if args.n_clusters is None:
     elif args.k_selection == "calinski":
         selected_k = best_ch_k
         selection_metric = "Calinski-Harabasz"
+    elif args.k_selection == "davies-bouldin":
+        selected_k = best_db_k
+        selection_metric = "Davies-Bouldin"
     elif args.k_selection == "composite-knee":
         selected_k = best_knee_k  # Use smoothed for stability
         selection_metric = "composite-knee (diminishing returns)"
