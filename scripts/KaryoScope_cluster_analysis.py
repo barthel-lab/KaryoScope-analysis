@@ -756,8 +756,16 @@ def calculate_enrichment_two_group(cluster_samples, sample_to_group, control_gro
     }
 
 
-def calculate_enrichment_per_sample(cluster_samples, sample_totals):
-    """Calculate enrichment per sample (each sample vs all others)."""
+def calculate_enrichment_per_sample(cluster_samples, sample_totals,
+                                    normalization='raw', sample_total_reads=None):
+    """Calculate enrichment per sample (each sample vs all others).
+
+    Args:
+        cluster_samples: List of sample labels for reads in this cluster
+        sample_totals: Dict of sample -> total telomeric reads
+        normalization: 'raw', 'telomeric', or 'total'
+        sample_total_reads: Dict of sample -> total genomic reads (for 'total' normalization)
+    """
     samples = list(sample_totals.keys())
 
     # Handle edge case: no samples
@@ -780,30 +788,68 @@ def calculate_enrichment_per_sample(cluster_samples, sample_totals):
     total_in = len(cluster_samples)
     sample_pcts = {s: (sample_counts.get(s, 0) / total_in * 100) if total_in > 0 else 0 for s in samples}
 
+    # Choose denominator based on normalization
+    if normalization == 'total' and sample_total_reads:
+        denominators = sample_total_reads
+    else:
+        # 'raw' and 'telomeric' both use telomeric read counts
+        # 'raw' uses raw Fisher's, 'telomeric' uses proportion-based
+        denominators = sample_totals
+
     # Fisher's exact for each sample vs rest
     p_values = {}
     odds_ratios = {}
-    for sample in samples:
-        in_cluster = sample_counts.get(sample, 0)
-        out_cluster = sample_totals[sample] - in_cluster
-        other_in = total_in - in_cluster
-        other_out = sum(sample_totals.values()) - sample_totals[sample] - other_in
 
-        odds, p_val = fisher_exact([[in_cluster, other_in], [out_cluster, other_out]], alternative='greater')
-        p_values[sample] = p_val
-        odds_ratios[sample] = odds
+    if normalization == 'raw':
+        # Standard Fisher's exact on raw counts
+        for sample in samples:
+            in_cluster = sample_counts.get(sample, 0)
+            out_cluster = sample_totals[sample] - in_cluster
+            other_in = total_in - in_cluster
+            other_out = sum(sample_totals.values()) - sample_totals[sample] - other_in
+            odds, p_val = fisher_exact([[in_cluster, other_in], [out_cluster, other_out]], alternative='greater')
+            p_values[sample] = p_val
+            odds_ratios[sample] = odds
+    else:
+        # Proportion-based: compute per-sample proportions using chosen denominator,
+        # then use Mann-Whitney U to test each sample vs rest
+        from scipy.stats import mannwhitneyu
+        sample_proportions = {}
+        for s in samples:
+            denom = denominators.get(s, 1)
+            sample_proportions[s] = sample_counts.get(s, 0) / denom if denom > 0 else 0
+
+        for sample in samples:
+            prop_sample = sample_proportions[sample]
+            props_rest = [sample_proportions[s] for s in samples if s != sample]
+
+            # Fold change: sample proportion / mean of rest
+            mean_rest = np.mean(props_rest) if props_rest else 0
+            if mean_rest > 0:
+                odds_ratios[sample] = prop_sample / mean_rest
+            elif prop_sample > 0:
+                odds_ratios[sample] = float('inf')
+            else:
+                odds_ratios[sample] = 1.0
+
+            # P-value: one-sided test (is this sample's proportion greater?)
+            if len(props_rest) >= 1 and prop_sample > 0:
+                try:
+                    _, p_val = mannwhitneyu([prop_sample], props_rest, alternative='greater')
+                except:
+                    p_val = 1.0
+            else:
+                p_val = 1.0
+            p_values[sample] = p_val
 
     # Find most significant ENRICHED sample (p < 0.05 AND odds > 1)
-    # Bug fix: previously picked min p-value without checking if enriched or depleted
     enriched_samples = {s: p for s, p in p_values.items() if p < 0.05 and odds_ratios[s] > 1}
 
     if enriched_samples:
-        # Pick the most significant enriched sample
         min_p_sample = min(enriched_samples.keys(), key=lambda s: enriched_samples[s])
         min_p = enriched_samples[min_p_sample]
         enrichment = f"{min_p_sample}-enriched"
     elif p_values:
-        # No significant enrichment - find min p-value for reporting
         min_p_sample = min(p_values.keys(), key=lambda s: p_values[s])
         min_p = p_values[min_p_sample]
         enrichment = "mixed"
@@ -812,7 +858,6 @@ def calculate_enrichment_per_sample(cluster_samples, sample_totals):
         min_p = 1.0
         enrichment = "mixed"
 
-    # Determine dominant sample (guard against empty samples)
     dominant_sample = max(samples, key=lambda s: sample_pcts[s]) if samples else None
 
     return {
@@ -949,6 +994,22 @@ seq_to_group = {r: sample_to_group.get(s, s) for r, s in seq_to_sample.items()}
 # Count samples by group
 group_totals = Counter(seq_to_group.values())
 sample_totals = Counter(seq_to_sample.values())
+
+# Load total genomic read counts if provided (for 'total' normalization)
+sample_total_reads_dict = None
+if args.total_reads_file:
+    try:
+        total_reads_df = pd.read_csv(args.total_reads_file, sep='\t')
+        sample_total_reads_dict = dict(zip(total_reads_df['sample'], total_reads_df['total_reads']))
+        print(f"  Loaded total read counts for {len(sample_total_reads_dict)} samples from {args.total_reads_file}")
+    except Exception as e:
+        print(f"  Warning: Could not load total reads file: {e}")
+
+if args.enrichment_normalization != 'raw':
+    print(f"  Enrichment normalization: {args.enrichment_normalization}")
+    if args.enrichment_normalization == 'total' and not sample_total_reads_dict:
+        print(f"  Warning: 'total' normalization requires --total-reads-file, falling back to 'raw'")
+        args.enrichment_normalization = 'raw'
 
 print(f"\n  Group counts:")
 for group, count in sorted(group_totals.items()):
@@ -1850,7 +1911,9 @@ for cluster_id in range(1, n_clusters + 1):
     if args.comparison_mode == "two-group":
         stats = calculate_enrichment_two_group(cluster_samples, sample_to_group, control_group, group_totals)
     else:  # per-sample
-        stats = calculate_enrichment_per_sample(cluster_samples, sample_totals)
+        stats = calculate_enrichment_per_sample(cluster_samples, sample_totals,
+                                                normalization=args.enrichment_normalization,
+                                                sample_total_reads=sample_total_reads_dict)
 
     # Find centroid (read closest to cluster mean)
     cluster_matrix = adj_matrix[cluster_indices]
@@ -1892,7 +1955,42 @@ for cluster_id in range(1, n_clusters + 1):
             cluster_record[f'{g}_count'] = group_counts_cluster.get(g, 0)
             cluster_record[f'{g}_pct'] = (group_counts_cluster.get(g, 0) / total_in_cluster * 100) if total_in_cluster > 0 else 0
 
-        # Also run group-level Fisher's test for comparison
+        # Compute per-group enrichment using chosen normalization
+        # For each group, test if it's enriched in this cluster
+        from scipy.stats import mannwhitneyu as mwu
+        for g in all_groups:
+            g_samples = [s for s in sample_labels if sample_to_group.get(s) == g]
+            other_samples = [s for s in sample_labels if sample_to_group.get(s) != g]
+
+            if args.enrichment_normalization == 'raw':
+                # Fisher's exact: group vs rest
+                g_in = group_counts_cluster.get(g, 0)
+                other_in = total_in_cluster - g_in
+                g_total = sum(sample_totals.get(s, 0) for s in g_samples)
+                other_total = sum(sample_totals.get(s, 0) for s in other_samples)
+                g_out = g_total - g_in
+                other_out = other_total - other_in
+                try:
+                    odds, pval = fisher_exact([[g_in, other_in], [g_out, other_out]], alternative='greater')
+                except:
+                    odds, pval = 1.0, 1.0
+            else:
+                # Proportion-based: per-sample proportions, MW test between groups
+                denoms = sample_total_reads_dict if (args.enrichment_normalization == 'total' and sample_total_reads_dict) else sample_totals
+                g_props = [stats['group_counts'].get(s, 0) / denoms.get(s, 1) for s in g_samples]
+                o_props = [stats['group_counts'].get(s, 0) / denoms.get(s, 1) for s in other_samples]
+                mean_g = np.mean(g_props) if g_props else 0
+                mean_o = np.mean(o_props) if o_props else 0
+                odds = mean_g / mean_o if mean_o > 0 else (float('inf') if mean_g > 0 else 1.0)
+                try:
+                    _, pval = mwu(g_props, o_props, alternative='greater')
+                except:
+                    pval = 1.0
+
+            cluster_record[f'{g}_pval'] = pval
+            cluster_record[f'{g}_odds'] = odds
+
+        # Legacy group-level fields
         if len(all_groups) == 2:
             group_stats = calculate_enrichment_two_group(cluster_samples, sample_to_group, control_group, group_totals)
             cluster_record['group_enrichment'] = group_stats['enrichment']

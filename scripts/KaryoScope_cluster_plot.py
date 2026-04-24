@@ -3401,12 +3401,12 @@ def draw_group_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, matrix_dat
 
 def draw_group_enrichment_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, matrix_data,
                                   group_colors, x_start, cell_width, cell_height, text_color,
-                                  background_color='black', header_y=None):
-    """Draw group-level enrichment matrix using Fisher's exact test.
+                                  background_color='black', header_y=None,
+                                  cluster_analysis_df=None):
+    """Draw group-level enrichment matrix using pre-computed stats from cluster_analysis.
 
-    For each cluster x group combination, tests whether the group is enriched
-    in that cluster compared to the overall dataset using a one-sided Fisher's
-    exact test.
+    Uses {group}_pval and {group}_odds columns from cluster_analysis.tsv if available,
+    otherwise falls back to Fisher's exact test on raw counts.
 
     Args:
         d: Drawing object
@@ -3494,6 +3494,20 @@ def draw_group_enrichment_matrix(d, cluster_ids, cluster_y_start, cluster_y_end,
 
     # Draw bubbles for each cluster (mirroring sample enrichment grid style)
     bubble_radius = cell_height / 2 - 1
+    # Build lookup from cluster_analysis_df if available
+    precomputed = {}
+    if cluster_analysis_df is not None:
+        for _, row in cluster_analysis_df.iterrows():
+            cid = row.get('cluster_id', row.get('cluster'))
+            for g in unique_groups:
+                pval_col = f'{g}_pval'
+                odds_col = f'{g}_odds'
+                if pval_col in row.index and odds_col in row.index:
+                    precomputed[(cid, g)] = {
+                        'pval': row[pval_col] if pd.notna(row[pval_col]) else 1.0,
+                        'odds': row[odds_col] if pd.notna(row[odds_col]) else 1.0,
+                    }
+
     for cluster_id in cluster_y_start:
         if cluster_id not in cluster_group_counts:
             continue
@@ -3503,21 +3517,26 @@ def draw_group_enrichment_matrix(d, cluster_ids, cluster_y_start, cluster_y_end,
         for i, group in enumerate(unique_groups):
             x_center = x_start + i * (cell_width + group_gap) + cell_width / 2
 
-            group_in_cluster = cluster_group_counts[cluster_id].get(group, 0)
-            other_in_cluster = cluster_totals[cluster_id] - group_in_cluster
-            group_outside_cluster = group_totals[group] - group_in_cluster
-            other_outside_cluster = grand_total - group_in_cluster - other_in_cluster - group_outside_cluster
-
-            # 2x2 contingency table for one-sided Fisher's exact test (greater)
-            table = [[group_in_cluster, other_in_cluster],
-                     [group_outside_cluster, other_outside_cluster]]
-
-            try:
-                odds_ratio, p_value = fisher_exact(table, alternative='greater')
-            except Exception:
-                odds_ratio, p_value = 1.0, 1.0
+            # Use pre-computed values if available
+            if (cluster_id, group) in precomputed:
+                p_value = precomputed[(cluster_id, group)]['pval']
+                odds_ratio = precomputed[(cluster_id, group)]['odds']
+            else:
+                # Fallback: Fisher's exact on raw counts
+                from scipy.stats import fisher_exact
+                group_in_cluster = cluster_group_counts[cluster_id].get(group, 0)
+                other_in_cluster = cluster_totals[cluster_id] - group_in_cluster
+                group_outside_cluster = group_totals[group] - group_in_cluster
+                other_outside_cluster = grand_total - group_in_cluster - other_in_cluster - group_outside_cluster
+                table = [[group_in_cluster, other_in_cluster],
+                         [group_outside_cluster, other_outside_cluster]]
+                try:
+                    odds_ratio, p_value = fisher_exact(table, alternative='greater')
+                except Exception:
+                    odds_ratio, p_value = 1.0, 1.0
 
             # Percentage of cluster from this group
+            group_in_cluster = cluster_group_counts[cluster_id].get(group, 0)
             cluster_total = cluster_totals.get(cluster_id, 1)
             pct = (group_in_cluster / cluster_total * 100) if cluster_total > 0 else 0
 
@@ -6825,7 +6844,8 @@ def main():
                 draw_group_enrichment_matrix(d, cluster_ids_for_enrichment, cluster_y_start, cluster_y_end,
                                              matrix_data, group_colors, group_enrichment_x_start,
                                              cell_width, cell_height, text_color, background_color,
-                                             header_y=header_baseline_y)
+                                             header_y=header_baseline_y,
+                                             cluster_analysis_df=cluster_analysis_df)
 
             # Draw enrichment bubbles/grid (to the RIGHT of dendrogram tips, before feature bars)
             # Dendrogram tips are at 50 + dendrogram_width (consistent with draw_cluster_dendrogram_vertical)
