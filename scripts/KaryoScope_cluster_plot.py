@@ -250,6 +250,15 @@ def parse_args():
                         help="Show enrichment as a grid of bubbles (one per sample) instead of single bubble. "
                              "Bubble size = sample %%, opacity = -log10(p-value), color = sample color. "
                              "Requires per-sample comparison mode in cluster analysis.")
+    parser.add_argument("--enrichment-normalization", dest="enrichment_normalization",
+                        default="raw", choices=["raw", "telomeric", "total"],
+                        help="Normalization strategy for enrichment calculation:\n"
+                             "  raw: Fisher's exact test on raw counts (default)\n"
+                             "  telomeric: normalize by per-sample telomeric read count (compositional)\n"
+                             "  total: normalize by per-sample total genomic read count")
+    parser.add_argument("--total-reads-file", dest="total_reads_file", default=None,
+                        help="TSV file with 'sample' and 'total_reads' columns. "
+                             "Required for --enrichment-normalization total.")
     parser.add_argument("--orient-telomere-top", dest="orient_telomere_top", action="store_true",
                         help="Reorient reads so telomere features (canonical_telomere, noncanonical_telomere) "
                              "are always at the top of the read visualization.")
@@ -333,6 +342,8 @@ def _print_params_and_command(args, database, featuresets, background_color):
         ("cluster-labels", _fmt(args.cluster_labels, "cluster_labels"), None),
         ("label-column", _fmt(args.label_column, "label_column"), None),
         ("enrichment-grid", _fmt(args.enrichment_grid, "enrichment_grid"), None),
+        ("enrichment-normalization", _fmt(args.enrichment_normalization, "enrichment_normalization"), None),
+        ("total-reads-file", _fmt(args.total_reads_file, "total_reads_file"), None),
         ("show-clade-id", _fmt(args.show_clade_id, "show_clade_id"), None),
         ("show-clade-count", _fmt(args.show_clade_count, "show_clade_count"), None),
         ("show-cluster-numbers", _fmt(args.show_cluster_numbers, "show_cluster_numbers"), None),
@@ -4284,17 +4295,17 @@ def draw_grid_legend(d, x_start, y_start, sample_order, sample_colors, text_colo
                           fill=text_color, font_family='sans-serif', text_anchor='start'))
     legend_y += 25
 
-    # Opacity legend
+    # Opacity legend (FDR-based binary)
     d.append(draw.Text(
-        "Opacity: -log₁₀(p-value)",
+        "Opacity: FDR significance",
         font_size=font_size, x=x_start, y=legend_y,
         fill=text_color, font_family='sans-serif'
     ))
     legend_y += 14
 
-    alphas = [(0.0, "NS"), (0.5, "p<0.01"), (1.0, "p<1e⁻¹⁰")]
+    alphas = [(0.15, "FDR ≥ 0.1"), (1.0, "FDR < 0.1")]
     for i, (alpha, label) in enumerate(alphas):
-        cx = x_start + 10 + i * 55
+        cx = x_start + 10 + i * 65
         d.append(draw.Circle(cx, legend_y + 5, bubble_radius * 0.7, fill='#888888',
                            fill_opacity=alpha, stroke='white', stroke_width=0.3))
         d.append(draw.Text(label, font_size=7, x=cx + bubble_radius + 5, y=legend_y + 8,
@@ -4512,7 +4523,7 @@ def draw_bubble_legend_vertical(d, x_start, y_start, cluster_stats, text_color='
     current_y += section_gap
     d.append(draw.Text(
         "Size: # reads", font_size=7, x=x_start + 3, y=current_y,
-        fill=text_color, font_family='sans-serif', font_style='italic'
+        fill=text_color, font_family='sans-serif'
     ))
 
     # Pick 3 representative sizes: small, medium, large
@@ -4539,7 +4550,7 @@ def draw_bubble_legend_vertical(d, x_start, y_start, cluster_stats, text_color='
     current_y += section_gap
     d.append(draw.Text(
         "Opacity: FDR", font_size=7, x=x_start + 3, y=current_y,
-        fill=text_color, font_family='sans-serif', font_style='italic'
+        fill=text_color, font_family='sans-serif'
     ))
 
     alphas = [(0.0, "NS"), (0.5, "q<0.01"), (1.0, "q<1e\u207b\u00b9\u2070")]
@@ -4558,7 +4569,7 @@ def draw_bubble_legend_vertical(d, x_start, y_start, cluster_stats, text_color='
     current_y += section_gap
     d.append(draw.Text(
         "Color: log\u2082(OR)", font_size=7, x=x_start + 3, y=current_y,
-        fill=text_color, font_family='sans-serif', font_style='italic'
+        fill=text_color, font_family='sans-serif'
     ))
 
     # Draw vertical gradient bar: blue (top, -4) -> white (middle, 0) -> red (bottom, +4)
@@ -4666,7 +4677,7 @@ def draw_grid_legend_vertical(d, x_start, y_start, sample_order, sample_colors,
     current_y += section_gap
     d.append(draw.Text(
         "Size: % of cluster", font_size=7, x=x_start + 3, y=current_y,
-        fill=text_color, font_family='sans-serif', font_style='italic'
+        fill=text_color, font_family='sans-serif'
     ))
 
     sizes = [(0.3, "< 5%"), (0.6, "~50%"), (1.0, "100%")]
@@ -4681,14 +4692,14 @@ def draw_grid_legend_vertical(d, x_start, y_start, sample_order, sample_colors,
                            fill=text_color, font_family='sans-serif',
                            text_anchor='start', dominant_baseline='middle'))
 
-    # --- Opacity section ---
+    # --- Opacity section (FDR-based binary) ---
     current_y += section_gap
     d.append(draw.Text(
-        "Opacity: -log\u2081\u2080(p)", font_size=7, x=x_start + 3, y=current_y,
-        fill=text_color, font_family='sans-serif', font_style='italic'
+        "Opacity: FDR", font_size=7, x=x_start + 3, y=current_y,
+        fill=text_color, font_family='sans-serif'
     ))
 
-    alphas = [(0.0, "NS"), (0.5, "p<0.01"), (1.0, "p<1e\u207b\u00b9\u2070")]
+    alphas = [(0.15, "FDR \u2265 0.1"), (1.0, "FDR < 0.1")]
     for alpha, label in alphas:
         current_y += item_height
         cx = x_start + 3 + swatch_size / 2
@@ -4704,7 +4715,7 @@ def draw_grid_legend_vertical(d, x_start, y_start, sample_order, sample_colors,
     current_y += section_gap
     d.append(draw.Text(
         "Color: log\u2082(OR)", font_size=7, x=x_start + 3, y=current_y,
-        fill=text_color, font_family='sans-serif', font_style='italic'
+        fill=text_color, font_family='sans-serif'
     ))
 
     # Draw vertical gradient bar: white (top, 0) -> red (bottom, 4)
@@ -6668,7 +6679,15 @@ def main():
         right_legend_gap = 15  # Gap between cluster labels and right legend
         bar_plot_height = 100 if args.show_bar_plots else 0  # Space for bar plot below matrix
         image_width = left_margin + feature_bars_width + 20 + label_width + right_legend_gap + right_legend_width
-        image_height = current_y + 50 + bar_plot_height + bubble_legend_height
+        # Estimate right-side legend height: color legend + matrix legend + enrichment legend
+        estimated_legend_height = 200  # color legend base
+        if args.show_matrix:
+            estimated_legend_height += 45
+        if args.enrichment_grid:
+            estimated_legend_height += 150
+        estimated_legend_height += 100  # enrichment text legend
+        image_height = max(current_y + 50 + bar_plot_height + bubble_legend_height,
+                           top_margin + estimated_legend_height)
 
         if args.column_tracks:
             print(f"\nVertical mode (column tracks): {num_fs} columns × {image_width} x {image_height}")
@@ -6901,10 +6920,17 @@ def main():
                     d, color_legend_x, right_legend_current_y, cluster_stats,
                     text_color=text_color, max_radius=bubble_radius, min_radius=2)
 
-            # Enrichment text legend at bottom of right column
-            draw_enrichment_text_legend_vertical(d, color_legend_x, right_legend_current_y,
-                                                enrichment_colors, text_color,
-                                                enrichment_display_names=enrichment_display_names)
+            # Enrichment text legend (cluster label colors) - only draw if labels use enrichment colors
+            # Skipped when text uses neutral colors (black/white)
+
+            # Expand canvas if legend extends beyond
+            legend_bottom = right_legend_current_y + 30 if right_legend_current_y else image_height
+            if legend_bottom > image_height:
+                image_height = legend_bottom
+                d.width = image_width
+                d.height = image_height
+                # Redraw background to cover expanded area
+                d.elements.insert(0, draw.Rectangle(0, 0, image_width, image_height, fill=background_color))
 
             # Save vertical plot
             d.save_svg(svg_path)

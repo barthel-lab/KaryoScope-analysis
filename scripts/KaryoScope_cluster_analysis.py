@@ -152,6 +152,15 @@ parser.add_argument("--early-stopping", dest="early_stopping", type=int, default
                     help="Stop k search if no improvement for N iterations (0 to disable) (default: 150)")
 parser.add_argument("--silhouette-sample-size", dest="silhouette_sample_size", type=int, default=2000,
                     help="Sample size for silhouette score calculation (default: 2000)")
+parser.add_argument("--enrichment-normalization", dest="enrichment_normalization",
+                    default="raw", choices=["raw", "telomeric", "total"],
+                    help="Normalization strategy for enrichment calculation:\n"
+                         "  raw: Fisher's exact test on raw counts (default)\n"
+                         "  telomeric: normalize by per-sample telomeric read count (compositional)\n"
+                         "  total: normalize by per-sample total genomic read count")
+parser.add_argument("--total-reads-file", dest="total_reads_file", default=None,
+                    help="TSV file with 'sample' and 'total_reads' columns. "
+                         "Required for --enrichment-normalization total.")
 parser.add_argument("--reduce-dims", dest="reduce_dims", type=int, default=500,
                     help="Reduce matrix to N dimensions using truncated SVD before clustering.\n"
                          "Recommended for merged BED files which can create very high-dimensional matrices.\n"
