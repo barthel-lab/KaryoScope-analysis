@@ -487,10 +487,14 @@ def draw_reads_png(reads, colors, output_path, config):
     oversample = config.get("oversample", 1)
     read_border = config.get("read_border", False)
     read_positions = []
+    markers = config.get("markers", {})
+    marker_scale = config.get("marker_scale", 1.0)
+    arrow_size = max(2, int(bar_width // 3 * marker_scale))
+    pending_markers = []
 
     for sample, read_id, read_length, features in reads:
         if current_sample is not None and sample != current_sample:
-            sample_x_end[current_sample] = current_x
+            sample_x_end[current_sample] = current_x - read_spacing
             current_x += sample_spacing
 
         if sample not in sample_x_start:
@@ -548,10 +552,15 @@ def draw_reads_png(reads, colors, output_path, config):
                 rx = min(bx2, image_width - 1)
                 img_array[read_top:read_bottom + 1, rx - bt + 1:rx + 1] = border_color
 
+        if read_id in markers:
+            for m_start, m_end in markers[read_id]:
+                mid_y = top_margin + int((m_start + m_end) / 2 * ratio)
+                pending_markers.append((current_x, mid_y))
+
         current_x += bar_width + read_spacing
 
     if current_sample:
-        sample_x_end[current_sample] = current_x
+        sample_x_end[current_sample] = current_x - read_spacing
 
     # Draw heatmap grid if enabled
     if config.get("heatmap") and config.get("metadata_columns"):
@@ -561,12 +570,22 @@ def draw_reads_png(reads, colors, output_path, config):
     img = Image.fromarray(img_array)
     draw_ctx = ImageDraw.Draw(img)
 
+    # Draw accumulated marker arrowheads
+    if pending_markers:
+        text_color_fill = text_color  # tuple (R, G, B)
+        for mx, my, in pending_markers:
+            draw_ctx.polygon(
+                [(mx - arrow_size - 1, my - arrow_size),
+                 (mx - 1, my),
+                 (mx - arrow_size - 1, my + arrow_size)],
+                fill=text_color_fill)
+
     # Draw inline scale bar (matching SVG draw_scale_bar at line 2786)
     if config.get("draw_scale_bar", True):
-        scale_bar_bp = 10000
+        scale_bar_bp = config.get("scale_bar_bp") or 10000
         scale_bar_height = int(scale_bar_bp * ratio)
         max_scale_height = max_height_px
-        if scale_bar_height > max_scale_height:
+        if not config.get("scale_bar_bp") and scale_bar_height > max_scale_height:
             scale_bar_bp = 5000
             scale_bar_height = int(scale_bar_bp * ratio)
 
@@ -985,9 +1004,9 @@ def draw_reads_horizontal_png(reads, colors, output_path, config):
     # Draw horizontal scale bar at top
     if config.get("draw_scale_bar", True):
         draw_ctx = ImageDraw.Draw(img)
-        scale_bar_bp = 10000
+        scale_bar_bp = config.get("scale_bar_bp") or 10000
         scale_bar_width_px = int(scale_bar_bp * ratio)
-        if scale_bar_width_px > max_width_px:
+        if not config.get("scale_bar_bp") and scale_bar_width_px > max_width_px:
             scale_bar_bp = 5000
             scale_bar_width_px = int(scale_bar_bp * ratio)
 
@@ -1056,9 +1075,9 @@ def draw_reads_horizontal_svg(reads, colors, output_path, config):
 
     # Draw horizontal scale bar at top
     if draw_scale:
-        scale_bar_bp = 10000
+        scale_bar_bp = config.get("scale_bar_bp") or 10000
         scale_bar_width_px = int(scale_bar_bp * ratio)
-        if scale_bar_width_px > max_width_px:
+        if not config.get("scale_bar_bp") and scale_bar_width_px > max_width_px:
             scale_bar_bp = 5000
             scale_bar_width_px = int(scale_bar_bp * ratio)
 
@@ -1649,7 +1668,7 @@ def load_cluster_reads(cluster_prefix, cluster_ids, results_dir,
     return result, sample_order
 
 
-def draw_scale_bar_png(image_height, top_margin, ratio, background, output_path,
+def draw_scale_bar_png(image_height, top_margin, ratio, background, output_path, scale_bar_bp_override=None,
                        height_scale=1.0, font_size=14):
     """Render a standalone vertical scale bar as PNG for animation overlay.
 
@@ -1661,10 +1680,10 @@ def draw_scale_bar_png(image_height, top_margin, ratio, background, output_path,
     bg_color = (0, 0, 0) if background == "black" else (255, 255, 255)
     text_color = (255, 255, 255) if background == "black" else (0, 0, 0)
 
-    scale_bar_bp = 10000
+    scale_bar_bp = scale_bar_bp_override or 10000
     scale_bar_height = int(scale_bar_bp * ratio)
     max_height_px = image_height - top_margin - 40
-    if scale_bar_height > max_height_px:
+    if not scale_bar_bp_override and scale_bar_height > max_height_px:
         scale_bar_bp = 5000
         scale_bar_height = int(scale_bar_bp * ratio)
 
@@ -1880,6 +1899,13 @@ def parse_args():
         help="Horizontal spacing between sample groups (default: 20)",
     )
     parser.add_argument(
+        "--subgroup-spacing",
+        type=int,
+        default=None,
+        help="Horizontal spacing between subgroups within the same group "
+             "(default: same as --sample-spacing)",
+    )
+    parser.add_argument(
         "--ratio",
         type=float,
         default=1 / 300,
@@ -1902,6 +1928,23 @@ def parse_args():
         help="Reorient reads so chromosome-specific features are always at the top",
     )
     parser.add_argument(
+        "--orient-satellite-top",
+        action="store_true",
+        help="Reorient reads so satellite-dense end is at top "
+             "(telomere features first, satellite density as fallback)",
+    )
+    parser.add_argument(
+        "--markers",
+        help="TSV file with read_id, marker_start, marker_end columns. "
+             "Draws arrowheads on the left side of each read at marker positions.",
+    )
+    parser.add_argument(
+        "--marker-scale",
+        type=float,
+        default=1.0,
+        help="Scale factor for marker arrowhead size (default: 1.0)",
+    )
+    parser.add_argument(
         "--batch-size",
         type=int,
         default=None,
@@ -1916,6 +1959,12 @@ def parse_args():
         "--no-scale-bar",
         action="store_true",
         help="Skip drawing the scale bar in the left margin",
+    )
+    parser.add_argument(
+        "--scale-bar-bp",
+        type=int,
+        default=None,
+        help="Override scale bar size in bp (default: auto 10kb/5kb)",
     )
     parser.add_argument(
         "--font-size",
@@ -2466,6 +2515,14 @@ CHROMOSOME_FEATURES = {
     'chr21_specific', 'chr22_specific', 'chrX_specific', 'chrY_specific',
 }
 
+# Satellite features used for orientation fallback
+SATELLITE_FEATURES = {
+    'active', 'inactive', 'divergent', 'monomeric',
+    'hsat1A', 'hsat1B', 'hsat2', 'hsat3',
+    'bsat', 'gsat', 'censat',
+    'noncentromeric',
+}
+
 
 def _orient_reads(reads, target_features, label):
     """Reorient reads so that target features are at the top (position 0).
@@ -2479,10 +2536,11 @@ def _orient_reads(reads, target_features, label):
         label: description for the print message (e.g. "telomere", "chromosome")
 
     Returns:
-        List of reoriented reads
+        Tuple of (list of reoriented reads, dict of {read_id: read_length} for flipped reads)
     """
     oriented_reads = []
     flipped_count = 0
+    flipped_reads = {}
 
     for sample, read_id, read_length, features in reads:
         positions = []
@@ -2502,13 +2560,14 @@ def _orient_reads(reads, target_features, label):
                 flipped_features.sort(key=lambda x: x[0])
                 oriented_reads.append((sample, read_id, read_length, flipped_features))
                 flipped_count += 1
+                flipped_reads[read_id] = read_length
             else:
                 oriented_reads.append((sample, read_id, read_length, features))
         else:
             oriented_reads.append((sample, read_id, read_length, features))
 
     logger.info(f"  Reoriented {flipped_count} of {len(reads)} reads ({label} now at top)")
-    return oriented_reads
+    return oriented_reads, flipped_reads
 
 
 def orient_telomere_top(reads):
@@ -2519,6 +2578,98 @@ def orient_telomere_top(reads):
 def orient_chromosome_top(reads):
     """Reorient reads so chromosome features are at the top (position 0)."""
     return _orient_reads(reads, CHROMOSOME_FEATURES, "chromosome")
+
+
+def _orient_reads_with_fallback(reads, primary_features, fallback_features, label):
+    """Reorient reads using primary features first, falling back to secondary.
+
+    For each read:
+    - If primary features found, orient by those (e.g. telomere at top).
+    - Else if fallback features found, orient so fallback-dense end is at top.
+    - Else leave unoriented.
+
+    Args:
+        reads: List of (sample, read_id, read_length, features) tuples
+        primary_features: set of feature names to orient by first
+        fallback_features: set of feature names to use as fallback
+        label: description for the log message
+
+    Returns:
+        Tuple of (list of reoriented reads, dict of {read_id: read_length} for flipped reads)
+    """
+    oriented_reads = []
+    flipped_count = 0
+    primary_count = 0
+    fallback_count = 0
+    unoriented_count = 0
+    flipped_reads = {}
+
+    for sample, read_id, read_length, features in reads:
+        # Try primary features first
+        primary_positions = []
+        for start, end, feature in features:
+            if feature in primary_features:
+                primary_positions.extend([start, end])
+
+        if primary_positions:
+            avg_pos = sum(primary_positions) / len(primary_positions)
+            midpoint = read_length / 2
+            if avg_pos > midpoint:
+                flipped_features = [
+                    (read_length - end, read_length - start, feature)
+                    for start, end, feature in features
+                ]
+                flipped_features.sort(key=lambda x: x[0])
+                oriented_reads.append((sample, read_id, read_length, flipped_features))
+                flipped_count += 1
+                flipped_reads[read_id] = read_length
+            else:
+                oriented_reads.append((sample, read_id, read_length, features))
+            primary_count += 1
+            continue
+
+        # Try fallback features
+        fallback_positions = []
+        for start, end, feature in features:
+            if feature in fallback_features:
+                fallback_positions.extend([start, end])
+
+        if fallback_positions:
+            avg_pos = sum(fallback_positions) / len(fallback_positions)
+            midpoint = read_length / 2
+            if avg_pos > midpoint:
+                flipped_features = [
+                    (read_length - end, read_length - start, feature)
+                    for start, end, feature in features
+                ]
+                flipped_features.sort(key=lambda x: x[0])
+                oriented_reads.append((sample, read_id, read_length, flipped_features))
+                flipped_count += 1
+                flipped_reads[read_id] = read_length
+            else:
+                oriented_reads.append((sample, read_id, read_length, features))
+            fallback_count += 1
+            continue
+
+        # No orientation features found
+        oriented_reads.append((sample, read_id, read_length, features))
+        unoriented_count += 1
+
+    logger.info(f"  Reoriented {flipped_count} of {len(reads)} reads "
+                f"({label}: {primary_count} by telomere, "
+                f"{fallback_count} by satellite, {unoriented_count} unoriented)")
+    return oriented_reads, flipped_reads
+
+
+def orient_satellite_top(reads):
+    """Reorient reads so satellite-dense end is at top.
+
+    Uses telomere features as primary orientation signal, falling back to
+    satellite density for reads without telomere.
+    """
+    return _orient_reads_with_fallback(
+        reads, TELOMERE_FEATURES, SATELLITE_FEATURES, "satellite-dense"
+    )
 
 
 def assign_heatmap_colors(metadata_columns, read_metadata):
@@ -2684,13 +2835,13 @@ def draw_heatmap_legend_png(draw_ctx, config, top_margin, max_height_px, left_ma
     return legend_font_size + int(10 * height_scale)
 
 
-def draw_scale_bar(d, x, y, ratio, text_color, max_height_px, font_size=14):
+def draw_scale_bar(d, x, y, ratio, text_color, max_height_px, font_size=14, scale_bar_bp_override=None):
     """Draw a vertical scale bar showing read length scale."""
-    scale_bar_bp = 10000  # 10 kbp
+    scale_bar_bp = scale_bar_bp_override or 10000  # 10 kbp
     scale_bar_height = int(scale_bar_bp * ratio)
 
     # Don't draw if scale bar is too tall
-    if scale_bar_height > max_height_px:
+    if not scale_bar_bp_override and scale_bar_height > max_height_px:
         scale_bar_bp = 5000
         scale_bar_height = int(scale_bar_bp * ratio)
 
@@ -2728,15 +2879,15 @@ def draw_scale_bar(d, x, y, ratio, text_color, max_height_px, font_size=14):
     )
 
 
-def draw_scale_bar_svg(output_path, image_height, top_margin, ratio, background):
+def draw_scale_bar_svg(output_path, image_height, top_margin, ratio, background, scale_bar_bp_override=None):
     """Draw a separate SVG file containing just the scale bar."""
     text_color = "#ffffff" if background == "black" else "#000000"
     max_height_px = image_height - top_margin - 40  # Approximate bottom margin
 
     # Calculate scale bar dimensions
-    scale_bar_bp = 10000  # 10 kbp
+    scale_bar_bp = scale_bar_bp_override or 10000  # 10 kbp
     scale_bar_height = int(scale_bar_bp * ratio)
-    if scale_bar_height > max_height_px:
+    if not scale_bar_bp_override and scale_bar_height > max_height_px:
         scale_bar_bp = 5000
         scale_bar_height = int(scale_bar_bp * ratio)
 
@@ -2819,6 +2970,8 @@ def draw_reads_svg(reads, colors, output_path, config):
     bottom_margin = config["bottom_margin"]
     read_spacing = config["read_spacing"]
     sample_spacing = config["sample_spacing"]
+    subgroup_spacing = config.get("subgroup_spacing", sample_spacing)
+    group_boundaries = config.get("group_boundaries", set())
     background = config["background"]
     sample_order = config["sample_order"]
     draw_scale = config.get("draw_scale_bar", True)
@@ -2838,10 +2991,17 @@ def draw_reads_svg(reads, colors, output_path, config):
     # Calculate image dimensions
     # Reduce left margin if scale bar is separate
     effective_left_margin = left_margin if draw_scale else 20
+    markers = config.get("markers", {})
+    if markers:
+        _ms = config.get("marker_scale", 1.0)
+        effective_left_margin += max(2, int(bar_width // 3 * _ms)) + 2  # Room for arrowheads
+    n_group_gaps = sum(1 for s in sample_order[:-1] if s in group_boundaries) if len(sample_order) > 1 else 0
+    n_subgroup_gaps = (num_samples - 1) - n_group_gaps
     image_width = (
         effective_left_margin
         + (total_reads * (bar_width + read_spacing))
-        + ((num_samples - 1) * sample_spacing)
+        + (n_group_gaps * sample_spacing)
+        + (n_subgroup_gaps * subgroup_spacing)
         + 50  # Right margin
     )
     # Pre-calculate legend heights to include in image_height
@@ -2864,7 +3024,8 @@ def draw_reads_svg(reads, colors, output_path, config):
     # Draw scale bar (left side) only if not creating separate file
     if draw_scale:
         draw_scale_bar(d, left_margin - 10, top_margin, ratio, text_color, max_height_px,
-                        font_size=config.get("font_size", 14))
+                        font_size=config.get("font_size", 14),
+                        scale_bar_bp_override=config.get("scale_bar_bp"))
 
     # Use effective left margin for positioning reads
     left_margin = effective_left_margin
@@ -2880,13 +3041,19 @@ def draw_reads_svg(reads, colors, output_path, config):
     min_width_exclude = config.get("min_width_exclude", [])
     oversample = config.get("oversample", 1)
     read_border = config.get("read_border", False)
+    markers = config.get("markers", {})
+    marker_scale = config.get("marker_scale", 1.0)
+    arrow_size = max(2, int(bar_width // 3 * marker_scale))
     read_positions = []
 
     for sample, read_id, read_length, features in reads:
         # Add sample spacing when sample changes
         if current_sample is not None and sample != current_sample:
-            sample_x_end[current_sample] = current_x
-            current_x += sample_spacing
+            sample_x_end[current_sample] = current_x - read_spacing
+            if current_sample in group_boundaries:
+                current_x += sample_spacing
+            else:
+                current_x += subgroup_spacing
 
         if sample not in sample_x_start:
             sample_x_start[sample] = current_x
@@ -2922,11 +3089,21 @@ def draw_reads_svg(reads, colors, output_path, config):
             d.append(draw.Rectangle(current_x, top_margin, bar_width, read_height_px,
                                     fill='none', stroke=text_color, stroke_width=0.5))
 
+        if read_id in markers:
+            for m_start, m_end in markers[read_id]:
+                mid_y = top_margin + int((m_start + m_end) / 2 * ratio)
+                d.append(draw.Lines(
+                    current_x - arrow_size - 1, mid_y - arrow_size,
+                    current_x - 1, mid_y,
+                    current_x - arrow_size - 1, mid_y + arrow_size,
+                    fill=text_color, close=True,
+                ))
+
         current_x += bar_width + read_spacing
 
     # Record final sample boundary
     if current_sample:
-        sample_x_end[current_sample] = current_x
+        sample_x_end[current_sample] = current_x - read_spacing
 
     # Draw horizontal line, sample labels, and separators (unless --no-header)
     if not config.get("no_header", False):
@@ -3262,14 +3439,20 @@ def main():
         return
 
     # Orient reads so telomere is at top (if requested)
+    flipped_reads = {}
     if args.orient_telomere_top:
         logger.info("\nOrienting reads (telomere at top)...")
-        reads = orient_telomere_top(reads)
+        reads, flipped_reads = orient_telomere_top(reads)
 
     # Orient reads so chromosome is at top (if requested)
     if args.orient_chromosome_top:
         logger.info("\nOrienting reads (chromosome at top)...")
-        reads = orient_chromosome_top(reads)
+        reads, flipped_reads = orient_chromosome_top(reads)
+
+    # Orient reads so satellite-dense end is at top (if requested)
+    if args.orient_satellite_top:
+        logger.info("\nOrienting reads (satellite-dense end at top)...")
+        reads, flipped_reads = orient_satellite_top(reads)
 
     # Apply two-level grouping if read-list provided group/subgroup columns
     group_boundaries = set()
@@ -3292,7 +3475,10 @@ def main():
             args.top_margin += (n_tiers - 1) * tier_offset
         logger.info("  Applied grouping: %d composite samples, %d tier(s)", len(sample_order), n_tiers)
         if tier_display_names:
-            args.left_margin = max(args.left_margin, 60)
+            # Estimate left margin from longest tier display name
+            max_label_len = max((len(dn) for _, dn in tier_specs), default=0)
+            needed_margin = max(60, int(max_label_len * 8.5) + 10)
+            args.left_margin = max(args.left_margin, needed_margin)
 
     # Build heatmap display name mapping
     heatmap_display_names = {}  # {column_name: display_name}
@@ -3323,6 +3509,32 @@ def main():
         if removed:
             logger.info("\nFiltered %d read(s) exceeding %d bp", removed, args.max_read_length)
 
+    # Load marker positions (for arrowheads) — multiple markers per read supported
+    markers = defaultdict(list)
+    if args.markers:
+        n_markers = 0
+        with open(args.markers) as mf:
+            header = mf.readline().strip().split('\t')
+            for line in mf:
+                parts = line.strip().split('\t')
+                if len(parts) >= 3:
+                    markers[parts[0]].append((int(parts[1]), int(parts[2])))
+                    n_markers += 1
+        # Flip marker positions for reads that were reoriented
+        if flipped_reads:
+            flipped_marker_count = 0
+            for read_id in list(markers.keys()):
+                if read_id in flipped_reads:
+                    rl = flipped_reads[read_id]
+                    markers[read_id] = [(rl - m_end, rl - m_start)
+                                        for m_start, m_end in markers[read_id]]
+                    flipped_marker_count += len(markers[read_id])
+            if flipped_marker_count:
+                logger.info("  Flipped %d marker(s) to match read orientation",
+                            flipped_marker_count)
+        logger.info("\nLoaded %d marker positions for %d reads from: %s",
+                     n_markers, len(markers), args.markers)
+
     # Sort reads
     logger.info("\nSorting reads by sample order, then by length (descending)")
     sorted_reads = sort_reads(reads, sample_order)
@@ -3337,8 +3549,11 @@ def main():
         "bottom_margin": args.bottom_margin,
         "read_spacing": args.read_spacing,
         "sample_spacing": args.sample_spacing,
+        "subgroup_spacing": args.subgroup_spacing if args.subgroup_spacing is not None else args.sample_spacing,
+        "group_boundaries": group_boundaries,
         "sample_order": sample_order,
         "draw_scale_bar": args.scale_bar_output is None and not args.no_scale_bar,
+        "scale_bar_bp": args.scale_bar_bp,
         "no_header": args.no_header,
         "png_scale": args.png_scale,
         "font_size": args.font_size,
@@ -3360,6 +3575,8 @@ def main():
         "heatmap_bottom_gap": heatmap_bottom_gap,
         "heatmap_total": heatmap_total,
         "color_sections": color_sections,
+        "markers": markers,
+        "marker_scale": args.marker_scale,
     }
 
     # Apply viewport ratio overrides
@@ -3374,10 +3591,15 @@ def main():
         _num_samples = len(_sample_counts)
 
         bw = config["bar_width"]
+        _so = config["sample_order"]
+        _gb = config.get("group_boundaries", set())
+        _n_group_gaps = sum(1 for s in _so[:-1] if s in _gb) if len(_so) > 1 else 0
+        _n_subgroup_gaps = (_num_samples - 1) - _n_group_gaps
         natural_w = (
             config["left_margin"]
             + total_reads_count * (bw + config["read_spacing"])
-            + (_num_samples - 1) * config["sample_spacing"]
+            + _n_group_gaps * config["sample_spacing"]
+            + _n_subgroup_gaps * config.get("subgroup_spacing", config["sample_spacing"])
             + 50
         )
 
@@ -3525,7 +3747,9 @@ def main():
             scaled_ratio = args.ratio * height_scale
             scaled_top_margin = int(args.top_margin * height_scale)
             draw_scale_bar_png(image_size, scaled_top_margin, scaled_ratio,
-                               bg_color, scale_bar_png_path, height_scale,
+                               bg_color, scale_bar_png_path,
+                               scale_bar_bp_override=config.get("scale_bar_bp"),
+                               height_scale=height_scale,
                                font_size=config.get("font_size", 11))
 
         # Generate animation if requested (only once, for the first theme)
@@ -3553,6 +3777,7 @@ def main():
                 args.top_margin,
                 args.ratio,
                 bg_color,
+                scale_bar_bp_override=config.get("scale_bar_bp"),
             )
 
     elapsed = time.time() - t_start
