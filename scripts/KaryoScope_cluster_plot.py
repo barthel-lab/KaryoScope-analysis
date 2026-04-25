@@ -4113,7 +4113,7 @@ def _compute_bubble_style(pct, pval, odds, base_color, bubble_radius, max_log2_o
 
     # Alpha: binary based on cluster-level FDR
     if fdr is not None:
-        alpha = 1.0 if fdr < fdr_threshold else 0.15
+        alpha = 1.0 if fdr < fdr_threshold else 0.0
     else:
         # Fallback to gradient if no FDR provided
         if pval > 0 and pval < 1:
@@ -6262,7 +6262,9 @@ def main():
         enrichment_display_names[enrich] = f"{display}-enriched" if enrich.endswith('-enriched') else display
 
     # --- Compute cluster-level dendrogram order if feature matrix provided ---
-    cluster_dendro_data = None
+    # Preserve fresh cluster dendrogram if already computed above
+    if 'cluster_dendro_data' not in dir() or cluster_dendro_data is None:
+        cluster_dendro_data = None
     read_to_original_cluster = {}
     read_to_original_enrichment = {}
 

@@ -811,36 +811,32 @@ def calculate_enrichment_per_sample(cluster_samples, sample_totals,
             p_values[sample] = p_val
             odds_ratios[sample] = odds
     else:
-        # Proportion-based: compute per-sample proportions using chosen denominator,
-        # then use Mann-Whitney U to test each sample vs rest
-        from scipy.stats import mannwhitneyu
-        sample_proportions = {}
-        for s in samples:
-            denom = denominators.get(s, 1)
-            sample_proportions[s] = sample_counts.get(s, 0) / denom if denom > 0 else 0
+        # Size-factor normalized Fisher's exact test
+        # Scale counts by size factor (denominator / median denominator) so samples
+        # are comparable, then use Fisher's on the scaled (rounded) counts
+        median_denom = np.median([denominators[s] for s in samples if denominators.get(s, 0) > 0])
+        if median_denom == 0:
+            median_denom = 1
+
+        # Compute size factors and scaled totals
+        size_factors = {s: denominators.get(s, median_denom) / median_denom for s in samples}
+        scaled_sample_totals = {s: round(sample_totals[s] / size_factors[s]) for s in samples}
+        scaled_sample_counts_in = {s: round(sample_counts.get(s, 0) / size_factors[s]) for s in samples}
+        scaled_total_in = sum(scaled_sample_counts_in.values())
 
         for sample in samples:
-            prop_sample = sample_proportions[sample]
-            props_rest = [sample_proportions[s] for s in samples if s != sample]
+            in_cluster = scaled_sample_counts_in.get(sample, 0)
+            out_cluster = scaled_sample_totals[sample] - in_cluster
+            other_in = scaled_total_in - in_cluster
+            other_out = sum(scaled_sample_totals.values()) - scaled_sample_totals[sample] - other_in
 
-            # Fold change: sample proportion / mean of rest
-            mean_rest = np.mean(props_rest) if props_rest else 0
-            if mean_rest > 0:
-                odds_ratios[sample] = prop_sample / mean_rest
-            elif prop_sample > 0:
-                odds_ratios[sample] = float('inf')
-            else:
-                odds_ratios[sample] = 1.0
+            # Ensure no negative values from rounding
+            out_cluster = max(0, out_cluster)
+            other_out = max(0, other_out)
 
-            # P-value: one-sided test (is this sample's proportion greater?)
-            if len(props_rest) >= 1 and prop_sample > 0:
-                try:
-                    _, p_val = mannwhitneyu([prop_sample], props_rest, alternative='greater')
-                except:
-                    p_val = 1.0
-            else:
-                p_val = 1.0
+            odds, p_val = fisher_exact([[in_cluster, other_in], [out_cluster, other_out]], alternative='greater')
             p_values[sample] = p_val
+            odds_ratios[sample] = odds
 
     # Find most significant ENRICHED sample (p < 0.05 AND odds > 1)
     enriched_samples = {s: p for s, p in p_values.items() if p < 0.05 and odds_ratios[s] > 1}
@@ -1963,7 +1959,7 @@ for cluster_id in range(1, n_clusters + 1):
             other_samples = [s for s in sample_labels if sample_to_group.get(s) != g]
 
             if args.enrichment_normalization == 'raw':
-                # Fisher's exact: group vs rest
+                # Fisher's exact: group vs rest on raw counts
                 g_in = group_counts_cluster.get(g, 0)
                 other_in = total_in_cluster - g_in
                 g_total = sum(sample_totals.get(s, 0) for s in g_samples)
@@ -1975,17 +1971,24 @@ for cluster_id in range(1, n_clusters + 1):
                 except:
                     odds, pval = 1.0, 1.0
             else:
-                # Proportion-based: per-sample proportions, MW test between groups
+                # Size-factor normalized Fisher's: scale group counts by size factor
                 denoms = sample_total_reads_dict if (args.enrichment_normalization == 'total' and sample_total_reads_dict) else sample_totals
-                g_props = [stats['group_counts'].get(s, 0) / denoms.get(s, 1) for s in g_samples]
-                o_props = [stats['group_counts'].get(s, 0) / denoms.get(s, 1) for s in other_samples]
-                mean_g = np.mean(g_props) if g_props else 0
-                mean_o = np.mean(o_props) if o_props else 0
-                odds = mean_g / mean_o if mean_o > 0 else (float('inf') if mean_g > 0 else 1.0)
+                median_denom = np.median([denoms.get(s, 1) for s in sample_labels if denoms.get(s, 0) > 0])
+                if median_denom == 0:
+                    median_denom = 1
+
+                # Scale each sample's counts by its size factor, then aggregate by group
+                g_in_scaled = sum(round(stats['group_counts'].get(s, 0) / (denoms.get(s, median_denom) / median_denom)) for s in g_samples)
+                g_total_scaled = sum(round(sample_totals.get(s, 0) / (denoms.get(s, median_denom) / median_denom)) for s in g_samples)
+                other_in_scaled = sum(round(stats['group_counts'].get(s, 0) / (denoms.get(s, median_denom) / median_denom)) for s in other_samples)
+                other_total_scaled = sum(round(sample_totals.get(s, 0) / (denoms.get(s, median_denom) / median_denom)) for s in other_samples)
+
+                g_out_scaled = max(0, g_total_scaled - g_in_scaled)
+                other_out_scaled = max(0, other_total_scaled - other_in_scaled)
                 try:
-                    _, pval = mwu(g_props, o_props, alternative='greater')
+                    odds, pval = fisher_exact([[g_in_scaled, other_in_scaled], [g_out_scaled, other_out_scaled]], alternative='greater')
                 except:
-                    pval = 1.0
+                    odds, pval = 1.0, 1.0
 
             cluster_record[f'{g}_pval'] = pval
             cluster_record[f'{g}_odds'] = odds
