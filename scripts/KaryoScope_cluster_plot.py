@@ -438,12 +438,18 @@ def load_cluster_labels(labels_file, label_column="curated_annotation"):
     return labels
 
 
-def load_cluster_analysis(cluster_analysis_file, max_qvalue=None, filter_enrichment=None):
+def load_cluster_analysis(cluster_analysis_file, max_qvalue=None, filter_enrichment=None,
+                          known_samples=None):
     """Load cluster analysis results to get enrichment info and cluster order.
 
     Args:
         cluster_analysis_file: Path to cluster_analysis.tsv
         max_qvalue: If set, filter to clusters with q_value <= this threshold
+        known_samples: If provided, restrict per-sample column detection to this
+            iterable. Needed because cluster_analysis.tsv (per-sample mode) writes
+            both `<sample>_pval` and `<group>_pval` columns; without filtering,
+            group columns are mistaken for additional samples and inflate the
+            enrichment-grid width.
 
     Returns:
         tuple: (cluster_enrichments dict, cluster_order list, cluster_stats dict, cluster_df DataFrame)
@@ -480,10 +486,21 @@ def load_cluster_analysis(cluster_analysis_file, max_qvalue=None, filter_enrichm
             # Find percentage columns (they end with _pct)
             pct_cols = [c for c in df.columns if c.endswith('_pct')]
 
-            # Detect per-sample mode by checking for sample-specific pval columns
+            # Detect per-sample mode by checking for sample-specific pval columns.
+            # In per-sample mode, cluster_analysis.tsv writes both `<sample>_pval`
+            # and `<group>_pval` columns; filter to known samples (when provided)
+            # so groups aren't misclassified as samples.
             pval_cols = [c for c in df.columns if c.endswith('_pval')]
-            per_sample_mode = len(pval_cols) > 0
-            sample_names = [c.replace('_pval', '') for c in pval_cols] if per_sample_mode else []
+            candidate_names = [c.replace('_pval', '') for c in pval_cols]
+            if known_samples is not None:
+                known_set = set(known_samples)
+                sample_names = [n for n in candidate_names if n in known_set]
+                dropped = [n for n in candidate_names if n not in known_set]
+                if dropped:
+                    print(f"  Ignoring {len(dropped)} non-sample _pval columns (e.g. groups): {dropped[:5]}{'...' if len(dropped) > 5 else ''}")
+            else:
+                sample_names = candidate_names
+            per_sample_mode = len(sample_names) > 0
 
             if per_sample_mode:
                 print(f"  Detected per-sample comparison mode: {sample_names}")
@@ -1155,13 +1172,24 @@ def load_bed_data(sample_bed_paths, database, featuresets, smoothness, reads_nee
             bed_path = os.path.join(bed_dir, bed_pattern)
             if not os.path.exists(bed_path):
                 # Restore lenient matching for manual inputs or non-standard names
-                # Pattern looks for {sample} and {featureset} in the same directory
+                # Pattern looks for {sample} and {featureset} in the same directory.
+                # Restrict to .bed / .bed.gz only — `*.bed*` would otherwise sweep up
+                # sidecar `.bed.log` files and yield zero matching scaffold rows.
                 import glob
-                candidates = glob.glob(os.path.join(bed_dir, f"*{sample_name}*{fs}*.bed*"))
+                candidates = [
+                    p for p in glob.glob(os.path.join(bed_dir, f"*{sample_name}*{fs}*"))
+                    if p.endswith('.bed') or p.endswith('.bed.gz')
+                ]
                 if candidates:
-                    # Filter for database and smoothness if possible to be more specific
+                    # Filter for database and smoothness; prefer files without `sw`
+                    # window suffixes (the merged BED has finer feature granularity
+                    # than its sliding-window-smoothed sibling).
                     best_candidates = [c for c in candidates if database in c and smoothness in c]
-                    bed_path = best_candidates[0] if best_candidates else candidates[0]
+                    if best_candidates:
+                        non_sw = [c for c in best_candidates if '.sw' not in os.path.basename(c)]
+                        bed_path = (non_sw[0] if non_sw else best_candidates[0])
+                    else:
+                        bed_path = candidates[0]
                 else:
                     continue
 
@@ -4128,14 +4156,11 @@ def _compute_bubble_style(pct, pval, odds, base_color, bubble_radius, max_log2_o
         color = '#444444'
         alpha = 0.0
     else:
-        # Diverging colormap: blue (depleted) <- white (neutral) -> red (enriched)
+        # One-sided colormap: white (neutral/depleted) -> red (enriched)
         if t > 0:
             r, g, b = 255, int(255 * (1 - t)), int(255 * (1 - t))   # white -> red
-        elif t < 0:
-            s = -t
-            r, g, b = int(255 * (1 - s)), int(255 * (1 - s)), 255   # white -> blue
         else:
-            r, g, b = 255, 255, 255  # neutral = white
+            r, g, b = 255, 255, 255  # neutral/depleted = white
         color = f'rgb({r},{g},{b})'
 
     return color, radius, alpha
@@ -4339,7 +4364,7 @@ def draw_grid_legend(d, x_start, y_start, sample_order, sample_colors, text_colo
     ))
     legend_y += 14
 
-    # Draw diverging gradient bar: blue -> white -> red
+    # Draw one-sided gradient bar: white -> red (enrichment only)
     bar_width = 120
     bar_height = 10
     bar_x = x_start + 10
@@ -4347,20 +4372,14 @@ def draw_grid_legend(d, x_start, y_start, sample_order, sample_colors, text_colo
     n_steps = 60
     step_w = bar_width / n_steps
     for i in range(n_steps):
-        t = (i / (n_steps - 1)) * 2 - 1  # -1 to 1
-        if t > 0:
-            r, g, b = 255, int(255 * (1 - t)), int(255 * (1 - t))
-        elif t < 0:
-            s = -t
-            r, g, b = int(255 * (1 - s)), int(255 * (1 - s)), 255
-        else:
-            r, g, b = 255, 255, 255
+        t = i / (n_steps - 1)  # 0 to 1
+        r, g, b = 255, int(255 * (1 - t)), int(255 * (1 - t))  # white -> red
         d.append(draw.Rectangle(
             bar_x + i * step_w, bar_y, step_w + 0.5, bar_height,
             fill=f'rgb({r},{g},{b})', stroke='none'
         ))
     # Tick labels
-    for val, xfrac in [("-4", 0.0), ("0", 0.5), ("+4", 1.0)]:
+    for val, xfrac in [("0", 0.0), ("+2", 0.5), ("+4", 1.0)]:
         tx = bar_x + xfrac * bar_width
         d.append(draw.Text(val, font_size=7, x=tx, y=bar_y + bar_height + 9,
                           fill=text_color, font_family='sans-serif', text_anchor='middle'))
@@ -4584,14 +4603,14 @@ def draw_bubble_legend_vertical(d, x_start, y_start, cluster_stats, text_color='
                            fill=text_color, font_family='sans-serif',
                            text_anchor='start', dominant_baseline='middle'))
 
-    # --- log2(OR) color section (bidirectional: blue -> white -> red) ---
+    # --- log2(OR) color section (one-sided: white -> red) ---
     current_y += section_gap
     d.append(draw.Text(
         "Color: log\u2082(OR)", font_size=7, x=x_start + 3, y=current_y,
         fill=text_color, font_family='sans-serif'
     ))
 
-    # Draw vertical gradient bar: blue (top, -4) -> white (middle, 0) -> red (bottom, +4)
+    # Draw vertical gradient bar: white (top, 0) -> red (bottom, +4)
     current_y += 4
     bar_width = swatch_size + 4
     bar_height = 50
@@ -4600,14 +4619,8 @@ def draw_bubble_legend_vertical(d, x_start, y_start, cluster_stats, text_color='
     n_steps = 50
     step_h = bar_height / n_steps
     for i in range(n_steps):
-        t = (i / (n_steps - 1)) * 2 - 1  # -1 (blue/top) to 1 (red/bottom)
-        if t > 0:
-            r, g, b = 255, int(255 * (1 - t)), int(255 * (1 - t))
-        elif t < 0:
-            s = -t
-            r, g, b = int(255 * (1 - s)), int(255 * (1 - s)), 255
-        else:
-            r, g, b = 255, 255, 255
+        t = i / (n_steps - 1)  # 0 (white/top) to 1 (red/bottom)
+        r, g, b = 255, int(255 * (1 - t)), int(255 * (1 - t))
         d.append(draw.Rectangle(
             bar_x, bar_y + i * step_h, bar_width, step_h + 0.5,
             fill=f'rgb({r},{g},{b})', stroke='none'
@@ -4619,7 +4632,7 @@ def draw_bubble_legend_vertical(d, x_start, y_start, cluster_stats, text_color='
     ))
     # Tick labels on the right side
     label_x = bar_x + bar_width + 4
-    for val, yfrac in [("-4", 0.0), ("0", 0.5), ("+4", 1.0)]:
+    for val, yfrac in [("0", 0.0), ("+2", 0.5), ("+4", 1.0)]:
         ty = bar_y + yfrac * bar_height + 1
         d.append(draw.Text(val, font_size=7, x=label_x, y=ty,
                            fill=text_color, font_family='sans-serif',
@@ -6160,7 +6173,8 @@ def main():
 
     # Load cluster analysis to get enrichment info, cluster priority order, stats for bubbles, and full df for features
     cluster_enrichments, cluster_order, cluster_stats, cluster_analysis_df = load_cluster_analysis(
-        cluster_analysis_file, max_qvalue=args.max_qvalue, filter_enrichment=args.filter_enrichment)
+        cluster_analysis_file, max_qvalue=args.max_qvalue, filter_enrichment=args.filter_enrichment,
+        known_samples=sample_to_group.keys())
 
     # Load custom cluster labels if provided
     cluster_labels = load_cluster_labels(args.cluster_labels, args.label_column)
@@ -6509,9 +6523,13 @@ def main():
         if args.show_matrix:
             meta_df = pd.read_csv(sample_metadata_file, sep='\t')
             n_samples = len(meta_df)
-            matrix_width = n_samples * cell_width + 15
+            # draw_sample_matrix inserts a 5px gap between groups (group_gap, line ~3047);
+            # account for those here so feature bars don't end up underneath the matrix.
+            sample_matrix_group_gap = 5
+            n_group_transitions = max(0, meta_df['group'].nunique() - 1) if 'group' in meta_df.columns else 0
+            matrix_width = n_samples * cell_width + n_group_transitions * sample_matrix_group_gap + 15
             row_bar_width = 60 if args.show_bar_plots else 0
-            print(f"  Matrix enabled: {n_samples} samples (cell size: {cell_size}px)")
+            print(f"  Matrix enabled: {n_samples} samples, {n_group_transitions + 1 if 'group' in meta_df.columns else 1} groups (cell size: {cell_size}px)")
 
         # Compute group matrix width if enabled
         group_matrix_width = 0
