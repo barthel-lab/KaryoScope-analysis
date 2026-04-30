@@ -49,7 +49,7 @@ Usage:
   python KaryoScope_sequence_annotate.py \\
     --bed results/raw_bed/*.bed.gz \\
     --colors-dir /path/to/KaryoScope-BIR/resources \\
-    --database KS_human_CHM13 \\
+    --database KS_human_CHM13_v2 \\
     --output annotations.tsv.gz
 """
 
@@ -63,6 +63,11 @@ import sys
 _original_command = ' '.join(sys.argv)
 
 import pandas as pd
+
+# Shared feature-vocabulary constants (v1/v2 aware)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _feature_vocab import SATELLITE_FEATURES, ARM_FEATURES, CT_FEATURES, \
+    CANONICAL_TELOMERE, NONCANONICAL_TELOMERE, ITS_TAR1
 
 # Cache argparse defaults (before parse_args modifies them)
 _argparse_defaults = None
@@ -249,19 +254,17 @@ def _max_block_length(coverage, gap_tol=BLOCK_GAP_TOL):
 
 
 # ---------------------------------------------------------------------------
-# Feature classification constants for interspersion (from KaryoScope_cluster_annotate.py)
+# Feature classification constants for interspersion. Sourced from the shared
+# vocabulary module so both v1 (`bsat`, `arm_multigroup1`) and v2 (`bSat`,
+# bare `arm`) databases classify correctly.
 # ---------------------------------------------------------------------------
 
-_SATELLITE_LAYER1 = frozenset({
-    'hsat3', 'hsat1A', 'hsat2', 'hsat1B', 'active', 'censat', 'bsat',
-    'monomeric', 'gsat', 'hor_multigroup1', 'hsat_multigroup1',
-    'hsat1_multigroup1', 'asat_multigroup1',
-})
-_LAYER2_CANONICAL = frozenset({'canonical_telomere'})
-_LAYER2_NONCANONICAL = frozenset({'noncanonical_telomere'})
-_LAYER2_ITS_TAR1 = frozenset({'ITS', 'TAR1'})
-_CT_LAYER1 = frozenset({'ct'})
-_ARM_LAYER1 = frozenset({'p_arm', 'q_arm', 'arm_multigroup1'})
+_SATELLITE_LAYER1 = SATELLITE_FEATURES
+_LAYER2_CANONICAL = CANONICAL_TELOMERE
+_LAYER2_NONCANONICAL = NONCANONICAL_TELOMERE
+_LAYER2_ITS_TAR1 = ITS_TAR1
+_CT_LAYER1 = CT_FEATURES
+_ARM_LAYER1 = ARM_FEATURES
 
 
 def classify_bed_feature(feature):
@@ -734,7 +737,7 @@ def main():
                              "(e.g., /path/to/KaryoScope-BIR/resources).\n"
                              "Must be used together with --database.")
     parser.add_argument("--database", default=None,
-                        help="Database name (e.g., KS_human_CHM13).\n"
+                        help="Database name (e.g., KS_human_CHM13_v2).\n"
                              "Must be used together with --colors-dir.")
     parser.add_argument("--log-file", dest="log_file", default=True,
                         type=lambda x: x.lower() not in ('false', '0', 'no'),

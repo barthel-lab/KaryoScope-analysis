@@ -49,6 +49,10 @@ _original_command = ' '.join(sys.argv)
 
 import pandas as pd
 
+# Shared feature-vocabulary constants (v1/v2 aware)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _feature_vocab import lookup_satellite_col
+
 
 def load_sequence_annotations(filepath):
     """Load per-read annotations TSV from sequence_annotate.
@@ -354,18 +358,22 @@ def score_read_against_annotation(read_densities, read_interspersion,
     s_bppct = sum(bppct_scores) / max(len(bppct_scores), 1) if bppct_scores else 0.5
 
     # --- 6. Enrichment-specific features (0-1) ---
-    enrichment_features = {
-        'active': 'active aSat', 'monomeric': 'monomeric aSat',
-        'bsat': 'bSat', 'censat': 'CenSat',
-        'hsat1A': 'HSat1A', 'hsat2': 'HSat2', 'hsat3': 'HSat3', 'gsat': 'GSat',
-        'ITS': 'ITS', 'TAR1': 'TAR1',
-    }
+    # Names are v2-canonical; lookup_satellite_col falls back to v1 aliases
+    # for old TSVs. Non-satellite features (ITS, TAR1) are read directly.
+    _v2_satellites = ['active_hor', 'mon', 'aSat', 'alpha_hor', 'hor', 'dhor',
+                      'mixedAlpha', 'bSat', 'cenSat', 'centromeric',
+                      'HSat', 'HSat1', 'HSat1A', 'HSat1B', 'HSat2', 'HSat3', 'gSat']
     enrichment_scores = []
-    for bed_feat, display_name in enrichment_features.items():
-        col = f'{pfx}_dmax__{bed_feat}'
+    for sat in _v2_satellites:
+        cluster_enrich = lookup_satellite_col(cluster_row, pfx, 'dmax', sat) / 100.0
+        if cluster_enrich > 0.20:
+            read_dmax = read_densities.get(sat, {}).get('max', 0)
+            enrichment_scores.append(_closeness(read_dmax, cluster_enrich))
+    for non_sat in ('ITS', 'TAR1'):
+        col = f'{pfx}_dmax__{non_sat}'
         cluster_enrich = cluster_row.get(col, 0) / 100.0
-        if cluster_enrich > 0.20:  # cluster has this enrichment
-            read_dmax = read_densities.get(bed_feat, {}).get('max', 0)
+        if cluster_enrich > 0.20:
+            read_dmax = read_densities.get(non_sat, {}).get('max', 0)
             enrichment_scores.append(_closeness(read_dmax, cluster_enrich))
     s_enrichment = sum(enrichment_scores) / max(len(enrichment_scores), 1) if enrichment_scores else 0.5
 
@@ -736,30 +744,37 @@ def auto_label_cluster(row, featureset_prefix):
     tar1_readpct = row.get(f'{pfx}_readpct__TAR1', 0)
     ncan_dmax_val = row.get(f'{pfx}_dmax__noncanonical_telomere', 0)
 
-    # Satellite: dmax for enrichment, readpct for dominance (rule 5)
-    sat_dmax = {
-        'active aSat':    row.get(f'{pfx}_dmax__active', 0),
-        'monomeric aSat': row.get(f'{pfx}_dmax__monomeric', 0),
-        'bSat':           row.get(f'{pfx}_dmax__bsat', 0),
-        'CenSat':         row.get(f'{pfx}_dmax__censat', 0),
-        'HSat1A':         row.get(f'{pfx}_dmax__hsat1A', 0),
-        'HSat2':          row.get(f'{pfx}_dmax__hsat2', 0),
-        'HSat3':          row.get(f'{pfx}_dmax__hsat3', 0),
-        'GSat':           row.get(f'{pfx}_dmax__gsat', 0),
-    }
+    # Satellite: dmax for enrichment, readpct for dominance (rule 5).
+    # Display name → canonical v2 BED feature (lookup_satellite_col falls back
+    # to v1 alias columns automatically). v2 added several satellite types
+    # (HSat1B, dhor, hor, alpha_hor, mixedAlpha, centromeric) — included here
+    # so cluster labels can pick them up.
+    _sat_display_to_v2 = [
+        ('active aSat',    'active_hor'),   # v1 'active' → v2 'active_hor'
+        ('monomeric aSat', 'mon'),          # v1 'monomeric' → v2 'mon'
+        ('aSat',           'aSat'),
+        ('alpha HOR',      'alpha_hor'),
+        ('HOR',            'hor'),
+        ('divergent HOR',  'dhor'),
+        ('mixed alpha',    'mixedAlpha'),
+        ('bSat',           'bSat'),
+        ('CenSat',         'cenSat'),
+        ('centromeric',    'centromeric'),
+        ('HSat',           'HSat'),
+        ('HSat1',          'HSat1'),
+        ('HSat1A',         'HSat1A'),
+        ('HSat1B',         'HSat1B'),
+        ('HSat2',          'HSat2'),
+        ('HSat3',          'HSat3'),
+        ('GSat',           'gSat'),
+    ]
+    sat_dmax = {disp: lookup_satellite_col(row, pfx, 'dmax', v2)
+                for disp, v2 in _sat_display_to_v2}
     max_sat_dmax_name  = max(sat_dmax, key=sat_dmax.get)
     max_sat_dmax_score = sat_dmax[max_sat_dmax_name]
 
-    sat_readpct = {
-        'active aSat':    row.get(f'{pfx}_readpct__active', 0),
-        'monomeric aSat': row.get(f'{pfx}_readpct__monomeric', 0),
-        'bSat':           row.get(f'{pfx}_readpct__bsat', 0),
-        'CenSat':         row.get(f'{pfx}_readpct__censat', 0),
-        'HSat1A':         row.get(f'{pfx}_readpct__hsat1A', 0),
-        'HSat2':          row.get(f'{pfx}_readpct__hsat2', 0),
-        'HSat3':          row.get(f'{pfx}_readpct__hsat3', 0),
-        'GSat':           row.get(f'{pfx}_readpct__gsat', 0),
-    }
+    sat_readpct = {disp: lookup_satellite_col(row, pfx, 'readpct', v2)
+                   for disp, v2 in _sat_display_to_v2}
     max_sat_readpct_name  = max(sat_readpct, key=sat_readpct.get)
     max_sat_readpct_score = sat_readpct[max_sat_readpct_name]
 
@@ -1492,10 +1507,13 @@ def main():
                 row[f'{fs}_max_block_bp__{feat}'] = feat_wd.get('max_block', 0)
 
         if args.auto_label:
-            auto_label_fs = ['telomere_region', 'region_subtelomere_flat']
+            # `region_subtelomere_flat` is the canonical (v2) prefix; the
+            # legacy `telomere_region` name is kept as a fallback for any old
+            # annotation TSVs that still use it.
+            auto_label_fs = ['region_subtelomere_flat', 'telomere_region']
             pfx = next((fs for fs in auto_label_fs if fs in featuresets), None)
             if pfx is None:
-                print("ERROR: --auto-label requires 'telomere_region' or 'region_subtelomere_flat' in --featuresets")
+                print("ERROR: --auto-label requires 'region_subtelomere_flat' (v2) or 'telomere_region' (legacy) in --featuresets")
                 sys.exit(1)
             row['cluster_name'] = auto_label_cluster(row, pfx)
 
@@ -1521,7 +1539,13 @@ def main():
     # --- Annotation-aware representative selection ---
     if args.select_representatives:
         n_reps = args.select_representatives
-        pfx_for_reps = 'telomere_region' if 'telomere_region' in featuresets else featuresets[0] if featuresets else 'region'
+        # Prefer the v2-canonical `region_subtelomere_flat`, fall back to
+        # legacy `telomere_region`, then first available featureset.
+        pfx_for_reps = (
+            'region_subtelomere_flat' if 'region_subtelomere_flat' in featuresets
+            else 'telomere_region' if 'telomere_region' in featuresets
+            else featuresets[0] if featuresets else 'region'
+        )
         normalized_reps = select_annotation_representatives(
             results, assignments, seq_annotations, pfx_for_reps, n_reps)
 
