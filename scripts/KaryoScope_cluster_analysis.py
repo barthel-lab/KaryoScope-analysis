@@ -595,58 +595,18 @@ def get_layer_features(features_with_lengths, layer_idx, n_layers):
     return result
 
 def load_sample_metadata(metadata_file, sample_labels):
-    """Load sample metadata from TSV file or auto-generate defaults.
-
-    When a metadata file is provided:
-      - Uses group names exactly as specified in the file
-      - Colors are optional (sample colors in 'color' column)
-      - Group colors can be specified in 'group_color' column
-
-    When no metadata file:
-      - Each sample becomes its own group (named after the sample)
-      - This allows --control-group to specify the reference
+    """Load sample metadata via the karyoplot library; return the legacy 3-tuple.
 
     Returns: (sample_to_group, sample_to_color, group_to_color)
     """
-    if metadata_file:
-        # Load from file
-        meta_df = pd.read_csv(metadata_file, sep='\t')
-
-        # Validate required columns
-        if 'sample' not in meta_df.columns:
-            raise ValueError("Sample metadata file must have 'sample' column")
-
-        # Build mappings
-        sample_to_group = {}
-        sample_to_color = {}
-        group_to_color = {}
-
-        for _, row in meta_df.iterrows():
-            sample = row['sample']
-            # Use group if provided, otherwise use sample name as group
-            group = row.get('group', sample) if 'group' in meta_df.columns else sample
-            sample_to_group[sample] = group
-            if 'color' in meta_df.columns and pd.notna(row.get('color')):
-                sample_to_color[sample] = row['color']
-            # Parse explicit group colors if provided
-            if 'group_color' in meta_df.columns and pd.notna(row.get('group_color')):
-                group_to_color[group] = row['group_color']
-
-        # Check all samples are covered
-        missing = set(sample_labels) - set(sample_to_group.keys())
-        if missing:
-            print(f"  Warning: Samples not in metadata file: {missing}")
-            # Auto-assign missing samples to their own groups
-            for s in missing:
-                sample_to_group[s] = s
-
-        return sample_to_group, sample_to_color, group_to_color
-
-    else:
-        # No metadata file: each sample is its own group
-        # This is clean and doesn't rely on text matching
-        sample_to_group = {sample: sample for sample in sample_labels}
-        return sample_to_group, {}, {}
+    from karyoplot.core.sample_metadata import load_sample_metadata as _load
+    md = _load(
+        metadata_file,
+        sample_labels=sample_labels,
+        require_sample_column=True,
+        quiet=True,   # cluster_analysis prints its own log; suppress library log
+    )
+    return md.sample_to_group, md.sample_to_color, md.group_to_color
 
 
 def generate_group_colors(groups, existing_colors=None):

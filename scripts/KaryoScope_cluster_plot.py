@@ -366,35 +366,19 @@ def _print_params_and_command(args, database, featuresets, background_color):
 # =============================================================================
 
 def load_sample_metadata(metadata_file):
-    """Load sample metadata from TSV file.
+    """Load sample metadata via the karyoplot library; return the legacy 4-tuple.
 
     Returns:
         tuple: (sample_to_group, sample_colors, group_colors, sample_display_names)
     """
-    sample_to_group = {}
-    sample_colors = {}
-    group_colors = {}
-    sample_display_names = {}
-
-    if metadata_file and os.path.exists(metadata_file):
-        try:
-            meta_df = pd.read_csv(metadata_file, sep='\t')
-            for _, row in meta_df.iterrows():
-                sample = row['sample']
-                group = row.get('group', sample)
-                sample_to_group[sample] = group
-                if 'color' in meta_df.columns and pd.notna(row.get('color')):
-                    sample_colors[sample] = row['color']
-                    # Also store as group color
-                    if group not in group_colors:
-                        group_colors[group] = row['color']
-                if 'display_name' in meta_df.columns and pd.notna(row.get('display_name')):
-                    sample_display_names[sample] = row['display_name']
-            print(f"  Loaded sample metadata: {len(meta_df)} samples")
-        except Exception as e:
-            print(f"  Warning: Could not load sample metadata: {e}")
-
-    return sample_to_group, sample_colors, group_colors, sample_display_names
+    from karyoplot.core.sample_metadata import load_sample_metadata as _load
+    md = _load(metadata_file, require_sample_column=False)
+    return (
+        md.sample_to_group,
+        md.sample_to_color,
+        md.derive_group_colors_from_samples(),
+        md.sample_to_display_name,
+    )
 
 
 def load_cluster_labels(labels_file, label_column="curated_annotation"):
