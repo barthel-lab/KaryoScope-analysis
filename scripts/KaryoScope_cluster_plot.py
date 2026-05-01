@@ -1086,48 +1086,35 @@ def parse_bed_paths(bed_files):
 
 
 def load_color_files(colors_dir, database, featuresets):
-    """Load color mappings for featuresets.
-
-    Color files contain features with _specific suffix (e.g., active_specific).
-    For smoothed BED files, features don't have the suffix (e.g., active).
-    This function creates mappings for both versions.
+    """Load color mappings for featuresets via karyoplot's library.
 
     Returns:
         tuple: (featureset_colors, featureset_color_order)
     """
+    from karyoplot.core.colors import load_palette_file
+
     print(f"\nLoading color files...")
     featureset_colors = {}
     featureset_color_order = {}
 
     for fs in featuresets:
-        colors_pattern = f"{database}.{fs}.colors.txt"
-        colors_path = os.path.join(colors_dir, colors_pattern)
+        colors_path = os.path.join(colors_dir, f"{database}.{fs}.colors.txt")
 
         if not os.path.exists(colors_path):
             sys.stderr.write(f"Error: Colors file not found: {colors_path}\n")
             sys.exit(1)
 
-        featureset_colors[fs] = {0: ("#ffffff", 1.0)}
-        featureset_color_order[fs] = []
+        # cluster_plot's legacy sentinel: integer 0 → white tuple at the front.
+        palette, order = load_palette_file(
+            colors_path,
+            initial={0: ("#ffffff", 1.0)},
+            value_format="tuple",
+            track_order=True,
+        )
+        featureset_colors[fs] = palette
+        featureset_color_order[fs] = order
 
-        with open(colors_path, "r") as f:
-            for i, line in enumerate(f):
-                parts = line.strip().split()
-                if len(parts) >= 2:
-                    feature = parts[0]
-                    color = parts[1]
-                    # Skip header line (feature/color)
-                    if i == 0 and feature.lower() == 'feature':
-                        continue
-                    featureset_colors[fs][feature] = (color, 1.0)
-                    featureset_color_order[fs].append(feature)
-
-                    # Also add mapping without _specific suffix for smoothed BED files
-                    if feature.endswith('_specific'):
-                        base_feature = feature[:-9]  # Remove '_specific'
-                        featureset_colors[fs][base_feature] = (color, 1.0)
-
-        print(f"  {fs}: {len(featureset_color_order[fs])} colors")
+        print(f"  {fs}: {len(order)} colors")
 
     return featureset_colors, featureset_color_order
 

@@ -1954,54 +1954,18 @@ def parse_args():
 
 
 def load_color_mapping(colors_file):
-    """Load feature -> color mapping from colors file.
-
-    Handles both '_specific' suffix variants and bare feature names.
-    Parses '# comment' lines as section headers for legend grouping.
+    """Load feature -> color mapping with section parsing via karyoplot library.
 
     Returns:
         tuple: (colors_dict, color_sections)
-            - colors_dict: {feature_name: hex_color}
-            - color_sections: [(section_header_or_None, [feature_names])]
     """
-    colors = {"novel": "#ffffff"}  # Default for unknown features
-    sections = []
-    current_header = None
-    current_features = []
-
-    with open(colors_file, "r") as f:
-        for line in f:
-            stripped = line.strip()
-            # Parse section headers from comment lines
-            m = re.match(r'^#\s+(.+)', stripped)
-            if m:
-                # Save previous section if it has features
-                if current_features:
-                    sections.append((current_header, current_features))
-                current_header = m.group(1).strip()
-                current_features = []
-                continue
-            parts = stripped.split()
-            if len(parts) < 2 or parts[0].lower() == "feature":
-                continue
-            feature, color = parts[0], parts[1]
-            colors[feature] = color
-            current_features.append(feature)
-            # Also map without _specific suffix for smoothed BED files
-            if feature.endswith("_specific"):
-                colors[feature[:-9]] = color
-            # Also map with _specific suffix
-            if not feature.endswith("_specific") and not feature.endswith("_multigroup1"):
-                colors[feature + "_specific"] = color
-
-    # Save final section
-    if current_features:
-        sections.append((current_header, current_features))
-    # If no sections found at all, wrap everything in a None-header section
-    if not sections:
-        sections = [(None, list(colors.keys()))]
-
-    return colors, sections
+    from karyoplot.core.colors import load_palette_file
+    return load_palette_file(
+        colors_file,
+        parse_sections=True,
+        suffix_both_ways=True,
+        initial={"novel": "#ffffff"},
+    )
 
 
 def load_read_list(path):

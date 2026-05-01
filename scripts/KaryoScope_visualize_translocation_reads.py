@@ -78,35 +78,15 @@ from karyoplot.core.text import abbreviate_read_name  # noqa: F401, E402
 
 
 def load_color_files(colors_dir, database, featuresets):
-    """Load color mappings for featuresets."""
-    featureset_colors = {}
-
+    """Load color mappings for featuresets via karyoplot's library."""
+    from karyoplot.core.colors import load_featureset_palettes
+    out = load_featureset_palettes(
+        str(colors_dir), database, featuresets,
+        on_missing="warn", value_format="tuple",
+    )
     for fs in featuresets:
-        colors_path = colors_dir / f"{database}.{fs}.colors.txt"
-
-        if not colors_path.exists():
-            print(f"  Warning: Colors file not found: {colors_path}")
-            featureset_colors[fs] = {}
-            continue
-
-        featureset_colors[fs] = {}
-
-        with open(colors_path, "r") as f:
-            for i, line in enumerate(f):
-                parts = line.strip().split()
-                if len(parts) >= 2:
-                    feature = parts[0]
-                    color = parts[1]
-                    if i == 0 and feature.lower() == 'feature':
-                        continue
-                    featureset_colors[fs][feature] = (color, 1.0)
-                    if feature.endswith('_specific'):
-                        base_feature = feature[:-9]
-                        featureset_colors[fs][base_feature] = (color, 1.0)
-
-        print(f"  {fs}: {len(featureset_colors[fs])} colors")
-
-    return featureset_colors
+        print(f"  {fs}: {len(out.get(fs, {}))} colors")
+    return out
 
 
 def get_translocation_bed_path(results_dir, database, sample, data_type,

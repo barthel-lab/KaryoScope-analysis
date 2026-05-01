@@ -289,30 +289,17 @@ def parse_args():
 
 
 def load_color_mapping(colors_file):
-    """Load feature -> color mapping from colors file.
-
-    Handles both '_specific' suffix variants and bare feature names.
+    """Load feature -> color mapping via karyoplot library.
 
     Returns:
         dict: feature_name -> hex_color
     """
-    colors = {"novel": "#ffffff"}  # Default for unknown features
-
-    with open(colors_file, "r") as f:
-        for line in f:
-            parts = line.strip().split()
-            if len(parts) < 2 or parts[0].lower() == "feature":
-                continue
-            feature, color = parts[0], parts[1]
-            colors[feature] = color
-            # Also map without _specific suffix for smoothed BED files
-            if feature.endswith("_specific"):
-                colors[feature[:-9]] = color
-            # Also map with _specific suffix
-            if not feature.endswith("_specific") and not feature.endswith("_multigroup1"):
-                colors[feature + "_specific"] = color
-
-    return colors
+    from karyoplot.core.colors import load_palette_file
+    return load_palette_file(
+        colors_file,
+        suffix_both_ways=True,
+        initial={"novel": "#ffffff"},
+    )
 
 
 def load_sample_bed_data(samples, results_dir, database, featureset, smoothness):
