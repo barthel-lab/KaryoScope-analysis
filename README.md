@@ -29,8 +29,6 @@ The documentation is built using MkDocs Material and hosted on GitHub Pages.
 | `KaryoScope_cluster_plot.py` | Plot representative reads per cluster with sample and cluster annotations |
 | `KaryoScope_select_representatives.py` | Select best representative reads per cluster (feeds cluster_plot) |
 | `KaryoScope_cluster_diagnostics.py` | Diagnostic stats and plots comparing clusters across metrics |
-| `KaryoScope_enrichment_bubbles.py` | Bubble plot of cluster enrichment with curated labels |
-| `KaryoScope_volcano_plot.py` | Volcano plot of odds ratio vs q-value per cluster |
 
 ### Comparison & Annotation
 
@@ -60,8 +58,6 @@ KaryoScope_cluster_analysis.py ──► clusters, enrichment, assignments
         │
         ├──► KaryoScope_cluster_annotate.py ──► feature summaries per cluster
         ├──► KaryoScope_cluster_diagnostics.py ──► diagnostic plots
-        ├──► KaryoScope_enrichment_bubbles.py ──► enrichment bubble plot
-        ├──► KaryoScope_volcano_plot.py ──► volcano plot
         ├──► KaryoScope_compare_clusterings.py ──► cross-run comparison
         │
         ├──► KaryoScope_select_representatives.py ──► representative reads

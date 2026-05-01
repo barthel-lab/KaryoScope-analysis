@@ -343,6 +343,5 @@ The cluster plot shows:
 ## Next Steps
 
 1. **Explore the output figures**: Review PDFs for detailed cluster structure and UMAP projections
-2. **Compare features across samples**: Use `KaryoScope_enrichment_bubbles.py` for detailed enrichment visualization
-3. **Investigate specific clusters**: Use `KaryoScope_plot_reads.py` to visualize all reads from clusters of interest
-4. **Compare clustering runs**: Use `KaryoScope_compare_clusterings.py` to compare different parameter choices
+2. **Investigate specific clusters**: Use `KaryoScope_plot_reads.py` to visualize all reads from clusters of interest
+3. **Compare clustering runs**: Use `KaryoScope_compare_clusterings.py` to compare different parameter choices
