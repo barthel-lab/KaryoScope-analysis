@@ -451,6 +451,57 @@ def normalize_representatives_by_length(cluster_candidates, n_per_cluster, targe
     return normalized
 
 
+def select_centroid_representatives(results, assignments, n_reps):
+    """Pick reads with the smallest centroid_distance per cluster.
+
+    Uses the pre-computed `centroid_distance` column in sequence_assignments
+    (set by KaryoScope_cluster_analysis.py at clustering time as the L2
+    distance from each read's feature vector to the cluster mean). The reads
+    closest to the centroid are the most representative of the cluster's
+    *embedding-space* structure — independent of any annotation heuristics.
+
+    Returns the same shape as `select_annotation_representatives` so the
+    caller can swap strategies without changing downstream code.
+    """
+    if 'centroid_distance' not in assignments.columns:
+        raise ValueError(
+            "Centroid rep strategy requires 'centroid_distance' column in "
+            "sequence_assignments.tsv (produced by KaryoScope_cluster_analysis.py)."
+        )
+
+    print(f"\n  Selecting {n_reps} centroid-closest representatives per cluster...")
+
+    read_col = 'sequence' if 'sequence' in assignments.columns else 'read'
+    normalized = {}
+
+    for row in results:
+        cluster_id = row['cluster_id']
+        cluster_df = assignments[assignments['cluster'] == cluster_id]
+        if cluster_df.empty:
+            normalized[cluster_id] = []
+            continue
+
+        # Drop reads with missing centroid_distance (treat as worst); then sort
+        # ascending and take the top n_reps.
+        ranked = cluster_df.sort_values('centroid_distance', ascending=True, na_position='last')
+        chosen = ranked.head(n_reps)
+
+        normalized[cluster_id] = [
+            {'sequence': r[read_col],
+             'read_span': r.get('read_span', r.get('read_length', 0)),
+             'centroid_distance': r.get('centroid_distance', float('nan'))}
+            for _, r in chosen.iterrows()
+        ]
+
+        if not chosen.empty:
+            top = chosen.iloc[0]
+            print(f"    Cluster {cluster_id} ({row.get('cluster_name', '')}): "
+                  f"{len(cluster_df)} reads, top centroid_distance="
+                  f"{top['centroid_distance']:.4f}")
+
+    return normalized
+
+
 def select_annotation_representatives(results, assignments, seq_annotations,
                                        featureset_prefix, n_reps):
     """Select annotation-aware representative reads for each cluster.
@@ -1255,8 +1306,13 @@ def main():
                         help="ALT sample percentage threshold for Type I ALT relabeling (default: 80)")
     parser.add_argument("--select-representatives", dest="select_representatives",
                         type=int, default=None, metavar="N",
-                        help="Select N annotation-aware representative reads per cluster. "
+                        help="Select N representative reads per cluster. "
                              "Populates 'representative_read' column(s) in the output TSV.")
+    parser.add_argument("--rep-strategy", dest="rep_strategy",
+                        choices=['annotation', 'centroid'], default='annotation',
+                        help="How to pick representatives:\n"
+                             "  annotation: score reads against the cluster's annotation profile (default)\n"
+                             "  centroid: pick reads with smallest centroid_distance from sequence_assignments.tsv")
 
     global _argparse_defaults
     _argparse_defaults = {}
@@ -1536,18 +1592,22 @@ def main():
     # Sort by cluster_id (ascending)
     result_df = result_df.sort_values('cluster_id', ascending=True)
 
-    # --- Annotation-aware representative selection ---
+    # --- Representative selection (strategy chosen by --rep-strategy) ---
     if args.select_representatives:
         n_reps = args.select_representatives
-        # Prefer the v2-canonical `region_subtelomere_flat`, fall back to
-        # legacy `telomere_region`, then first available featureset.
-        pfx_for_reps = (
-            'region_subtelomere_flat' if 'region_subtelomere_flat' in featuresets
-            else 'telomere_region' if 'telomere_region' in featuresets
-            else featuresets[0] if featuresets else 'region'
-        )
-        normalized_reps = select_annotation_representatives(
-            results, assignments, seq_annotations, pfx_for_reps, n_reps)
+        if args.rep_strategy == 'centroid':
+            normalized_reps = select_centroid_representatives(
+                results, assignments, n_reps)
+        else:
+            # Prefer the v2-canonical `region_subtelomere_flat`, fall back to
+            # legacy `telomere_region`, then first available featureset.
+            pfx_for_reps = (
+                'region_subtelomere_flat' if 'region_subtelomere_flat' in featuresets
+                else 'telomere_region' if 'telomere_region' in featuresets
+                else featuresets[0] if featuresets else 'region'
+            )
+            normalized_reps = select_annotation_representatives(
+                results, assignments, seq_annotations, pfx_for_reps, n_reps)
 
         # Add columns: representative_read_1, representative_read_2, ..., representative_read_N
         for rank in range(1, n_reps + 1):
