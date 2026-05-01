@@ -83,9 +83,19 @@ mkdocs build
 
 The documentation will be available at `http://127.0.0.1:8000/`
 
+### Dependencies
+
+Plotting scripts depend on [`karyoplot`](https://github.com/barthel-lab/KaryoScope-plotlib), the shared KaryoScope plotting library. Install editable alongside this repo:
+
+```bash
+pip install -e ~/Documents/software/KaryoScope-plotlib
+```
+
+`karyoplot` provides shared utilities used by these scripts (font registration, color palettes, SVG → PNG export, BED IO, statistical comparison plots). See `karyoscope_plotting_inventory.md` in `KaryoScope-BIR/` for the full mapping.
+
 ### Fonts
 
-Plot outputs use the **Basic Sans** font family, bundled in the `fonts/` directory. The font is registered automatically by scripts that generate figures. No manual installation is required.
+Plot outputs default to the generic `sans-serif` family. The optional **Basic Sans** brand font is auto-registered if available — `karyoplot.core.fonts.register_fonts()` looks for it in `~/Documents/Barthel-Custom-Powerpoint-Theme/fonts/` and in this repo's bundled `fonts/` directory. No manual installation required; missing fonts silently fall back to `sans-serif`.
 
 ## Contributing
 
