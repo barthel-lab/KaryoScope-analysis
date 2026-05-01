@@ -2656,25 +2656,17 @@ def draw_scale_bar(d, x_start, y_pos, ratio, text_color='white'):
         ratio: Pixels per base pair (used for scaling)
         text_color: Color for text and bar
     """
-    # Choose a nice round scale bar length based on what would fit
-    # Common choices: 1kb, 2kb, 5kb, 10kb, 20kb
-    scale_options = [1000, 2000, 5000, 10000, 20000]
+    from karyoplot.core.coords import pick_round_scale_bp
+    from karyoplot.core.text import format_genomic_distance
 
-    # Find a scale bar that's reasonably sized (50-150 pixels wide)
-    chosen_bp = 5000  # Default 5kb
-    for bp in scale_options:
-        bar_width_px = bp * ratio
-        if 50 <= bar_width_px <= 150:
-            chosen_bp = bp
-            break
-
+    chosen_bp = pick_round_scale_bp(
+        ratio,
+        target_min_px=50, target_max_px=150,
+        options=(1000, 2000, 5000, 10000, 20000),
+        fallback_bp=5000,
+    )
     bar_width_px = chosen_bp * ratio
-
-    # Format label
-    if chosen_bp >= 1000:
-        label = f"{chosen_bp // 1000} kb"
-    else:
-        label = f"{chosen_bp} bp"
+    label = format_genomic_distance(chosen_bp, style="kb_short")
 
     # Draw scale bar line (same stroke_width=1 as dendrogram)
     d.append(draw.Line(x_start, y_pos, x_start + bar_width_px, y_pos,
