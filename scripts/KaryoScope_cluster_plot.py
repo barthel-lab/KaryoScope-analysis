@@ -52,23 +52,11 @@ _original_command = ' '.join(sys.argv)
 _argparse_defaults = None
 
 import drawsvg as draw
-import matplotlib
-import matplotlib.colors as mcolors
 import numpy as np
 import pandas as pd
 
-
-def _svg_to_png(svg_path):
-    """Convert SVG to PNG using rsvg-convert."""
-    png_path = svg_path.rsplit('.svg', 1)[0] + '.png'
-    try:
-        subprocess.run(['rsvg-convert', '-z', '4', '-f', 'png', '-o', png_path, svg_path],
-                       check=True, capture_output=True)
-        print(f"  Exported PNG: {png_path}")
-    except FileNotFoundError:
-        print(f"  Warning: rsvg-convert not found, skipping PNG export")
-    except subprocess.CalledProcessError as e:
-        print(f"  Warning: PNG export failed: {e.stderr.decode().strip()}")
+from karyoplot.core.colors import TAB10, TAB20
+from karyoplot.svg.export import svg_to_png as _svg_to_png  # noqa: F401  (re-exported for legacy call sites)
 
 
 # =============================================================================
@@ -1325,13 +1313,9 @@ def get_cluster_colors(unique_clusters):
     Returns:
         dict: cluster_id -> color
     """
-    cluster_cmap = matplotlib.colormaps.get_cmap('tab20')
     cluster_colors = {}
-
     for i, cid in enumerate(sorted(unique_clusters)):
-        color_idx = i % 20
-        cluster_colors[cid] = mcolors.rgb2hex(cluster_cmap(color_idx))
-
+        cluster_colors[cid] = TAB20[i % 20]
     return cluster_colors
 
 
@@ -1372,13 +1356,11 @@ def generate_sample_colors(samples, existing_colors=None):
 
     if samples_needing_colors:
         n_samples = len(samples_needing_colors)
-        tab10 = matplotlib.colormaps.get_cmap('tab10')
-
         for i, sample in enumerate(sorted(samples_needing_colors)):
             if n_samples == 2:
                 sample_colors[sample] = '#377EB8' if i == 0 else '#E41A1C'
             else:
-                sample_colors[sample] = mcolors.rgb2hex(tab10(i % 10))
+                sample_colors[sample] = TAB10[i % 10]
 
     return sample_colors
 

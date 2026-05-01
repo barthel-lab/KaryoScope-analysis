@@ -126,21 +126,7 @@ def _save_png(img, output_path, bg_color):
     logger.info("  File size: %.1f MB", file_size / 1024 / 1024)
 
 
-_FONT_PATH = os.path.join(
-    os.path.expanduser("~"),
-    "Documents", "Barthel-Custom-Powerpoint-Theme", "fonts", "BasicSans-Regular.otf",
-)
-
-
-def _load_font(size):
-    """Load preferred font at given size, with fallback chain."""
-    try:
-        return ImageFont.truetype(_FONT_PATH, size)
-    except (OSError, IOError):
-        try:
-            return ImageFont.truetype("Arial", size)
-        except (OSError, IOError):
-            return ImageFont.load_default()
+from karyoplot.core.fonts import pil_font as _load_font  # noqa: F401
 
 
 def _draw_rect_rgba(img_array, x1, y1, x2, y2, color_rgba):

@@ -1066,18 +1066,14 @@ def plot_feature_importance(annotation_importance_df, corr_matrix,
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    import matplotlib.font_manager as fm
     from matplotlib.backends.backend_pdf import PdfPages
-    from pathlib import Path
 
-    # Register Barthel brand fonts
-    FONT_DIR = Path.home() / "Documents" / "Barthel-Custom-Powerpoint-Theme" / "fonts"
-    if FONT_DIR.exists():
-        for font_file in FONT_DIR.glob("BasicSans-*.otf"):
-            fm.fontManager.addfont(str(font_file))
+    # Register Barthel brand fonts (silent no-op if missing)
+    from karyoplot.core.fonts import register_fonts, resolve_family
+    register_fonts()
 
     plt.rcParams.update({
-        'font.family': 'Basic Sans',
+        'font.family': resolve_family('Basic Sans'),  # falls back to sans-serif
         'pdf.fonttype': 42,
         'font.size': 9,
     })

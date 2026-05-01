@@ -37,19 +37,15 @@ from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 import matplotlib
 import matplotlib.colors as mcolors
-import matplotlib.font_manager as fm
 matplotlib.use('Agg')
 
-# Register Basic Sans font if available
+# Optional Basic Sans / Bicyclette registration via karyoplot.
+# Looks in ~/Documents/Barthel-Custom-Powerpoint-Theme/fonts by default,
+# plus a sibling fonts/ directory in this repo for portability.
 from pathlib import Path
-_FONT_DIR = Path(__file__).resolve().parent.parent / "fonts"
-if _FONT_DIR.exists():
-    for _font_file in _FONT_DIR.glob("BasicSans-*.otf"):
-        fm.fontManager.addfont(str(_font_file))
-_HOME_FONT_DIR = Path.home() / "Documents" / "Barthel-Custom-Powerpoint-Theme" / "fonts"
-if _HOME_FONT_DIR.exists():
-    for _font_file in _HOME_FONT_DIR.glob("BasicSans-*.otf"):
-        fm.fontManager.addfont(str(_font_file))
+from karyoplot.core.fonts import register_fonts
+register_fonts()
+register_fonts(Path(__file__).resolve().parent.parent / "fonts")
 
 # Keep text editable in output files (not converted to paths)
 plt.rcParams['pdf.fonttype'] = 42

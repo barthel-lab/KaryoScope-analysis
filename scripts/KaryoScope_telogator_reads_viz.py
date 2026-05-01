@@ -90,16 +90,9 @@ def draw_reads_png(reads, colors, output_path, config):
     img = Image.new('RGB', (image_width, image_height), bg_color)
     draw_ctx = ImageDraw.Draw(img)
 
-    # Try to load font (custom -> Arial -> default fallback)
-    try:
-        from pathlib import Path
-        custom_font = Path.home() / "Documents" / "Barthel-Custom-Powerpoint-Theme" / "fonts" / "BasicSans-Regular.otf"
-        font = ImageFont.truetype(str(custom_font), 16)
-    except (OSError, IOError):
-        try:
-            font = ImageFont.truetype("Arial", 16)
-        except (OSError, IOError):
-            font = ImageFont.load_default()
+    # Load font with Barthel-first fallback chain
+    from karyoplot.core.fonts import pil_font
+    font = pil_font(16)
 
     # Track positions
     current_x = effective_left_margin
