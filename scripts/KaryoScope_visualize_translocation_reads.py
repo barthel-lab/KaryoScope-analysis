@@ -73,19 +73,8 @@ LEGEND_INTERNAL_OFFSET = 25
 # Helper functions
 # ---------------------------------------------------------------------------
 
-def abbreviate_read_name(read_name, max_len=12):
-    """Abbreviate read name to a unique, short identifier.
-
-    Handles different read name formats:
-    - PacBio HiFi: m84132_240112_213928_s2/201131976/ccs -> 201131976
-    - ONT: uuid format -> first 8 chars
-    - Generic: first max_len chars
-    """
-    if '/' in read_name:
-        parts = read_name.split('/')
-        if len(parts) >= 2:
-            return parts[1][:max_len]
-    return read_name[:max_len]
+# abbreviate_read_name moved to karyoplot.core.text (Phase 13.2)
+from karyoplot.core.text import abbreviate_read_name  # noqa: F401, E402
 
 
 def load_color_files(colors_dir, database, featuresets):
