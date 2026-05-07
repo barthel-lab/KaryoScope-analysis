@@ -49,3 +49,6 @@ data/merged_bed/
 
 # Results (generated output)
 results/
+
+# Scratch / session work (Claude Code)
+temp/
