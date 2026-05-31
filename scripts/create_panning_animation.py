@@ -370,6 +370,7 @@ def create_adaptive_horizontal_panning(
     zoom_smoothing=200,
     uniform_zoom=True,
     top_bias=0.0,
+    include_header=True,
 ):
     """Horizontal panning with adaptive zoom.
 
@@ -382,6 +383,9 @@ def create_adaptive_horizontal_panning(
     Args:
         uniform_zoom: If True, apply same zoom to both dimensions.
                       If False, only zoom vertically (legacy behavior).
+        include_header: If True, extend the per-frame crop upward by `top_margin`
+                        source pixels so sample labels / separator lines above
+                        the reads survive into the video.
     """
 
     print("Creating adaptive-zoom horizontal panning animation")
@@ -542,15 +546,24 @@ def create_adaptive_horizontal_panning(
         x_pos = min(x_pos, img_w - crop_w)
         x_pos = max(0, x_pos)
 
-        # Crop region in source - start at top_margin (where reads begin)
-        # This anchors the TOP of reads at a fixed position
-        crop_y0 = top_margin
-        crop_y1 = min(crop_y0 + crop_h, img_h)
+        # Crop region in source. When include_header is True, extend the crop
+        # upward to grab the header band (sample labels, separator lines) drawn
+        # above the reads in the source PNG.
+        crop_y0 = 0 if include_header else top_margin
+        crop_y1 = min(top_margin + crop_h, img_h)
 
         crop_x0 = x_pos
         crop_x1 = min(crop_x0 + crop_w, img_w)
 
         crop = img_array[crop_y0:crop_y1, crop_x0:crop_x1]
+
+        # Viewport y where reads begin (after the scaled header band). The
+        # combined crop is resized to `available_height`, so the header band
+        # occupies a proportional slice at the top.
+        header_vp_h = (
+            int(top_margin * available_height / max(1, top_margin + crop_h))
+            if include_header else 0
+        )
 
         # Resize: both dimensions scaled by zoom factor (cv2 is ~5-10x faster)
         if crop.shape[0] > 0 and crop.shape[1] > 0:
@@ -573,7 +586,9 @@ def create_adaptive_horizontal_panning(
         # Draw scale bar flush against the panning content, aligned with reads top
         if ratio > 0:
             draw_ctx = ImageDraw.Draw(frame)
-            bar_height = min(150, available_height - 20)
+            # Reads occupy the viewport area below the header band.
+            reads_vp_budget = max(20, available_height - header_vp_h)
+            bar_height = min(150, reads_vp_budget - 20)
 
             # Physical length represented by bar_height viewport pixels
             source_px = bar_height / v_zoom
@@ -583,11 +598,11 @@ def create_adaptive_horizontal_panning(
             # Actual visual height for the nice value
             actual_source_px = nice_bp * ratio
             actual_height = int(actual_source_px * v_zoom)
-            actual_height = max(10, min(actual_height, available_height - 20))
+            actual_height = max(10, min(actual_height, reads_vp_budget - 20))
 
             # Position: flush against right edge of scale bar area, TOP aligned with reads
             bar_x = scale_bar_width - 12
-            bar_y = reads_top_y  # Align with top of reads
+            bar_y = reads_top_y + header_vp_h  # Align with top of reads (below header band)
 
             # Vertical bar (thicker)
             draw_ctx.rectangle(

@@ -260,16 +260,42 @@ def draw_reads_png(reads, colors, output_path, config):
     has_left_labels = (config.get("tier_display_names") or
                        (config.get("heatmap") and config.get("heatmap_display_names")))
     effective_left_margin = left_margin if has_left_labels else int(20 * width_scale)
+
+    # Per-sample extra horizontal padding: pad small samples so their label fits
+    # before the next sample's label starts (prevents overlap when a sample has
+    # only 1-2 reads). Padding is added AFTER the sample (before the next one).
+    font_size_for_labels = int(config.get("font_size", 11) * height_scale)
+    _font_for_labels = _load_font(font_size_for_labels)
+    label_tiers_cfg = config.get("label_tiers", {})
+    min_label_gap = max(2, int(5 * width_scale))
+    sample_extra_padding = {}
+    for s in sample_order:
+        n = sample_read_counts[s]
+        natural_w = n * (bar_width + read_spacing) - read_spacing
+        if label_tiers_cfg:
+            _, subgroup = label_tiers_cfg.get(s, (s, None))
+            ltxt = (subgroup or s).replace("_", " ")
+        else:
+            ltxt = s.replace("_", " ")
+        bbox = _font_for_labels.getbbox(ltxt)
+        label_w = bbox[2] - bbox[0]
+        sample_extra_padding[s] = max(0, label_w + min_label_gap - natural_w - sample_spacing)
+
     image_width = (
         effective_left_margin
         + (total_reads * (bar_width + read_spacing))
         + ((num_samples - 1) * sample_spacing)
+        + sum(sample_extra_padding.values())
         + int(50 * width_scale)
     )
     image_height = top_margin + max_height_px + bottom_margin
 
     logger.info("  PNG scale: height=%.2fx, width=%.2fx", height_scale, width_scale)
     logger.info("  Target dimensions: %d x %d pixels", image_width, image_height)
+    n_padded = sum(1 for v in sample_extra_padding.values() if v > 0)
+    if n_padded:
+        logger.info("  Padded %d/%d samples for label-overlap avoidance (total %d px)",
+                    n_padded, num_samples, sum(sample_extra_padding.values()))
 
     # Create image in RGBA mode to support transparency
     bg_color = (0, 0, 0, 255) if background == "black" else (255, 255, 255, 255)
@@ -305,7 +331,7 @@ def draw_reads_png(reads, colors, output_path, config):
     for sample, read_id, read_length, features in reads:
         if current_sample is not None and sample != current_sample:
             sample_x_end[current_sample] = current_x - read_spacing
-            current_x += sample_spacing
+            current_x += sample_spacing + sample_extra_padding.get(current_sample, 0)
 
         if sample not in sample_x_start:
             sample_x_start[sample] = current_x
@@ -1238,6 +1264,27 @@ def compute_legend_layout(filtered_items, *, max_width=None, max_cols=6,
 
     num_rows = max(1, -(-total_slots // num_cols))  # ceil division
 
+    # Each section starts a new column, so it consumes ceil(slots / num_rows)
+    # columns. If the per-section column demand exceeds num_cols, grow num_rows
+    # until it fits — otherwise the later sections wrap back to col=0 and
+    # overwrite earlier content.
+    def _section_col_demand(rows: int) -> int:
+        total = 0
+        for hdr, its in sections:
+            slots = (1 if hdr else 0) + len(its)
+            total += max(1, -(-slots // rows))
+        return total
+
+    max_section_slots = max(
+        (1 if hdr else 0) + len(its) for hdr, its in sections
+    )
+    while _section_col_demand(num_rows) > num_cols and num_rows < max_section_slots:
+        num_rows += 1
+    # If even at num_rows == max_section_slots we still don't fit, expand
+    # num_cols beyond the requested max rather than overlay.
+    if _section_col_demand(num_rows) > num_cols:
+        num_cols = _section_col_demand(num_rows)
+
     # Place items column-first
     positioned = []
     col = 0
@@ -1248,8 +1295,8 @@ def compute_legend_layout(filtered_items, *, max_width=None, max_cols=6,
             col += 1
             row = 0
             if col >= num_cols:
-                col = 0
-                # All columns full, just continue stacking
+                # Should not occur after the demand-fit pass above; guard anyway.
+                num_cols = col + 1
 
         if header:
             x = padding + col * (col_width + col_gap)
@@ -1593,7 +1640,8 @@ def _run_animation(png_path, num_reads, args, config=None,
             top_margin=scaled_top_margin,
             left_margin=scaled_left_margin,
             ratio=scaled_ratio,
-            max_zoom=1.0, scale_bar_padding=10)
+            max_zoom=1.0, scale_bar_padding=10,
+            include_header=args.animate_include_header)
     else:
         create_vertical_panning(
             png_path, mp4_path, duration, args.animate_fps, vw, vh,
@@ -1948,6 +1996,15 @@ def parse_args():
         default=None,
         help="Separate legend image (PNG/SVG) to composite into animation. "
              "If --legend is used, the built-in legend is composited automatically.",
+    )
+    parser.add_argument(
+        "--animate-include-header",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Include the header band (sample labels, separator lines) drawn "
+             "above the reads in each animation frame. Default: on. Pass "
+             "--no-animate-include-header to restore the old behavior that "
+             "crops at the reads top.",
     )
 
     return parser.parse_args()
