@@ -64,6 +64,12 @@ from karyoplot.svg.reads import (
 )
 
 
+# Module-level font family. Set by main() from args.font_family before any
+# rendering functions are called. Lets the many helper functions below pick
+# up a non-default font without having to thread `args` through every call.
+FONT_FAMILY = "sans-serif"
+
+
 # =============================================================================
 # Command Line Arguments
 # =============================================================================
@@ -2316,14 +2322,14 @@ def draw_cluster_brackets(d, cluster_reads, cluster_x_start, cluster_x_end,
         d.append(draw.Text(
             label_text,
             font_size=label_font_size, x=label_x, y=bracket_y + 15,
-            fill=color, font_family='sans-serif',
+            fill=color, font_family=FONT_FAMILY,
             text_anchor='middle', font_weight='bold'
         ))
 
         d.append(draw.Text(
             enrichment,
             font_size=8, x=label_x, y=bracket_y + 27,
-            fill=color, font_family='sans-serif', text_anchor='middle'
+            fill=color, font_family=FONT_FAMILY, text_anchor='middle'
         ))
 
 
@@ -2536,7 +2542,7 @@ def draw_dendrogram_scale_axis(d, max_distance, dendro_base_x, dendrogram_width,
         # Tick at tip (0)
         d.append(draw.Line(x_tip, axis_y, x_tip, axis_y - 4, stroke=line_color, stroke_width=1))
         d.append(draw.Text('0', font_size=7, x=x_tip, y=axis_y - 7,
-                           fill=line_color, font_family='sans-serif', text_anchor='middle'))
+                           fill=line_color, font_family=FONT_FAMILY, text_anchor='middle'))
 
         # Ticks in branch range only
         for i in range(n_ticks + 1):
@@ -2550,12 +2556,12 @@ def draw_dendrogram_scale_axis(d, max_distance, dendro_base_x, dendrogram_width,
             else:
                 label = f"{dist_val:.2f}"
             d.append(draw.Text(label, font_size=7, x=x, y=axis_y - 7,
-                               fill=line_color, font_family='sans-serif', text_anchor='middle'))
+                               fill=line_color, font_family=FONT_FAMILY, text_anchor='middle'))
 
         # Axis label
         mid_x = (x_left + x_right_branch) / 2
         d.append(draw.Text('Cluster Distance', font_size=7, x=mid_x, y=axis_y - 16,
-                           fill=line_color, font_family='sans-serif', text_anchor='middle'))
+                           fill=line_color, font_family=FONT_FAMILY, text_anchor='middle'))
     else:
         # Simple axis without break
         usable_width = dendrogram_width - 15
@@ -2578,11 +2584,11 @@ def draw_dendrogram_scale_axis(d, max_distance, dendro_base_x, dendrogram_width,
             else:
                 label = f"{dist_val:.2f}"
             d.append(draw.Text(label, font_size=7, x=x, y=axis_y - 7,
-                               fill=line_color, font_family='sans-serif', text_anchor='middle'))
+                               fill=line_color, font_family=FONT_FAMILY, text_anchor='middle'))
 
         mid_x = (x_start + x_end) / 2
         d.append(draw.Text('Cluster Distance', font_size=7, x=mid_x, y=axis_y - 16,
-                           fill=line_color, font_family='sans-serif', text_anchor='middle'))
+                           fill=line_color, font_family=FONT_FAMILY, text_anchor='middle'))
 
 
 # smooth_features_to_pixels, features_to_pixels_direct, rasterize_features
@@ -2683,7 +2689,7 @@ def draw_scale_bar(d, x_start, y_pos, ratio, text_color='white'):
     d.append(draw.Text(
         label,
         font_size=8, x=x_start + bar_width_px / 2, y=y_pos - 5,
-        fill=text_color, font_family='sans-serif', text_anchor='middle'
+        fill=text_color, font_family=FONT_FAMILY, text_anchor='middle'
     ))
 
 
@@ -2940,7 +2946,7 @@ def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_me
         label = sample_display_names.get(sample, sample) if sample_display_names else sample
         d.append(draw.Text(
             label, font_size=7, x=x, y=header_y,
-            fill=text_color, font_family='sans-serif',
+            fill=text_color, font_family=FONT_FAMILY,
             dominant_baseline='central',
             transform=f"rotate(-90 {x} {header_y})",
             text_anchor='start'
@@ -3011,14 +3017,14 @@ def draw_sample_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, sample_me
                 font_size = 5 if cell_width >= 10 else 4
                 d.append(draw.Text(
                     str(count), font_size=font_size, x=x + cell_width / 2, y=y + cell_height / 2 + 2,
-                    fill=count_text_color, font_family='sans-serif',
+                    fill=count_text_color, font_family=FONT_FAMILY,
                     text_anchor='middle'
                 ))
             else:
                 # Always show "0" for zero counts - lighter color for visibility
                 d.append(draw.Text(
                     '0', font_size=4, x=x + cell_width / 2, y=y + cell_height / 2 + 1.5,
-                    fill='#666666', font_family='sans-serif',
+                    fill='#666666', font_family=FONT_FAMILY,
                     text_anchor='middle'
                 ))
 
@@ -3104,7 +3110,7 @@ def draw_group_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, matrix_dat
         x = x_start + i * (cell_width + group_gap) + cell_width / 2
         d.append(draw.Text(
             group, font_size=7, x=x, y=header_y,
-            fill=text_color, font_family='sans-serif',
+            fill=text_color, font_family=FONT_FAMILY,
             dominant_baseline='central',
             transform=f"rotate(-90 {x} {header_y})",
             text_anchor='start'
@@ -3159,14 +3165,14 @@ def draw_group_matrix(d, cluster_ids, cluster_y_start, cluster_y_end, matrix_dat
                 d.append(draw.Text(
                     str(count), font_size=font_size,
                     x=x + cell_width / 2, y=y + cell_height / 2 + 2,
-                    fill=count_text_color, font_family='sans-serif',
+                    fill=count_text_color, font_family=FONT_FAMILY,
                     text_anchor='middle'
                 ))
             else:
                 d.append(draw.Text(
                     '0', font_size=4,
                     x=x + cell_width / 2, y=y + cell_height / 2 + 1.5,
-                    fill='#666666', font_family='sans-serif',
+                    fill='#666666', font_family=FONT_FAMILY,
                     text_anchor='middle'
                 ))
 
@@ -3260,7 +3266,7 @@ def draw_group_enrichment_matrix(d, cluster_ids, cluster_y_start, cluster_y_end,
         x = x_start + i * (cell_width + group_gap) + cell_width / 2
         d.append(draw.Text(
             group, font_size=7, x=x, y=header_y,
-            fill=text_color, font_family='sans-serif',
+            fill=text_color, font_family=FONT_FAMILY,
             dominant_baseline='central',
             transform=f"rotate(-90 {x} {header_y})",
             text_anchor='start'
@@ -3268,7 +3274,15 @@ def draw_group_enrichment_matrix(d, cluster_ids, cluster_y_start, cluster_y_end,
 
     # Draw bubbles for each cluster (mirroring sample enrichment grid style)
     bubble_radius = cell_height / 2 - 1
-    # Build lookup from cluster_analysis_df if available
+    # Build lookup from cluster_analysis_df if available. Note: the group
+    # matrix deliberately does NOT pass cluster-level FDR to
+    # _compute_bubble_style — that would force every cell in a row to share
+    # the same opacity, which destroys the at-a-glance "which group within
+    # this cluster is the enriched one" comparison. The per-cell -log10(pval)
+    # gradient gives within-row differentiation that's more informative for
+    # this matrix. The sample-enrichment grid uses cluster-level FDR (binary
+    # opacity) for a different reason: there it's mostly used to filter
+    # whole-cluster significance.
     precomputed = {}
     if cluster_analysis_df is not None:
         for _, row in cluster_analysis_df.iterrows():
@@ -3314,7 +3328,10 @@ def draw_group_enrichment_matrix(d, cluster_ids, cluster_y_start, cluster_y_end,
             cluster_total = cluster_totals.get(cluster_id, 1)
             pct = (group_in_cluster / cluster_total * 100) if cluster_total > 0 else 0
 
-            # Use same bubble style as sample enrichment grid
+            # No `fdr=` argument → falls into the gradient path inside
+            # _compute_bubble_style: alpha = -log10(pval) / 10. This gives
+            # per-cell opacity within a row, so the eye can pick out the
+            # group that's most enriched in each cluster.
             base_color = group_colors.get(group, '#888888')
             color, radius, alpha = _compute_bubble_style(
                 pct, p_value, odds_ratio, base_color, bubble_radius)
@@ -3351,7 +3368,7 @@ def draw_matrix_legend(d, x_start, y_start, max_count, text_color='white', backg
     d.append(draw.Text(
         "Read Count (log scale)",
         font_size=8, x=x_start, y=y_start,
-        fill=text_color, font_family='sans-serif', font_weight='bold'
+        fill=text_color, font_family=FONT_FAMILY, font_weight='bold'
     ))
 
     bar_y = y_start + 12
@@ -3389,7 +3406,7 @@ def draw_matrix_legend(d, x_start, y_start, max_count, text_color='white', backg
     label_y = bar_y + legend_height + 10
     d.append(draw.Text(
         "0", font_size=7, x=x_start, y=label_y,
-        fill=text_color, font_family='sans-serif', text_anchor='start'
+        fill=text_color, font_family=FONT_FAMILY, text_anchor='start'
     ))
 
     # Add intermediate tick at log midpoint
@@ -3399,12 +3416,12 @@ def draw_matrix_legend(d, x_start, y_start, max_count, text_color='white', backg
         mid_x = x_start + mid_intensity * legend_width
         d.append(draw.Text(
             str(mid_val), font_size=7, x=mid_x, y=label_y,
-            fill=text_color, font_family='sans-serif', text_anchor='middle'
+            fill=text_color, font_family=FONT_FAMILY, text_anchor='middle'
         ))
 
     d.append(draw.Text(
         str(max_count), font_size=7, x=x_start + legend_width, y=label_y,
-        fill=text_color, font_family='sans-serif', text_anchor='end'
+        fill=text_color, font_family=FONT_FAMILY, text_anchor='end'
     ))
 
 
@@ -3514,7 +3531,7 @@ def draw_sample_bar_plot(d, matrix_data, cluster_ids, cluster_enrichments, x_sta
         d.append(draw.Text(
             str(val), font_size=6,
             x=axis_x - 5, y=tick_y + 2,
-            fill=text_color, font_family='sans-serif',
+            fill=text_color, font_family=FONT_FAMILY,
             text_anchor='end'
         ))
 
@@ -3603,7 +3620,7 @@ def draw_cluster_bar_plot(d, matrix_data, cluster_ids, cluster_y_start, cluster_
         d.append(draw.Text(
             str(val), font_size=6,
             x=tick_x, y=axis_y - 5,
-            fill=text_color, font_family='sans-serif',
+            fill=text_color, font_family=FONT_FAMILY,
             text_anchor='middle'
         ))
 
@@ -3729,7 +3746,7 @@ def draw_cluster_labels_vertical(d, cluster_y_start, cluster_y_end, x_start, tex
         d.append(draw.Text(
             label_text,
             font_size=9, x=label_x, y=label_y + 3,
-            fill=color, font_family='sans-serif',
+            fill=color, font_family=FONT_FAMILY,
             text_anchor='start', font_weight='bold'
         ))
 
@@ -3757,7 +3774,7 @@ def draw_read_index_labels(d, cluster_reads, read_y_positions, x_position, bar_w
             d.append(draw.Text(
                 str(idx),
                 font_size=7, x=x_position, y=label_y,
-                fill=text_color, font_family='sans-serif',
+                fill=text_color, font_family=FONT_FAMILY,
                 text_anchor='start'
             ))
 
@@ -3962,7 +3979,7 @@ def draw_enrichment_grid(d, cluster_pos_start, cluster_pos_end, grid_start, clus
             color = text_color
             d.append(draw.Text(
                 sample, font_size=8, x=label_x, y=y_center,
-                fill=color, font_family='sans-serif',
+                fill=color, font_family=FONT_FAMILY,
                 text_anchor='end', dominant_baseline='middle'
             ))
 
@@ -3982,8 +3999,11 @@ def draw_enrichment_grid(d, cluster_pos_start, cluster_pos_end, grid_start, clus
         pos_end = cluster_pos_end[cluster_id]
         cluster_center = (pos_start + pos_end) / 2
 
-        # Draw a bubble for each sample
-        cluster_fdr = stats.get('q_value')
+        # Draw a bubble for each sample. Use the same per-cell -log10(pval)
+        # gradient as draw_group_enrichment_matrix (i.e. don't pass `fdr=`)
+        # so that for 1:1 sample-to-group mappings the two grids render
+        # identically and the eye can compare within-row opacity to spot the
+        # enriched sample/group at a glance.
         for i, sample in enumerate(sample_order):
             sample_stats = per_sample.get(sample, {})
             pct = sample_stats.get('pct', 0)
@@ -3991,8 +4011,7 @@ def draw_enrichment_grid(d, cluster_pos_start, cluster_pos_end, grid_start, clus
             odds = sample_stats.get('odds', 1.0)
 
             base_color = sample_colors.get(sample, '#888888')
-            color, radius, alpha = _compute_bubble_style(pct, pval, odds, base_color, bubble_radius,
-                                                         fdr=cluster_fdr)
+            color, radius, alpha = _compute_bubble_style(pct, pval, odds, base_color, bubble_radius)
 
             # Position depends on orientation
             sample_pos = grid_start + bubble_radius + i * (bubble_radius * 2 + bubble_spacing)
@@ -4037,7 +4056,7 @@ def draw_enrichment_grid_header(d, x_start, y_pos, sample_order, sample_colors,
         d.append(draw.Text(
             label,
             font_size=8, x=x_center, y=y_pos,
-            fill=color, font_family='sans-serif',
+            fill=color, font_family=FONT_FAMILY,
             text_anchor='start',
             dominant_baseline='central',
             transform=f'rotate(-90, {x_center}, {y_pos})'
@@ -4063,7 +4082,7 @@ def draw_grid_legend(d, x_start, y_start, sample_order, sample_colors, text_colo
     d.append(draw.Text(
         "Sample Enrichment Grid",
         font_size=10, x=x_start, y=legend_y,
-        fill=text_color, font_family='sans-serif', font_weight='bold'
+        fill=text_color, font_family=FONT_FAMILY, font_weight='bold'
     ))
     legend_y += 18
 
@@ -4071,7 +4090,7 @@ def draw_grid_legend(d, x_start, y_start, sample_order, sample_colors, text_colo
     d.append(draw.Text(
         "Size: % of cluster reads",
         font_size=font_size, x=x_start, y=legend_y,
-        fill=text_color, font_family='sans-serif'
+        fill=text_color, font_family=FONT_FAMILY
     ))
     legend_y += 14
 
@@ -4082,14 +4101,14 @@ def draw_grid_legend(d, x_start, y_start, sample_order, sample_colors, text_colo
         r = bubble_radius * scale
         d.append(draw.Circle(cx, legend_y + 5, r, fill='#888888', stroke='white', stroke_width=0.3))
         d.append(draw.Text(label, font_size=7, x=cx + bubble_radius + 5, y=legend_y + 8,
-                          fill=text_color, font_family='sans-serif', text_anchor='start'))
+                          fill=text_color, font_family=FONT_FAMILY, text_anchor='start'))
     legend_y += 25
 
     # Opacity legend (FDR-based binary)
     d.append(draw.Text(
         "Opacity: FDR significance",
         font_size=font_size, x=x_start, y=legend_y,
-        fill=text_color, font_family='sans-serif'
+        fill=text_color, font_family=FONT_FAMILY
     ))
     legend_y += 14
 
@@ -4099,14 +4118,14 @@ def draw_grid_legend(d, x_start, y_start, sample_order, sample_colors, text_colo
         d.append(draw.Circle(cx, legend_y + 5, bubble_radius * 0.7, fill='#888888',
                            fill_opacity=alpha, stroke='white', stroke_width=0.3))
         d.append(draw.Text(label, font_size=7, x=cx + bubble_radius + 5, y=legend_y + 8,
-                          fill=text_color, font_family='sans-serif', text_anchor='start'))
+                          fill=text_color, font_family=FONT_FAMILY, text_anchor='start'))
     legend_y += 25
 
     # log2(OR) color legend
     d.append(draw.Text(
         "Color: log\u2082(OR)",
         font_size=font_size, x=x_start, y=legend_y,
-        fill=text_color, font_family='sans-serif'
+        fill=text_color, font_family=FONT_FAMILY
     ))
     legend_y += 14
 
@@ -4128,7 +4147,7 @@ def draw_grid_legend(d, x_start, y_start, sample_order, sample_colors, text_colo
     for val, xfrac in [("0", 0.0), ("+2", 0.5), ("+4", 1.0)]:
         tx = bar_x + xfrac * bar_width
         d.append(draw.Text(val, font_size=7, x=tx, y=bar_y + bar_height + 9,
-                          fill=text_color, font_family='sans-serif', text_anchor='middle'))
+                          fill=text_color, font_family=FONT_FAMILY, text_anchor='middle'))
 
 
 def draw_bubble_legend(d, x_start, y_start, cluster_stats, text_color='white', max_radius=8, min_radius=2):
@@ -4162,7 +4181,7 @@ def draw_bubble_legend(d, x_start, y_start, cluster_stats, text_color='white', m
     d.append(draw.Text(
         "Enrichment Bubble Legend",
         font_size=10, x=x_start, y=legend_y,
-        fill=text_color, font_family='sans-serif', font_weight='bold'
+        fill=text_color, font_family=FONT_FAMILY, font_weight='bold'
     ))
     legend_y += 18
 
@@ -4170,7 +4189,7 @@ def draw_bubble_legend(d, x_start, y_start, cluster_stats, text_color='white', m
     d.append(draw.Text(
         "Color: log₂(Odds Ratio)",
         font_size=font_size, x=x_start, y=legend_y,
-        fill=text_color, font_family='sans-serif'
+        fill=text_color, font_family=FONT_FAMILY
     ))
     legend_y += 14
 
@@ -4207,15 +4226,15 @@ def draw_bubble_legend(d, x_start, y_start, cluster_stats, text_color='white', m
     # Gradient labels
     legend_y += gradient_height + 12
     d.append(draw.Text("-4", font_size=8, x=x_start, y=legend_y,
-                       fill=text_color, font_family='sans-serif', text_anchor='start'))
+                       fill=text_color, font_family=FONT_FAMILY, text_anchor='start'))
     d.append(draw.Text("0", font_size=8, x=x_start + gradient_width/2, y=legend_y,
-                       fill=text_color, font_family='sans-serif', text_anchor='middle'))
+                       fill=text_color, font_family=FONT_FAMILY, text_anchor='middle'))
     d.append(draw.Text("+4", font_size=8, x=x_start + gradient_width, y=legend_y,
-                       fill=text_color, font_family='sans-serif', text_anchor='end'))
+                       fill=text_color, font_family=FONT_FAMILY, text_anchor='end'))
     d.append(draw.Text("(Tumor)", font_size=7, x=x_start, y=legend_y + 10,
-                       fill='#ff6666', font_family='sans-serif', text_anchor='start'))
+                       fill='#ff6666', font_family=FONT_FAMILY, text_anchor='start'))
     d.append(draw.Text("(Normal)", font_size=7, x=x_start + gradient_width, y=legend_y + 10,
-                       fill='#6666ff', font_family='sans-serif', text_anchor='end'))
+                       fill='#6666ff', font_family=FONT_FAMILY, text_anchor='end'))
 
     # --- Size legend ---
     size_x = x_start + gradient_width + 40
@@ -4224,7 +4243,7 @@ def draw_bubble_legend(d, x_start, y_start, cluster_stats, text_color='white', m
     d.append(draw.Text(
         "Size: # reads",
         font_size=font_size, x=size_x, y=size_y,
-        fill=text_color, font_family='sans-serif'
+        fill=text_color, font_family=FONT_FAMILY
     ))
     size_y += 16
 
@@ -4246,7 +4265,7 @@ def draw_bubble_legend(d, x_start, y_start, cluster_stats, text_color='white', m
         d.append(draw.Circle(size_x + bubble_x_offset + radius, size_y + 5, radius,
                              fill='white', fill_opacity=0.8, stroke='gray', stroke_width=0.5))
         d.append(draw.Text(f"{size_val}", font_size=7, x=size_x + bubble_x_offset + radius, y=size_y + 18,
-                           fill=text_color, font_family='sans-serif', text_anchor='middle'))
+                           fill=text_color, font_family=FONT_FAMILY, text_anchor='middle'))
         bubble_x_offset += radius * 2 + 15
 
     # --- Alpha/FDR legend ---
@@ -4256,7 +4275,7 @@ def draw_bubble_legend(d, x_start, y_start, cluster_stats, text_color='white', m
     d.append(draw.Text(
         "Opacity: FDR",
         font_size=font_size, x=alpha_x, y=alpha_y,
-        fill=text_color, font_family='sans-serif'
+        fill=text_color, font_family=FONT_FAMILY
     ))
     alpha_y += 16
 
@@ -4266,7 +4285,7 @@ def draw_bubble_legend(d, x_start, y_start, cluster_stats, text_color='white', m
         d.append(draw.Circle(cx + 5, alpha_y + 5, 5,
                              fill='white', fill_opacity=alpha, stroke='gray', stroke_width=0.5))
         d.append(draw.Text(label, font_size=7, x=cx + 5, y=alpha_y + 18,
-                           fill=text_color, font_family='sans-serif', text_anchor='middle'))
+                           fill=text_color, font_family=FONT_FAMILY, text_anchor='middle'))
 
 
 def draw_bubble_legend_vertical(d, x_start, y_start, cluster_stats, text_color='white',
@@ -4299,7 +4318,7 @@ def draw_bubble_legend_vertical(d, x_start, y_start, cluster_stats, text_color='
     # Title
     d.append(draw.Text(
         "Enrichment Bubbles", font_size=8, x=x_start, y=current_y,
-        fill=text_color, font_family='sans-serif', font_weight='bold'
+        fill=text_color, font_family=FONT_FAMILY, font_weight='bold'
     ))
     current_y += 4
 
@@ -4307,7 +4326,7 @@ def draw_bubble_legend_vertical(d, x_start, y_start, cluster_stats, text_color='
     current_y += section_gap
     d.append(draw.Text(
         "Size: # reads", font_size=7, x=x_start + 3, y=current_y,
-        fill=text_color, font_family='sans-serif'
+        fill=text_color, font_family=FONT_FAMILY
     ))
 
     # Pick 3 representative sizes: small, medium, large
@@ -4327,14 +4346,14 @@ def draw_bubble_legend_vertical(d, x_start, y_start, cluster_stats, text_color='
                              stroke=text_color, stroke_width=0.3))
         d.append(draw.Text(str(size_val), font_size=7, x=x_start + swatch_size + 6,
                            y=current_y - swatch_size / 2 + 1,
-                           fill=text_color, font_family='sans-serif',
+                           fill=text_color, font_family=FONT_FAMILY,
                            text_anchor='start', dominant_baseline='middle'))
 
     # --- Opacity section ---
     current_y += section_gap
     d.append(draw.Text(
         "Opacity: FDR", font_size=7, x=x_start + 3, y=current_y,
-        fill=text_color, font_family='sans-serif'
+        fill=text_color, font_family=FONT_FAMILY
     ))
 
     alphas = [(0.0, "NS"), (0.5, "q<0.01"), (1.0, "q<1e\u207b\u00b9\u2070")]
@@ -4346,14 +4365,14 @@ def draw_bubble_legend_vertical(d, x_start, y_start, cluster_stats, text_color='
                              stroke=text_color, stroke_width=0.3))
         d.append(draw.Text(label, font_size=7, x=x_start + swatch_size + 6,
                            y=current_y - swatch_size / 2 + 1,
-                           fill=text_color, font_family='sans-serif',
+                           fill=text_color, font_family=FONT_FAMILY,
                            text_anchor='start', dominant_baseline='middle'))
 
     # --- log2(OR) color section (one-sided: white -> red) ---
     current_y += section_gap
     d.append(draw.Text(
         "Color: log\u2082(OR)", font_size=7, x=x_start + 3, y=current_y,
-        fill=text_color, font_family='sans-serif'
+        fill=text_color, font_family=FONT_FAMILY
     ))
 
     # Draw vertical gradient bar: white (top, 0) -> red (bottom, +4)
@@ -4381,7 +4400,7 @@ def draw_bubble_legend_vertical(d, x_start, y_start, cluster_stats, text_color='
     for val, yfrac in [("0", 0.0), ("+2", 0.5), ("+4", 1.0)]:
         ty = bar_y + yfrac * bar_height + 1
         d.append(draw.Text(val, font_size=7, x=label_x, y=ty,
-                           fill=text_color, font_family='sans-serif',
+                           fill=text_color, font_family=FONT_FAMILY,
                            text_anchor='start', dominant_baseline='middle'))
     current_y += bar_height
 
@@ -4408,7 +4427,7 @@ def draw_enrichment_text_legend(d, x_start, y_start, enrichment_colors, text_col
     d.append(draw.Text(
         "Cluster Label Colors",
         font_size=10, x=x_start, y=legend_y,
-        fill=text_color, font_family='sans-serif', font_weight='bold'
+        fill=text_color, font_family=FONT_FAMILY, font_weight='bold'
     ))
     legend_y += 16
 
@@ -4427,7 +4446,7 @@ def draw_enrichment_text_legend(d, x_start, y_start, enrichment_colors, text_col
         d.append(draw.Text(
             enrichment,
             font_size=font_size, x=x_start + x_offset + 14, y=legend_y,
-            fill=text_color, font_family='sans-serif'
+            fill=text_color, font_family=FONT_FAMILY
         ))
         x_offset += entry_spacing
 
@@ -4447,7 +4466,7 @@ def draw_grid_legend_vertical(d, x_start, y_start, sample_order, sample_colors,
     # Title
     d.append(draw.Text(
         "Enrichment Grid", font_size=8, x=x_start, y=current_y,
-        fill=text_color, font_family='sans-serif', font_weight='bold'
+        fill=text_color, font_family=FONT_FAMILY, font_weight='bold'
     ))
     current_y += 4
 
@@ -4455,7 +4474,7 @@ def draw_grid_legend_vertical(d, x_start, y_start, sample_order, sample_colors,
     current_y += section_gap
     d.append(draw.Text(
         "Size: % of cluster", font_size=7, x=x_start + 3, y=current_y,
-        fill=text_color, font_family='sans-serif'
+        fill=text_color, font_family=FONT_FAMILY
     ))
 
     sizes = [(0.3, "< 5%"), (0.6, "~50%"), (1.0, "100%")]
@@ -4467,14 +4486,14 @@ def draw_grid_legend_vertical(d, x_start, y_start, sample_order, sample_colors,
                              fill='#888888', stroke=text_color, stroke_width=0.3))
         d.append(draw.Text(label, font_size=7, x=x_start + swatch_size + 6,
                            y=current_y - swatch_size / 2 + 1,
-                           fill=text_color, font_family='sans-serif',
+                           fill=text_color, font_family=FONT_FAMILY,
                            text_anchor='start', dominant_baseline='middle'))
 
     # --- Opacity section (FDR-based binary) ---
     current_y += section_gap
     d.append(draw.Text(
         "Opacity: FDR", font_size=7, x=x_start + 3, y=current_y,
-        fill=text_color, font_family='sans-serif'
+        fill=text_color, font_family=FONT_FAMILY
     ))
 
     alphas = [(0.15, "FDR \u2265 0.1"), (1.0, "FDR < 0.1")]
@@ -4486,14 +4505,14 @@ def draw_grid_legend_vertical(d, x_start, y_start, sample_order, sample_colors,
                              stroke=text_color, stroke_width=0.3))
         d.append(draw.Text(label, font_size=7, x=x_start + swatch_size + 6,
                            y=current_y - swatch_size / 2 + 1,
-                           fill=text_color, font_family='sans-serif',
+                           fill=text_color, font_family=FONT_FAMILY,
                            text_anchor='start', dominant_baseline='middle'))
 
     # --- log2(OR) color section ---
     current_y += section_gap
     d.append(draw.Text(
         "Color: log\u2082(OR)", font_size=7, x=x_start + 3, y=current_y,
-        fill=text_color, font_family='sans-serif'
+        fill=text_color, font_family=FONT_FAMILY
     ))
 
     # Draw vertical gradient bar: white (top, 0) -> red (bottom, 4)
@@ -4523,7 +4542,7 @@ def draw_grid_legend_vertical(d, x_start, y_start, sample_order, sample_colors,
     for val, yfrac in [("0", 0.0), ("2", 0.5), ("4", 1.0)]:
         ty = bar_y + yfrac * bar_height + 1
         d.append(draw.Text(val, font_size=7, x=label_x, y=ty,
-                           fill=text_color, font_family='sans-serif',
+                           fill=text_color, font_family=FONT_FAMILY,
                            text_anchor='start', dominant_baseline='middle'))
     current_y += bar_height
 
@@ -4547,7 +4566,7 @@ def draw_enrichment_text_legend_vertical(d, x_start, y_start, enrichment_colors,
     # Title
     d.append(draw.Text(
         "Cluster Labels", font_size=8, x=x_start, y=current_y,
-        fill=text_color, font_family='sans-serif', font_weight='bold'
+        fill=text_color, font_family=FONT_FAMILY, font_weight='bold'
     ))
     current_y += 4
 
@@ -4560,7 +4579,7 @@ def draw_enrichment_text_legend_vertical(d, x_start, y_start, enrichment_colors,
         label = enrichment_display_names.get(enrichment, enrichment) if enrichment_display_names else enrichment
         d.append(draw.Text(label, font_size=7, x=x_start + swatch_size + 6,
                            y=current_y - swatch_size / 2 + 1,
-                           fill=text_color, font_family='sans-serif',
+                           fill=text_color, font_family=FONT_FAMILY,
                            text_anchor='start', dominant_baseline='middle'))
 
     return current_y + 14
@@ -4609,14 +4628,14 @@ def draw_cluster_brackets_vertical(d, cluster_reads, cluster_y_start, cluster_y_
         d.append(draw.Text(
             label_text,
             font_size=label_font_size, x=bracket_x + 5, y=label_y - 8,
-            fill=color, font_family='sans-serif',
+            fill=color, font_family=FONT_FAMILY,
             text_anchor='start', font_weight='bold'
         ))
 
         d.append(draw.Text(
             enrichment,
             font_size=8, x=bracket_x + 5, y=label_y + 8,
-            fill=color, font_family='sans-serif', text_anchor='start'
+            fill=color, font_family=FONT_FAMILY, text_anchor='start'
         ))
 
 
@@ -4633,14 +4652,14 @@ def draw_annotation_bars(d, cluster_reads, read_x_positions, read_to_original_cl
     # Cluster label
     d.append(draw.Text(
         "Cluster", font_size=8, x=label_x, y=annot_start_y + 4,
-        fill=text_color, font_family='sans-serif',
+        fill=text_color, font_family=FONT_FAMILY,
         text_anchor='end'
     ))
 
     # Sample label
     d.append(draw.Text(
         "Sample", font_size=8, x=label_x, y=annot_start_y + 20,
-        fill=text_color, font_family='sans-serif',
+        fill=text_color, font_family=FONT_FAMILY,
         text_anchor='end'
     ))
 
@@ -4833,7 +4852,7 @@ def draw_top_legends(d, sample_colors, cluster_colors, read_to_original_cluster,
     current_y = legend_y
     d.append(draw.Text(
         "Sample:", font_size=10, x=legend_x, y=current_y,
-        fill=text_color, font_family='sans-serif', font_weight='bold'
+        fill=text_color, font_family=FONT_FAMILY, font_weight='bold'
     ))
 
     # Calculate spacing based on sample name lengths (font_size=9, ~5.5px per char)
@@ -4842,7 +4861,7 @@ def draw_top_legends(d, sample_colors, cluster_colors, read_to_original_cluster,
         d.append(draw.Rectangle(item_x, current_y - 8, 12, 12, fill=color))
         d.append(draw.Text(
             sample, font_size=9, x=item_x + 16, y=current_y,
-            fill=text_color, font_family='sans-serif'
+            fill=text_color, font_family=FONT_FAMILY
         ))
         # Move to next position: box(12) + gap(4) + text width + padding(15)
         item_x += 12 + 4 + len(sample) * 5.5 + 15
@@ -4851,7 +4870,7 @@ def draw_top_legends(d, sample_colors, cluster_colors, read_to_original_cluster,
     current_y += row_height
     d.append(draw.Text(
         "Cluster:", font_size=10, x=legend_x, y=current_y,
-        fill=text_color, font_family='sans-serif', font_weight='bold'
+        fill=text_color, font_family=FONT_FAMILY, font_weight='bold'
     ))
 
     # Group clusters by enrichment
@@ -4883,7 +4902,7 @@ def draw_top_legends(d, sample_colors, cluster_colors, read_to_original_cluster,
 
             d.append(draw.Text(
                 f"C{cid}", font_size=8, x=cluster_legend_x + 15, y=current_y,
-                fill=text_color, font_family='sans-serif'
+                fill=text_color, font_family=FONT_FAMILY
             ))
             cluster_legend_x += 45
 
@@ -4891,7 +4910,7 @@ def draw_top_legends(d, sample_colors, cluster_colors, read_to_original_cluster,
     current_y += row_height
     d.append(draw.Text(
         "Enrichment:", font_size=10, x=legend_x, y=current_y,
-        fill=text_color, font_family='sans-serif', font_weight='bold'
+        fill=text_color, font_family=FONT_FAMILY, font_weight='bold'
     ))
 
     for i, (enrich, color) in enumerate(sorted(enrichment_colors.items())):
@@ -4902,7 +4921,7 @@ def draw_top_legends(d, sample_colors, cluster_colors, read_to_original_cluster,
         short_enrich = enrich.replace('-enriched', '')
         d.append(draw.Text(
             short_enrich, font_size=9, x=item_x + 16, y=current_y,
-            fill=text_color, font_family='sans-serif'
+            fill=text_color, font_family=FONT_FAMILY
         ))
 
 
@@ -4926,7 +4945,7 @@ def draw_density_line_legend(d, density_line_colors, rect_plot_colors, legend_x,
     if density_line_colors:
         d.append(draw.Text(
             "m6A/5mC:", font_size=10, x=current_x, y=legend_y,
-            fill=text_color, font_family='sans-serif', font_weight='bold'
+            fill=text_color, font_family=FONT_FAMILY, font_weight='bold'
         ))
         current_x += 60
 
@@ -4951,7 +4970,7 @@ def draw_density_line_legend(d, density_line_colors, rect_plot_colors, legend_x,
             display_name = display_names.get(fs, fs.replace('fiberseq_', ''))
             d.append(draw.Text(
                 display_name, font_size=9, x=current_x + 25, y=legend_y,
-                fill=text_color, font_family='sans-serif'
+                fill=text_color, font_family=FONT_FAMILY
             ))
             current_x += 25 + len(display_name) * 6 + 20
 
@@ -4961,7 +4980,7 @@ def draw_density_line_legend(d, density_line_colors, rect_plot_colors, legend_x,
     if rect_plot_colors:
         d.append(draw.Text(
             "FIRE/Linker:", font_size=10, x=current_x, y=legend_y,
-            fill=text_color, font_family='sans-serif', font_weight='bold'
+            fill=text_color, font_family=FONT_FAMILY, font_weight='bold'
         ))
         current_x += 85
 
@@ -4980,7 +4999,7 @@ def draw_density_line_legend(d, density_line_colors, rect_plot_colors, legend_x,
             display_name = rect_display_names.get(fs, fs.replace('fiberseq_', ''))
             d.append(draw.Text(
                 display_name, font_size=9, x=current_x + 25, y=legend_y,
-                fill=text_color, font_family='sans-serif'
+                fill=text_color, font_family=FONT_FAMILY
             ))
             current_x += 25 + len(display_name) * 6 + 20
 
@@ -5165,7 +5184,7 @@ def draw_color_legends(d, featuresets, featureset_colors, featureset_color_order
 
         d.append(draw.Text(
             display_name, font_size=9, x=section_x, y=color_legend_y_start,
-            fill=text_color, font_family='sans-serif', font_weight='bold'
+            fill=text_color, font_family=FONT_FAMILY, font_weight='bold'
         ))
 
         for i, (color, feature_label) in enumerate(items):
@@ -5182,7 +5201,7 @@ def draw_color_legends(d, featuresets, featureset_colors, featureset_color_order
 
             d.append(draw.Text(
                 feature_label, font_size=7, x=item_x + color_text_offset, y=item_y,
-                fill=text_color, font_family='sans-serif'
+                fill=text_color, font_family=FONT_FAMILY
             ))
 
 
@@ -5229,7 +5248,7 @@ def draw_color_legends_vertical(d, featuresets, featureset_colors, featureset_co
         display_name = fs_display_names.get(fs, fs.title())
         d.append(draw.Text(
             display_name, font_size=8, x=legend_x, y=current_y,
-            fill=text_color, font_family='sans-serif',
+            fill=text_color, font_family=FONT_FAMILY,
             text_anchor='start', font_weight='bold'
         ))
         current_y += 4  # Small gap after header
@@ -5248,7 +5267,7 @@ def draw_color_legends_vertical(d, featuresets, featureset_colors, featureset_co
             d.append(draw.Text(
                 feature_label, font_size=7, x=legend_x + swatch_size + 6,
                 y=current_y - swatch_size/2 + 1,
-                fill=text_color, font_family='sans-serif',
+                fill=text_color, font_family=FONT_FAMILY,
                 text_anchor='start', dominant_baseline='middle'
             ))
 
@@ -5699,7 +5718,9 @@ def plot_structural_mode(args, matrix_data):
 
 
 def main():
+    global FONT_FAMILY
     args = parse_args()
+    FONT_FAMILY = args.font_family
 
     # --- Set up logging ---
     if args.log_file:
