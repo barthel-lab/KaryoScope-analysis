@@ -26,6 +26,13 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   `novel` the only out-of-taxonomy feature accepted). Single source of truth for
   feature groupings, replacing the old `scripts/_feature_vocab.py` constants.
   Ships with tests and a committed `tests/data/hierarchy.tsv` fixture.
+- `core/intervals.py`: pure per-`seq_id` interval algebra (`coalesce`, `refine`,
+  `merge_overlapping`, `total_covered`) — the sweep-line workhorses behind
+  `overlay-annotations` (no pyranges, decision M5).
+- `core/io/bed.py`: annotation-BED reader/writer enforcing the **C4 invariant**
+  (rows grouped by `seq_id`; each sequence's intervals form a gapless,
+  non-overlapping partition) — malformed input and gaps/overlaps are errors (C2);
+  `.gz` (gzip/bgzip) read transparently.
 
 ### Notes
 
