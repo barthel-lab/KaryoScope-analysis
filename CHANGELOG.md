@@ -55,6 +55,12 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   (`dmax`/…/`dterminal`), `max_block_bp` (gap-bridged), hierarchy-derived
   interspersion, and the adaptive-threshold computation. Every magic constant
   (window size, block-gap tolerance, threshold factor/bounds) is a parameter (F4).
+- **`build-feature-matrix` subcommand** (replaces the matrix-building part of
+  `KaryoScope_sequence_annotate.py`): reads one annotation BED per featureset and
+  emits the wide per-`seq_id` matrix (`{featureset}__{metric}__{feature}` schema, F2)
+  + an adaptive-threshold sidecar (F5). Constants are CLI options (F4); alignment-QC
+  columns intentionally omitted (they move to `cluster-diagnostics`, F6). Second
+  fully-migrated tool; completes the data-foundation tier.
 
 ### Notes
 
