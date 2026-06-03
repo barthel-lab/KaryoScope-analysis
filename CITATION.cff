@@ -1,0 +1,40 @@
+cff-version: 1.2.0
+title: "KaryoScope-analysis: clustering, annotation, and visualization for KaryoScope sequence annotations"
+message: "If you use KaryoScope-analysis in your work, please cite the KaryoScope preprint as below."
+type: software
+authors:
+  - given-names: "T. Rhyker"
+    family-names: "Ranallo-Benavidez"
+    email: "rranallo-benavidez@tgen.org"
+    affiliation: "Translational Genomics Research Institute (TGen)"
+  - given-names: "Floris P."
+    family-names: "Barthel"
+    email: "fbarthel@tgen.org"
+    affiliation: "Translational Genomics Research Institute (TGen)"
+repository-code: "https://github.com/barthel-lab/KaryoScope-analysis"
+url: "https://github.com/barthel-lab/KaryoScope-analysis"
+license: "GPL-3.0-or-later"
+keywords:
+  - bioinformatics
+  - genomics
+  - karyotype
+  - cytogenetics
+  - telomere
+  - clustering
+  - visualization
+  - T2T
+
+preferred-citation:
+  type: article
+  title: "KaryoScope: rapid, alignment-free sequence annotation for the pangenome era"
+  authors:
+    - given-names: "T. Rhyker"
+      family-names: "Ranallo-Benavidez"
+      affiliation: "Translational Genomics Research Institute (TGen)"
+    - given-names: "Floris P."
+      family-names: "Barthel"
+      affiliation: "Translational Genomics Research Institute (TGen)"
+  journal: "bioRxiv"
+  year: 2026
+  doi: "10.64898/2026.05.15.725544"
+  url: "https://doi.org/10.64898/2026.05.15.725544"

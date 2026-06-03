@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: KaryoScope (core engine)
+    url: https://github.com/barthel-lab/KaryoScope
+    about: Issues with sequence annotation / the database / the core CLI belong here.
+  - name: KaryoScope-plotlib (karyoplot)
+    url: https://github.com/barthel-lab/KaryoScope-plotlib
+    about: Issues with the shared plotting library belong here.
