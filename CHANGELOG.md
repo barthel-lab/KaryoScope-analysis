@@ -44,7 +44,12 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   `telomere-acrocentric` — with v1→v2 name translation (`telomere_like_multigroup1`→
   `telomere_like`, `arm_multigroup1`→`arm`, `array_multigroup1`→`array`,
   `acrocentric_multigroup1`→`acrocentric`, `noncentromeric`→`rDNA`). Loaded via
-  `load_builtin_preset`; validated against the hierarchy. **Pending maintainer review.**
+  `load_builtin_preset`; validated against the hierarchy.
+- **`overlay-annotations` subcommand** (replaces `KaryoScope_merge_beds.py`): reads one
+  C4-validated annotation BED per featureset, refines the tracks per `seq_id`, resolves
+  each segment via a preset / custom spec / the default basic overlay, and writes one
+  resolved annotation BED. Validates input features against the hierarchy (C2). First
+  fully-migrated tool, wired into the `karyoscope-analysis` CLI.
 
 ### Notes
 
