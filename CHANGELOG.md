@@ -33,6 +33,12 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   (rows grouped by `seq_id`; each sequence's intervals form a gapless,
   non-overlapping partition) — malformed input and gaps/overlaps are errors (C2);
   `.gz` (gzip/bgzip) read transparently.
+- `core/annotation_resolution.py`: the `overlay-annotations` resolution engine —
+  a `precedence` (default winner) + an ordered list of class-based `rules` (M2),
+  with `emit` forms passthrough / `{literal}` / `composite`. Specs are validated
+  structurally (jsonschema) and semantically against the database hierarchy (every
+  featureset / feature / `@class` must exist); `when` keys are lint-checked to be in
+  precedence order. Composite labels join in precedence order (e.g. `DJ_TAR1`).
 
 ### Notes
 
