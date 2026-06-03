@@ -20,6 +20,12 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   (`CONTRIBUTING`, `CODE_OF_CONDUCT`, `CITATION`, `LICENSE`).
 - `docs/audit/`: per-script audits, scoping `DECISIONS.md`, `KNOWN_ISSUES.md`,
   `feature_matrix_metrics.md`, `clustering_methods.md`, and `OPEN_QUESTIONS.md`.
+- `core/feature_vocab.py`: the hierarchy-derived, **v2-only** feature vocabulary
+  (satellite/arm/ct/telomere groups loaded from the database `hierarchy.tsv` —
+  satellites = the centromeric subtree minus `ct`; legacy v1 names rejected;
+  `novel` the only out-of-taxonomy feature accepted). Single source of truth for
+  feature groupings, replacing the old `scripts/_feature_vocab.py` constants.
+  Ships with tests and a committed `tests/data/hierarchy.tsv` fixture.
 
 ### Notes
 
