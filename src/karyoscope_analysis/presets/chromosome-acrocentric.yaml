@@ -1,0 +1,12 @@
+# overlay-annotations preset: chromosome-acrocentric
+#
+# Ported from KaryoScope_merge_beds.chromosome_acrocentric_merge (+ ACROCENTRIC_PRIORITY_FEATURES).
+# Acrocentric detail features take priority over chromosome labels; elsewhere the chromosome label wins.
+# v1->v2: array_multigroup1 -> array; acrocentric_multigroup1 -> acrocentric.
+# NOTE: the legacy --collapse-non-acrocentric chromosome remap is a separate preprocessing step,
+# not part of this resolution spec. DRAFT pending maintainer review (M2).
+name: chromosome-acrocentric
+precedence: [chromosome, acrocentric] # default winner = chromosome; acrocentric detail overrides
+rules:
+  - when: {acrocentric: [DJ, PHR, rDNA, SST1, PJ, array, acrocentric]}
+    emit: acrocentric

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from importlib.resources import files
 from pathlib import Path
 from typing import Any, Literal
 
@@ -228,3 +229,26 @@ def load_spec_file(path: str | Path, hierarchy: FeatureHierarchy) -> ResolutionS
     if not isinstance(data, Mapping):
         raise SpecError(f"{path}: top-level YAML must be a mapping")
     return load_spec(data, hierarchy)
+
+
+#: Built-in presets ship under the ``karyoscope_analysis.presets`` data package.
+_PRESET_PACKAGE = "karyoscope_analysis.presets"
+
+
+def builtin_preset_names() -> list[str]:
+    """Names of the built-in resolution presets (the legacy merge_beds priority modes)."""
+    return sorted(
+        p.name[: -len(".yaml")]
+        for p in files(_PRESET_PACKAGE).iterdir()
+        if p.name.endswith(".yaml")
+    )
+
+
+def load_builtin_preset(name: str, hierarchy: FeatureHierarchy) -> ResolutionSpec:
+    """Load a built-in preset by name, validated against ``hierarchy``."""
+    import yaml
+
+    resource = files(_PRESET_PACKAGE) / f"{name}.yaml"
+    if not resource.is_file():
+        raise SpecError(f"unknown preset {name!r}; available: {builtin_preset_names()}")
+    return load_spec(yaml.safe_load(resource.read_text()), hierarchy)

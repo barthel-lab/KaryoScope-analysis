@@ -39,6 +39,12 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   structurally (jsonschema) and semantically against the database hierarchy (every
   featureset / feature / `@class` must exist); `when` keys are lint-checked to be in
   precedence order. Composite labels join in precedence order (e.g. `DJ_TAR1`).
+- Built-in overlay presets (`presets/*.yaml`): the four legacy `merge_beds` priority
+  modes ported 1:1 — `telomere-satellite`, `priority`, `chromosome-acrocentric`,
+  `telomere-acrocentric` — with v1→v2 name translation (`telomere_like_multigroup1`→
+  `telomere_like`, `arm_multigroup1`→`arm`, `array_multigroup1`→`array`,
+  `acrocentric_multigroup1`→`acrocentric`, `noncentromeric`→`rDNA`). Loaded via
+  `load_builtin_preset`; validated against the hierarchy. **Pending maintainer review.**
 
 ### Notes
 
