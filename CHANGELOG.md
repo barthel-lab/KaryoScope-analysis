@@ -50,6 +50,11 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   each segment via a preset / custom spec / the default basic overlay, and writes one
   resolved annotation BED. Validates input features against the hierarchy (C2). First
   fully-migrated tool, wired into the `karyoscope-analysis` CLI.
+- `core/seq_features.py`: pure per-`seq_id` feature metrics for `build-feature-matrix`
+  — coverage (`bp`/`frac`/`total_bp`), 1-bp-step sliding-window density
+  (`dmax`/…/`dterminal`), `max_block_bp` (gap-bridged), hierarchy-derived
+  interspersion, and the adaptive-threshold computation. Every magic constant
+  (window size, block-gap tolerance, threshold factor/bounds) is a parameter (F4).
 
 ### Notes
 
