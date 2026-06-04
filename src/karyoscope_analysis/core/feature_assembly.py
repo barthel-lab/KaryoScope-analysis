@@ -1,0 +1,215 @@
+"""Engine B overlap graph + clustering (OLC layout stage).
+
+See ``docs/audit/rearrangement_detection.md`` (Engine B). Builds on the feature aligner
+(:mod:`karyoscope_analysis.core.feature_align`):
+
+1. **Overlap graph** — for each read pair (after a feature-Jaccard prefilter) the
+   best-orientation local alignment is kept as an edge only if it is a **proper overlap**
+   (dovetail or containment) clearing a minimum overlap length and normalized identity.
+   Internal-only matches (usually shared repeats) are rejected — this is the anti-chaining
+   safeguard that makes connected-components clustering trustworthy.
+2. **Clusters** — connected components of that graph (singletons kept). Each edge carries a
+   relative orientation; a **parity union-find** assigns every read an orientation relative
+   to its cluster seed (the longest read), flagging rare orientation conflicts.
+
+Consensus (seed-anchored majority over the layout) builds on this next.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+
+from karyoscope_analysis.core.feature_align import (
+    Segment,
+    SubScore,
+    align_best_orientation,
+    classify_overlap,
+    feature_jaccard,
+    reverse_segments,
+)
+
+
+def _span_bp(segments: Sequence[Segment], start: int, end: int) -> int:
+    """Total bp of ``segments[start:end+1]`` (inclusive segment indices)."""
+    return sum(length for _, length in segments[start : end + 1])
+
+
+@dataclass(frozen=True)
+class OverlapEdge:
+    """An accepted proper overlap between two reads."""
+
+    a: str
+    b: str
+    score: float
+    identity: float  # score / (match_score * overlap_bp), in (.., 1]
+    overlap_bp: int
+    kind: str  # "dovetail" | "containment"
+    flipped: bool  # B is in the opposite orientation to A
+
+
+def build_overlap_graph(
+    reads: Mapping[str, Sequence[Segment]],
+    *,
+    sub_score: SubScore,
+    gap_factor: float,
+    match_score: float = 1.0,
+    min_overlap_bp: int = 1,
+    min_identity: float = 0.8,
+    min_jaccard: float = 0.0,
+) -> list[OverlapEdge]:
+    """Compute the proper-overlap edges among ``reads`` (``{read_id: segments}``).
+
+    A pair becomes an edge iff its best-orientation alignment is a dovetail or containment,
+    spans at least ``min_overlap_bp``, and has normalized identity ≥ ``min_identity``. The
+    ``min_jaccard`` feature-set prefilter prunes obviously-disjoint pairs cheaply (0 = off).
+    """
+    ids = sorted(reads)
+    edges: list[OverlapEdge] = []
+    for ai in range(len(ids)):
+        a_id = ids[ai]
+        a = reads[a_id]
+        for bi in range(ai + 1, len(ids)):
+            b_id = ids[bi]
+            b = reads[b_id]
+            if min_jaccard > 0.0 and feature_jaccard(a, b) < min_jaccard:
+                continue
+            aln = align_best_orientation(a, b, sub_score=sub_score, gap_factor=gap_factor)
+            kind = classify_overlap(aln, len(a), len(b))
+            if kind not in ("dovetail", "containment"):
+                continue
+            b_used = reverse_segments(b) if aln.reversed_b else b
+            overlap_bp = min(
+                _span_bp(a, aln.a_start, aln.a_end),
+                _span_bp(b_used, aln.b_start, aln.b_end),
+            )
+            if overlap_bp < min_overlap_bp:
+                continue
+            identity = aln.score / (match_score * overlap_bp) if overlap_bp else 0.0
+            if identity < min_identity:
+                continue
+            edges.append(
+                OverlapEdge(a_id, b_id, aln.score, identity, overlap_bp, kind, aln.reversed_b)
+            )
+    return edges
+
+
+class _ParityDSU:
+    """Union-find tracking each element's binary parity (orientation) to its root.
+
+    Union by rank, no path compression (so ``parity`` stays simple); depth is ``O(log n)``.
+    """
+
+    def __init__(self) -> None:
+        self.parent: dict[str, str] = {}
+        self.rank: dict[str, int] = {}
+        self.parity: dict[str, int] = {}  # parity relative to parent
+        self.conflicts: set[str] = set()  # roots where an inconsistent edge was seen
+
+    def add(self, x: str) -> None:
+        if x not in self.parent:
+            self.parent[x] = x
+            self.rank[x] = 0
+            self.parity[x] = 0
+
+    def find(self, x: str) -> tuple[str, int]:
+        parity = 0
+        while self.parent[x] != x:
+            parity ^= self.parity[x]
+            x = self.parent[x]
+        return x, parity
+
+    def union(self, x: str, y: str, rel: int) -> bool:
+        """Require parity ``rel`` (0 same / 1 flipped) between ``x`` and ``y``.
+
+        Returns ``False`` (and records a conflict) if that contradicts the current state.
+        """
+        rx, px = self.find(x)
+        ry, py = self.find(y)
+        if rx == ry:
+            if (px ^ py) != rel:
+                self.conflicts.add(rx)
+                return False
+            return True
+        if self.rank[rx] < self.rank[ry]:
+            rx, ry = ry, rx
+            px, py = py, px
+        self.parent[ry] = rx
+        self.parity[ry] = rel ^ px ^ py
+        if self.rank[rx] == self.rank[ry]:
+            self.rank[rx] += 1
+        return True
+
+
+@dataclass(frozen=True)
+class Cluster:
+    """A connected-component cluster of reads, oriented to a seed (longest read)."""
+
+    members: tuple[str, ...]  # sorted by descending length, then id
+    seed: str
+    reversed_relative_to_seed: dict[str, bool]
+    size: int
+    orientation_conflict: bool
+
+
+def cluster_reads(
+    reads: Mapping[str, Sequence[Segment]], edges: Sequence[OverlapEdge]
+) -> list[Cluster]:
+    """Group reads into connected components, oriented to each component's longest read."""
+    dsu = _ParityDSU()
+    for read_id in reads:
+        dsu.add(read_id)
+    for edge in edges:
+        dsu.union(edge.a, edge.b, 1 if edge.flipped else 0)
+
+    components: dict[str, list[str]] = {}
+    for read_id in reads:
+        root, _ = dsu.find(read_id)
+        components.setdefault(root, []).append(read_id)
+
+    def total_bp(read_id: str) -> int:
+        return sum(length for _, length in reads[read_id])
+
+    clusters: list[Cluster] = []
+    for root, members in components.items():
+        seed = max(members, key=lambda r: (total_bp(r), r))
+        _, seed_parity = dsu.find(seed)
+        oriented = {}
+        for member in members:
+            _, parity = dsu.find(member)
+            oriented[member] = bool(parity ^ seed_parity)
+        ordered = tuple(sorted(members, key=lambda r: (-total_bp(r), r)))
+        clusters.append(
+            Cluster(
+                members=ordered,
+                seed=seed,
+                reversed_relative_to_seed=oriented,
+                size=len(members),
+                orientation_conflict=root in dsu.conflicts,
+            )
+        )
+    clusters.sort(key=lambda c: (-c.size, c.seed))
+    return clusters
+
+
+def assemble(
+    reads: Mapping[str, Sequence[Segment]],
+    *,
+    sub_score: SubScore,
+    gap_factor: float,
+    match_score: float = 1.0,
+    min_overlap_bp: int = 1,
+    min_identity: float = 0.8,
+    min_jaccard: float = 0.0,
+) -> tuple[list[Cluster], list[OverlapEdge]]:
+    """Build the overlap graph and cluster — returns ``(clusters, edges)``."""
+    edges = build_overlap_graph(
+        reads,
+        sub_score=sub_score,
+        gap_factor=gap_factor,
+        match_score=match_score,
+        min_overlap_bp=min_overlap_bp,
+        min_identity=min_identity,
+        min_jaccard=min_jaccard,
+    )
+    return cluster_reads(reads, edges), edges

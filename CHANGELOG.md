@@ -114,6 +114,13 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   matches, linear per-bp gaps, and best-of-forward/reverse. Classifies overlaps as
   dovetail / containment / internal, with a feature-Jaccard prefilter. Pure; the overlap
   graph + consensus + CLI build on it.
+- `core/feature_assembly.py`: Engine B's **overlap graph + clustering** — keeps only
+  *proper* overlaps (dovetail/containment) clearing a minimum overlap length and normalized
+  identity (internal-only repeat matches rejected; the anti-chaining safeguard), then groups
+  reads into connected-component clusters via a **parity union-find** that assigns each read
+  an orientation relative to its cluster seed (longest read) and flags orientation
+  conflicts. Singletons kept. `assemble()` returns `(clusters, edges)`. Seed-anchored
+  consensus and the `cluster` CLI build on it next.
 
 ### Notes
 
