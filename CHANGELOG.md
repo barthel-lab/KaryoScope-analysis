@@ -86,6 +86,17 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   the real contracts: C4-valid output, `seq_id` conservation, the F2 column schema,
   coverage self-consistency (`bp`/`frac` sum to `total_bp`/1), and telomere
   interspersion over an overlay composite.
+- `docs/audit/rearrangement_detection.md`: the agreed mental model and design for
+  detecting recurrent rearrangements as **abnormal feature colocalizations** —
+  reads as orientation-agnostic ordered feature-segment sequences; the two axes of
+  abnormality (proximity vs abundance); the Engine A (alignment-free colocalization
+  detection) / Engine B (alignment-based clustering) split; the experiment-vs-control
+  + annotated-CHM13-reads baselines; and the anti-circularity discipline (Group A).
+- `core/colocalization.py`: Engine A **measurement layer** — per read, the minimum bp
+  gap between every co-present feature pair (a single sweep, orientation-invariant,
+  `min_occurrence_bp` denoise), plus a streaming reader over an overlay BED. Pure and
+  non-statistical; the differential test builds on top (specified, deferred pending the
+  Group A statistical decisions).
 
 ### Notes
 
