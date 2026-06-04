@@ -5,10 +5,10 @@
 > `detect-rearrangements` CLI. The statistics are a **v1 for coauthor review** (the
 > **Group A** bucket in `OPEN_QUESTIONS.md`): CMH across length buckets + BH-FDR +
 > recurrence/effect/floor gates, with read independence assumed (surfaced as a runtime
-> warning, not enforced — open item). **Engine B** (OLC clustering) is fully specified
-> (§8); its **aligner, overlap graph + clustering, and seed-anchored consensus**
-> (`core/feature_align.py`, `core/feature_assembly.py`) are implemented — only the
-> `cluster` CLI remains.
+> warning, not enforced — open item). **Engine B** (OLC clustering) is **fully implemented**
+> — aligner (`core/feature_align.py`), overlap graph + clustering + seed-anchored consensus
+> (`core/feature_assembly.py`), and the `cluster` CLI. Rendering of the cluster layouts is
+> deferred to the (separately gated) plotting tier.
 
 This document is the mental model and design for detecting **recurrent rearrangements**
 from KaryoScope-annotated long/short reads, superseding the old `cluster_analysis`

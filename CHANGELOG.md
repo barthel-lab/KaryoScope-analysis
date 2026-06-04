@@ -124,7 +124,12 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   each cluster member is oriented to the seed and locally aligned to it, and every aligned
   column votes its feature at the corresponding seed position (the seed votes for itself).
   Yields the per-position majority feature with support/coverage over the seed backbone.
-  The `cluster` CLI builds on it next.
+- **`cluster` subcommand**: Engine B's CLI — clusters an overlay-annotations BED subset of
+  reads into structural haplotypes (OLC), writing a clusters table, a per-cluster consensus
+  BED (with per-position support/coverage), and a member layout TSV (orientation + seed
+  flag). Substitution scorer + all overlap thresholds are options; `--min-length` keeps the
+  long-read-only default. Rendering of the layouts is left to the plotting tier. This
+  completes Engine B (aligner -> overlap graph -> clusters -> consensus -> CLI).
 
 ### Notes
 
