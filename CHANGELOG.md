@@ -150,6 +150,15 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   composite splits it into
   clean per-chromosome clusters (largest 18) with multi-chromosome clusters surfacing as
   candidate translocations. See `docs/audit/rearrangement_detection.md` §10.
+- **`cluster-plot` subcommand** + `core/cluster_plot.py` + `core/io/colors.py`: the package's
+  single **read-renderer** (collapsing the legacy `plot-reads`/`cluster-plot`/`telogator-reads-viz`).
+  Renders one Engine B cluster as an SVG — each read a row of feature-colored bars, oriented and
+  offset into the seed frame (from `cluster`'s `layout.tsv`, which now carries a seed-relative
+  `offset`/`length` via `feature_assembly.cluster_layout`), with the consensus track and a legend.
+  Colors from the database `colors.tsv` (committed to `tests/data/`; structural layer of
+  `chr:feature` labels), with a deterministic auto-palette fallback; `--min-segment-bp` denoises.
+  Self-contained raw SVG (no plotting deps) — the `karyoplot.svg` push-down is deferred, as are the
+  animation/video (D7) and the old `cluster_analysis`-specific visuals (dendrogram/enrichment bubbles).
 
 ### Notes
 

@@ -30,6 +30,7 @@ from karyoscope_analysis._version import __version__
 from karyoscope_analysis.commands import (
     build_feature_matrix,
     cluster,
+    cluster_plot,
     detect_rearrangements,
     overlay_annotations,
     version,
@@ -110,13 +111,15 @@ main.add_command(overlay_annotations.cmd, name="overlay-annotations")
 main.add_command(build_feature_matrix.cmd, name="build-feature-matrix")
 main.add_command(detect_rearrangements.cmd, name="detect-rearrangements")
 main.add_command(cluster.cmd, name="cluster")
+main.add_command(cluster_plot.cmd, name="cluster-plot")
 main.add_command(version.cmd, name="version")
 
 # --- Roadmap (Phase 4 migration; see docs/audit/DECISIONS.md) ---
 # Data foundation:   overlay-annotations ✓, build-feature-matrix ✓
 # Rearrangements:    detect-rearrangements ✓ (Engine A; differential colocalization)
-# Clustering:        cluster ✓ (Engine B; OLC clustering + consensus). Rendering -> plotting.
-# Plotting:          draw-legend, plot-reads, cluster-plot, animate
+# Clustering:        cluster ✓ (Engine B; OLC clustering + consensus)
+# Plotting:          cluster-plot ✓ (read-renderer; SVG). Deferred: animation/video (D7),
+#                    Engine A bubble/matrix, karyoplot.svg push-down.
 # Translocations:    find-/cluster-/visualize-translocation-reads
 
 

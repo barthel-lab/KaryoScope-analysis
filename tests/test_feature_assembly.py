@@ -180,6 +180,20 @@ def test_consensus_counts_agreement_support():
     assert cons.segments() == [("A", 100), ("B", 100), ("C", 100)]
 
 
+def test_cluster_layout_offsets():
+    # member dovetails the seed shifted right: B,C of the member align to seed's B,C (at 100bp).
+    reads = {
+        "seed": [("A", 100), ("B", 100), ("C", 100)],
+        "m": [("B", 100), ("C", 100), ("D", 100)],
+    }
+    clusters, _ = asm.assemble(reads, **PARAMS)
+    placements = asm.cluster_layout(reads, clusters[0], sub_score=EXACT, gap_factor=0.01)
+    by_read = {p.read_id: p for p in placements}
+    assert by_read["seed"].offset == 0 and by_read["seed"].is_seed
+    assert by_read["m"].offset == 100  # shifted so its B sits under the seed's B
+    assert by_read["m"].length == 300
+
+
 def test_consensus_orients_reversed_members():
     seed = [("A", 300), ("B", 100), ("C", 100)]  # 500 bp -> unambiguous seed
     reads = {"seed": seed, "rev": reverse_segments([("A", 300), ("B", 100)])}

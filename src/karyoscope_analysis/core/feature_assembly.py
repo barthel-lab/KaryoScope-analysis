@@ -314,6 +314,65 @@ def cluster_consensus(
     return ClusterConsensus(seed=cluster.seed, positions=positions)
 
 
+@dataclass(frozen=True)
+class MemberPlacement:
+    """A cluster member's placement in the seed coordinate frame (for layout/plotting)."""
+
+    read_id: str
+    is_seed: bool
+    reversed: bool  # oriented relative to the seed
+    offset: int  # seed-relative bp offset of the member's start (0 for the seed)
+    length: int  # member length (bp), in the oriented frame
+
+
+def _cumulative_bp(segments: Sequence[Segment]) -> list[int]:
+    """Prefix sums: ``out[k]`` = bp before segment ``k`` (``out[0] == 0``)."""
+    out = [0]
+    for _, length in segments:
+        out.append(out[-1] + length)
+    return out
+
+
+def cluster_layout(
+    reads: Mapping[str, Sequence[Segment]],
+    cluster: Cluster,
+    *,
+    sub_score: SubScore,
+    gap_factor: float,
+    weight: Mapping[str, float] | None = None,
+) -> list[MemberPlacement]:
+    """Place each cluster member in the seed's coordinate frame.
+
+    Reuses the member→seed alignment (oriented) to compute a **seed-relative bp offset**: the
+    first aligned column ``(i, j)`` pins member segment ``i`` under seed segment ``j``. The
+    seed is the frame (offset 0). Members linked only transitively (no seed overlap) get
+    offset 0 — a v1 limitation shared with the consensus. Members keep the cluster's
+    descending-length, then-id order.
+    """
+    scorer = _weighted_sub_score(sub_score, weight)
+    seed_segments = reads[cluster.seed]
+    seed_cum = _cumulative_bp(seed_segments)
+
+    placements: list[MemberPlacement] = []
+    for member in cluster.members:
+        reversed_ = cluster.reversed_relative_to_seed[member]
+        segments = reverse_segments(reads[member]) if reversed_ else list(reads[member])
+        length = sum(length for _, length in segments)
+        if member == cluster.seed:
+            offset = 0
+        else:
+            aln = align_local(segments, seed_segments, sub_score=scorer, gap_factor=gap_factor)
+            if aln.columns:
+                member_idx, seed_idx = aln.columns[0]
+                offset = seed_cum[seed_idx] - _cumulative_bp(segments)[member_idx]
+            else:
+                offset = 0
+        placements.append(
+            MemberPlacement(member, member == cluster.seed, reversed_, offset, length)
+        )
+    return placements
+
+
 def assemble(
     reads: Mapping[str, Sequence[Segment]],
     *,

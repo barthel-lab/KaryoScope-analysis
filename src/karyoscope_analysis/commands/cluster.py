@@ -222,12 +222,15 @@ def cmd(
                 pos += p.length
 
     with layout_tsv.open("w", newline="") as fh:
-        fh.write("cluster_id\tread_id\tis_seed\treversed\n")
+        fh.write("cluster_id\tread_id\tis_seed\treversed\toffset\tlength\n")
         for idx, cluster in enumerate(clusters):
-            for member in cluster.members:
+            placements = asm.cluster_layout(
+                reads, cluster, sub_score=sub_score, gap_factor=gap_factor, weight=weight
+            )
+            for p in placements:
                 fh.write(
-                    f"cluster_{idx}\t{member}\t{int(member == cluster.seed)}\t"
-                    f"{int(cluster.reversed_relative_to_seed[member])}\n"
+                    f"cluster_{idx}\t{p.read_id}\t{int(p.is_seed)}\t{int(p.reversed)}\t"
+                    f"{p.offset}\t{p.length}\n"
                 )
 
     n_multi = sum(1 for c in clusters if c.size > 1)
