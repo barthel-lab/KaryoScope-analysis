@@ -104,6 +104,16 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   CHM13 reads). Reports all tested pairs with a `passes` flag and a `reference_abnormal`
   annotation. A **v1 for coauthor review** (Group A statistics); read independence is
   assumed and surfaced as a runtime warning, not enforced (de-duplication is an open item).
+- `docs/audit/rearrangement_detection.md` §8: the full **Engine B** design — clustering as
+  overlap-layout-consensus (OLC) assembly over feature-segment sequences (overlap graph on
+  *proper* overlaps only, connected-components clustering, seed-anchored consensus,
+  orientation propagation; recurrent inter-cluster bridges = rearrangements).
+- `core/feature_align.py`: Engine B's **feature-sequence local aligner** — Smith-Waterman
+  over `(feature, length)` segments with hierarchy-tiered substitution (`hierarchy_substitution`:
+  exact > sibling > unrelated, `novel` neutral), `min(len)`-weighted (length-change-lenient)
+  matches, linear per-bp gaps, and best-of-forward/reverse. Classifies overlaps as
+  dovetail / containment / internal, with a feature-Jaccard prefilter. Pure; the overlap
+  graph + consensus + CLI build on it.
 
 ### Notes
 

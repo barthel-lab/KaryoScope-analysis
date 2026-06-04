@@ -5,8 +5,9 @@
 > `detect-rearrangements` CLI. The statistics are a **v1 for coauthor review** (the
 > **Group A** bucket in `OPEN_QUESTIONS.md`): CMH across length buckets + BH-FDR +
 > recurrence/effect/floor gates, with read independence assumed (surfaced as a runtime
-> warning, not enforced — open item). Engine B (alignment-based clustering) is specified
-> here but not yet built.
+> warning, not enforced — open item). **Engine B** (OLC clustering) is fully specified
+> (§8); its **feature aligner** (`core/feature_align.py`) is implemented — the overlap
+> graph, consensus, and CLI are next.
 
 This document is the mental model and design for detecting **recurrent rearrangements**
 from KaryoScope-annotated long/short reads, superseding the old `cluster_analysis`
@@ -149,17 +150,79 @@ exp/control counts. We never use the tested reads to both nominate and test, nev
 control define its own comparison threshold, and require read independence (dedup) so
 recurrence counts molecules, not duplicates.
 
-## 8. Engine B — clustering / consensus / viz (sketch; later)
+## 8. Engine B — overlap-layout-consensus clustering
 
-Orientation-aware **alignment of feature-segment sequences**: local (Smith-Waterman-style)
-on the symbol sequence (= the coalesced overlay), **length as a confidence weight** (+
-`min_occurrence_bp` denoise), **substitution cost from hierarchy distance** (`HSat1A↔HSat1B`
-cheap, `arm↔telomere` dear; `novel` neutral), affine gaps, and **best of forward/reverse**
-so a read and its reverse have ~0 distance (kills mirror-image clusters by construction).
-The pairwise distances feed a precomputed-distance clusterer (hierarchical / density-based),
-and members are oriented to a seed for a consensus feature sequence and visualization.
-Cluster-level differential testing is **deferred** (a cluster is a modeled object → testing
-it risks circularity).
+Engine B is **mini-assembly in feature space**: a read is a window of a latent reference
+sequence (in unknown orientation), so grouping reads + building a consensus *is* the
+overlap-layout-consensus (OLC) problem — on tens–hundreds of feature segments over a
+~tens-symbol alphabet, not 10⁶ bases. This resolves partial overlap (transitive linking),
+orientation, consensus, and the eventual visualization with one model. Reads are always
+pre-subset, so an `O(N²)` pairwise pass is fine.
+
+**Input.** Whatever overlay-annotations BED subset the user hands it (decoupled from Engine
+A; one natural input is the carriers of an Engine-A call). Clusters the reads as given, with
+an optional `--min-length` filter; no internal length buckets. In practice only **long
+reads** are clustered (short reads carry too little structure — they still feed Engine A's
+colocalization rates). The OLC graph would correctly absorb a contained short read if mixed
+in, so the tool *can* handle short/long/combined; long-only is the default.
+
+### Overlap — local alignment of feature-segment sequences (`core/feature_align.py`)
+
+Each read is an ordered `(feature, length)` sequence (the coalesced overlay). A
+**Smith-Waterman local alignment** over segments, with:
+
+* **Substitution score from the hierarchy** (tiered): exact match best; same coarse group
+  (`satellite`/`arm`/`ct`/telomere-types — `HSat1A`↔`HSat1B`) partial; `novel` neutral (0);
+  otherwise mismatch. Supplied as a `sub_score(a, b)` callable, so the aligner is
+  hierarchy-agnostic and trivially testable.
+* **Match reward weighted by `min(len_a, len_b)`** — bp-weighted, so large shared blocks
+  dominate and specks contribute ~nothing; and **length-change-lenient**, since the
+  `|len_a − len_b|` difference is neither rewarded nor penalized (a feature's length may
+  drift). The `min_occurrence_bp` denoise also applies.
+* **Linear per-bp gap** — skipping a segment costs `gap_factor × its length`, so skipping a
+  large structural block (a real insertion/deletion) is penalised in proportion, while a
+  feature's length drift is absorbed by the match rule above. (Affine is a later refinement.)
+* **Best of forward / reverse** B — a read and its reverse therefore have ~0 distance, which
+  kills the mirror-image-cluster failure by construction.
+
+The alignment returns its score, the aligned segment-index columns, and the aligned spans,
+which classify the overlap as **dovetail**, **containment**, or **internal**.
+
+### Layout — the overlap graph (`core/feature_assembly.py`, next)
+
+* **Edges = *proper* overlaps only** (dovetail or containment that clear a minimum overlap
+  length and a minimum normalized concordance). Internal-only matches are rejected — they are
+  usually shared repeats and are the classic cause of false chaining. This is what makes
+  connected-components clustering trustworthy.
+* **Clusters = connected components** (v1; community detection is a later knob if chaining
+  appears). **Singletons are kept** as size-1 clusters so nothing vanishes silently.
+* **Orientation propagation**: each edge carries a relative orientation; BFS from the cluster
+  seed assigns each member an orientation (signed/2-coloring), flagging rare conflicts.
+* **Bridges = rearrangements.** A read joining two otherwise-separate clusters via proper
+  overlaps on different structures is a junction; a **recurrent** bridge is a recurrent
+  rearrangement — i.e. Engine A's signal as graph topology, with recurrence separating a real
+  rearrangement bridge from a one-off chimera.
+
+### Consensus
+
+**Seed-anchored** (v1): the longest read is the backbone; members are aligned/oriented to it
+and the per-position **majority feature** (with per-position support) is the cluster's
+consensus structural sequence, extended where members reach past the seed. Members linked
+only transitively (not overlapping the seed) don't inform the seed-frame consensus in v1;
+progressive layout is the v2 fix.
+
+### Output (data only; rendering deferred)
+
+A clusters table (id, members, sizes), one consensus feature-BED per cluster (with support),
+and a member layout TSV (orientation + offset). The plotting tier renders it later (it's
+separately gated on the `karyoplot` push-down). **Cluster-level differential testing stays
+deferred** — a cluster is a modeled object, so testing it risks circularity.
+
+### Scale
+
+Pre-subset + `min_occurrence_bp` denoise (fewer segments) + a **feature-content prefilter**
+(skip pairs whose feature sets barely overlap) prune the `O(N²)` before the DP; pure Python
+suffices at subset scale, with minimizer-style seeding as the escape hatch.
 
 ## 9. Open knobs / deferred
 
