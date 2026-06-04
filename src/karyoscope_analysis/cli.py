@@ -27,7 +27,12 @@ import sys
 import click
 
 from karyoscope_analysis._version import __version__
-from karyoscope_analysis.commands import build_feature_matrix, overlay_annotations, version
+from karyoscope_analysis.commands import (
+    build_feature_matrix,
+    detect_rearrangements,
+    overlay_annotations,
+    version,
+)
 
 CONTEXT_SETTINGS = {
     "help_option_names": ["-h", "--help"],
@@ -102,12 +107,14 @@ def main(verbose: int, quiet: bool) -> None:
 # Register subcommands. The order here determines the order in `--help`.
 main.add_command(overlay_annotations.cmd, name="overlay-annotations")
 main.add_command(build_feature_matrix.cmd, name="build-feature-matrix")
+main.add_command(detect_rearrangements.cmd, name="detect-rearrangements")
 main.add_command(version.cmd, name="version")
 
 # --- Roadmap (Phase 4 migration; see docs/audit/DECISIONS.md) ---
 # Data foundation:   overlay-annotations ✓, build-feature-matrix ✓
-# Clustering:        build-matrix, cluster, test-enrichment, cluster-diagnostics
-# Cluster consumers: cluster-annotate, select-representatives, compare-clusterings
+# Rearrangements:    detect-rearrangements ✓ (Engine A; differential colocalization)
+# Clustering:        Engine B — alignment-based clustering + consensus + viz (see
+#                    docs/audit/rearrangement_detection.md)
 # Plotting:          draw-legend, plot-reads, cluster-plot, animate
 # Translocations:    find-/cluster-/visualize-translocation-reads
 

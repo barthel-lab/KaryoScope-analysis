@@ -1,9 +1,12 @@
 # Rearrangement detection — model, design, and Engine A spec
 
-> Status: **design agreed; Engine A *measurement layer* implemented**
-> (`core/colocalization.py`). The differential-test layer (statistics) and Engine B
-> (alignment-based clustering) are specified here but not yet built — the statistics
-> are in the **Group A** bucket (`OPEN_QUESTIONS.md`) and warrant coauthor review.
+> Status: **design agreed; Engine A fully implemented** — measurement
+> (`core/colocalization.py`), differential test (`core/rearrangement.py`), and the
+> `detect-rearrangements` CLI. The statistics are a **v1 for coauthor review** (the
+> **Group A** bucket in `OPEN_QUESTIONS.md`): CMH across length buckets + BH-FDR +
+> recurrence/effect/floor gates, with read independence assumed (surfaced as a runtime
+> warning, not enforced — open item). Engine B (alignment-based clustering) is specified
+> here but not yet built.
 
 This document is the mental model and design for detecting **recurrent rearrangements**
 from KaryoScope-annotated long/short reads, superseding the old `cluster_analysis`

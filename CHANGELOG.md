@@ -95,8 +95,15 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
 - `core/colocalization.py`: Engine A **measurement layer** — per read, the minimum bp
   gap between every co-present feature pair (a single sweep, orientation-invariant,
   `min_occurrence_bp` denoise), plus a streaming reader over an overlay BED. Pure and
-  non-statistical; the differential test builds on top (specified, deferred pending the
-  Group A statistical decisions).
+  non-statistical.
+- `core/rearrangement.py` + **`detect-rearrangements` subcommand**: Engine A differential
+  test. Aggregates each sample's per-read gaps into per-(length-bucket, pair) support
+  counts, then tests experiment-vs-control colocalization rates per `(pair, window)` with a
+  **Cochran-Mantel-Haenszel** stratified test (length buckets as strata), **BH-FDR**, and
+  recurrence / effect-size / **reference artifact-floor** gates (the floor = annotated
+  CHM13 reads). Reports all tested pairs with a `passes` flag and a `reference_abnormal`
+  annotation. A **v1 for coauthor review** (Group A statistics); read independence is
+  assumed and surfaced as a runtime warning, not enforced (de-duplication is an open item).
 
 ### Notes
 
