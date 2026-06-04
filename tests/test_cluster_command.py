@@ -32,6 +32,8 @@ def test_cluster_cli(cli_runner, tmp_path: Path):
             str(bed),
             "--hierarchy",
             str(HIERARCHY_TSV),
+            # default repeat-mask: bSat/arm/gSat are structural (not interspersed repeats),
+            # so they keep full weight and the 1000 bp bSat overlap clears the threshold.
             "--min-overlap-bp",
             "500",
             "--min-identity",
@@ -81,3 +83,33 @@ def test_cluster_cli_min_length_filters_reads(cli_runner, tmp_path: Path):
     assert result.exit_code == 0, result.output
     layout_rows = _read_tsv(tmp_path / "c.layout.tsv")
     assert {r["read_id"] for r in layout_rows} == {"long"}  # short read filtered out
+
+
+def test_cluster_cli_repeat_mask_breaks_repeat_only_overlap(cli_runner, tmp_path: Path):
+    # x and y dovetail ONLY through a shared LINE block (a genome-wide interspersed repeat);
+    # the flanks (chr1/chr2) are unrelated, so the LINE block is the only positive overlap.
+    bed = tmp_path / "overlay.bed"
+    bed.write_text(
+        "x\t0\t2000\tchr1\nx\t2000\t4000\tLINE\ny\t0\t2000\tLINE\ny\t2000\t4000\tchr2\n"
+    )
+    common = [
+        "cluster",
+        "--input",
+        str(bed),
+        "--hierarchy",
+        str(HIERARCHY_TSV),
+        "--min-overlap-bp",
+        "1000",
+        "--min-identity",
+        "0.9",
+    ]
+    # default repeat-mask: LINE is masked -> the LINE-only overlap carries no weight -> 2 singletons.
+    masked = cli_runner.invoke(main, [*common, "-o", str(tmp_path / "masked.tsv")])
+    assert masked.exit_code == 0, masked.output
+    assert sorted(int(c["size"]) for c in _read_tsv(tmp_path / "masked.tsv")) == [1, 1]
+    # uniform: LINE counts -> x,y dovetail through it -> one 2-read cluster.
+    uni = cli_runner.invoke(
+        main, [*common, "--weight-method", "uniform", "-o", str(tmp_path / "uni.tsv")]
+    )
+    assert uni.exit_code == 0, uni.output
+    assert sorted(int(c["size"]) for c in _read_tsv(tmp_path / "uni.tsv")) == [2]

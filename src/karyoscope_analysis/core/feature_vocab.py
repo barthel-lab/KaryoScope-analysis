@@ -160,3 +160,16 @@ class FeatureHierarchy:
         for node in ("ITS", "TAR1"):
             self._require_node("subtelomeric", node)
         return frozenset({"ITS", "TAR1"})
+
+    @property
+    def interspersed_repeat_features(self) -> frozenset[str]:
+        """Genome-wide interspersed/transposable repeat classes (LINE/SINE/LTR/DNA/...).
+
+        The ``Interspersed_Repeat`` subtree of the ``repeat`` featureset. These occur in
+        nearly every long read and carry no structural-rearrangement signal, so Engine B
+        clustering down-weights them (otherwise reads chain together through shared repeats).
+        Empty if the hierarchy has no such node.
+        """
+        if "Interspersed_Repeat" not in self.features("repeat"):
+            return frozenset()
+        return self.descendants("repeat", "Interspersed_Repeat", include_root=True)

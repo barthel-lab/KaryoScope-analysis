@@ -86,6 +86,16 @@ def test_telomere_groups(h: FeatureHierarchy) -> None:
     assert h.its_tar1 == {"ITS", "TAR1"}
 
 
+def test_interspersed_repeat_features(h: FeatureHierarchy) -> None:
+    repeats = h.interspersed_repeat_features
+    # genome-wide transposable/interspersed classes are included...
+    assert {"LINE", "SINE", "LTR", "DNA", "Interspersed_Repeat"} <= repeats
+    # ...but structural / satellite features are not.
+    assert "Satellite" not in repeats  # Noninterspersed branch
+    assert "bSat" not in repeats and "canonical_telomere" not in repeats
+    assert "nonrepeat" not in repeats  # masked separately by the cluster command
+
+
 def test_membership_is_v2_only(h: FeatureHierarchy) -> None:
     assert "bSat" in h
     assert "categorized" in h  # background label is a real feature value

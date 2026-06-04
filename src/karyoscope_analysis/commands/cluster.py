@@ -112,6 +112,22 @@ def _sidecar(output: Path, suffix: str) -> Path:
     help="Feature-set Jaccard prefilter (0 = off).",
 )
 @click.option(
+    "--weight-method",
+    type=click.Choice(["repeat-mask", "idf", "uniform"]),
+    default="repeat-mask",
+    show_default=True,
+    help="Per-feature weighting (anti-chaining): 'repeat-mask' zeroes genome-wide "
+    "interspersed-repeat features (LINE/SINE/... + nonrepeat) so overlaps rest on "
+    "distinctive structure; 'idf' down-weights by frequency; 'uniform' weights all equally.",
+)
+@click.option(
+    "--weight-floor",
+    default=0.1,
+    show_default=True,
+    type=float,
+    help="Minimum weight for the most ubiquitous features (idf method).",
+)
+@click.option(
     "--output",
     "-o",
     required=True,
@@ -130,6 +146,8 @@ def cmd(
     min_overlap_bp: int,
     min_identity: float,
     min_jaccard: float,
+    weight_method: str,
+    weight_floor: float,
     output: Path,
 ) -> None:
     """Cluster reads into structural haplotypes and write clusters/consensus/layout."""
@@ -139,6 +157,13 @@ def cmd(
 
     hierarchy = FeatureHierarchy.from_tsv(hierarchy_path)
     sub_score = hierarchy_substitution(hierarchy, match=match, partial=partial, mismatch=mismatch)
+    if weight_method == "repeat-mask":
+        masked = hierarchy.interspersed_repeat_features | {"nonrepeat"}
+        weight: dict[str, float] | None = dict.fromkeys(masked, 0.0)
+    elif weight_method == "idf":
+        weight = asm.idf_weights(reads, floor=weight_floor)
+    else:
+        weight = None
 
     clusters, _edges = asm.assemble(
         reads,
@@ -148,9 +173,10 @@ def cmd(
         min_overlap_bp=min_overlap_bp,
         min_identity=min_identity,
         min_jaccard=min_jaccard,
+        weight=weight,
     )
     consensuses = [
-        asm.cluster_consensus(reads, c, sub_score=sub_score, gap_factor=gap_factor)
+        asm.cluster_consensus(reads, c, sub_score=sub_score, gap_factor=gap_factor, weight=weight)
         for c in clusters
     ]
 

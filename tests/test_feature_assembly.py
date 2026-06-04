@@ -118,6 +118,40 @@ def test_reversed_member_marked_relative_to_seed():
     assert c.reversed_relative_to_seed["rev"] is True
 
 
+# ----------------------------------------------------------------- feature weighting (v2)
+def test_idf_weights():
+    reads = {
+        "r1": [("X", 100), ("Y", 100)],
+        "r2": [("X", 100), ("Z", 100)],
+        "r3": [("X", 100), ("W", 100)],
+    }
+    w = asm.idf_weights(reads, floor=0.1)
+    assert w["X"] == pytest.approx(0.1)  # in all 3 reads -> floored
+    assert w["Y"] == pytest.approx(2 / 3)  # in 1 of 3 -> 1 - 1/3
+    assert w["Z"] == pytest.approx(2 / 3)
+
+
+def test_weighting_suppresses_ubiquitous_overlap():
+    # x and y dovetail only through a ubiquitous "REP" block.
+    reads = {"x": [("DISTX", 2000), ("REP", 2000)], "y": [("REP", 2000), ("DISTY", 2000)]}
+    base = dict(
+        sub_score=EXACT, gap_factor=0.01, match_score=1.0, min_overlap_bp=500, min_identity=0.9
+    )
+    assert len(asm.build_overlap_graph(reads, **base)) == 1  # uniform: 2000 bp -> edge
+    weight = {"REP": 0.05, "DISTX": 1.0, "DISTY": 1.0}
+    # weighted overlap 0.05 * 2000 = 100 < 500 -> rejected
+    assert asm.build_overlap_graph(reads, **base, weight=weight) == []
+
+
+def test_weighting_keeps_distinctive_overlap():
+    reads = {"x": [("A", 2000), ("DIST", 2000)], "y": [("DIST", 2000), ("B", 2000)]}
+    base = dict(
+        sub_score=EXACT, gap_factor=0.01, match_score=1.0, min_overlap_bp=500, min_identity=0.9
+    )
+    weight = {"DIST": 1.0, "A": 1.0, "B": 1.0}
+    assert len(asm.build_overlap_graph(reads, **base, weight=weight)) == 1
+
+
 # ----------------------------------------------------------------- consensus
 def _consensus(reads, cluster):
     return asm.cluster_consensus(reads, cluster, sub_score=EXACT, gap_factor=0.01)

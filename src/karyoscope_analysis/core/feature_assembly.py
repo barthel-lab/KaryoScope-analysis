@@ -32,9 +32,53 @@ from karyoscope_analysis.core.feature_align import (
 )
 
 
-def _span_bp(segments: Sequence[Segment], start: int, end: int) -> int:
-    """Total bp of ``segments[start:end+1]`` (inclusive segment indices)."""
-    return sum(length for _, length in segments[start : end + 1])
+def idf_weights(reads: Mapping[str, Sequence[Segment]], *, floor: float = 0.1) -> dict[str, float]:
+    """Per-feature weight ``max(floor, 1 - document_frequency)`` over the read set.
+
+    A feature present in (almost) every read carries little discriminative information and is
+    down-weighted toward ``floor``; a feature seen in few reads keeps weight ~1. This is the
+    Engine B answer to repeat-driven chaining: ubiquitous interspersed repeats (LINE/SINE/…)
+    stop driving overlaps, so edges must rest on distinctive structure. ``floor`` keeps even
+    ubiquitous features slightly informative (and avoids fully disconnecting the graph).
+    """
+    n = len(reads)
+    if n == 0:
+        return {}
+    document_frequency: Counter[str] = Counter()
+    for segments in reads.values():
+        for feature in {feat for feat, _ in segments}:
+            document_frequency[feature] += 1
+    return {feat: max(floor, 1.0 - count / n) for feat, count in document_frequency.items()}
+
+
+def _weight(weight: Mapping[str, float] | None, feature: str) -> float:
+    return weight.get(feature, 1.0) if weight is not None else 1.0
+
+
+def _weighted_sub_score(sub_score: SubScore, weight: Mapping[str, float] | None) -> SubScore:
+    """Scale a substitution scorer by the (less distinctive of the) two features' weights."""
+    if weight is None:
+        return sub_score
+
+    def scored(fa: str, fb: str) -> float:
+        return sub_score(fa, fb) * min(_weight(weight, fa), _weight(weight, fb))
+
+    return scored
+
+
+def _weighted_overlap(
+    columns: Sequence[tuple[int, int]],
+    a: Sequence[Segment],
+    b: Sequence[Segment],
+    weight: Mapping[str, float] | None,
+) -> float:
+    """Distinctive shared content: ``sum over aligned columns of min(weight) * min(len)``."""
+    total = 0.0
+    for i, j in columns:
+        fa, la = a[i]
+        fb, lb = b[j]
+        total += min(_weight(weight, fa), _weight(weight, fb)) * min(la, lb)
+    return total
 
 
 @dataclass(frozen=True)
@@ -44,8 +88,8 @@ class OverlapEdge:
     a: str
     b: str
     score: float
-    identity: float  # score / (match_score * overlap_bp), in (.., 1]
-    overlap_bp: int
+    identity: float  # score / (match_score * weighted_overlap), in (.., 1]
+    overlap_bp: float  # weighted overlap (distinctive shared bp; raw bp when unweighted)
     kind: str  # "dovetail" | "containment"
     flipped: bool  # B is in the opposite orientation to A
 
@@ -56,16 +100,21 @@ def build_overlap_graph(
     sub_score: SubScore,
     gap_factor: float,
     match_score: float = 1.0,
-    min_overlap_bp: int = 1,
+    min_overlap_bp: float = 1,
     min_identity: float = 0.8,
     min_jaccard: float = 0.0,
+    weight: Mapping[str, float] | None = None,
 ) -> list[OverlapEdge]:
     """Compute the proper-overlap edges among ``reads`` (``{read_id: segments}``).
 
     A pair becomes an edge iff its best-orientation alignment is a dovetail or containment,
-    spans at least ``min_overlap_bp``, and has normalized identity ≥ ``min_identity``. The
-    ``min_jaccard`` feature-set prefilter prunes obviously-disjoint pairs cheaply (0 = off).
+    has at least ``min_overlap_bp`` of (weighted) overlap, and normalized identity ≥
+    ``min_identity``. With ``weight`` (e.g. from :func:`idf_weights`), match rewards and the
+    overlap length are scaled per feature, so the overlap must rest on *distinctive* shared
+    content — the fix for repeat-driven chaining. The ``min_jaccard`` feature-set prefilter
+    prunes obviously-disjoint pairs cheaply (0 = off).
     """
+    scorer = _weighted_sub_score(sub_score, weight)
     ids = sorted(reads)
     edges: list[OverlapEdge] = []
     for ai in range(len(ids)):
@@ -76,15 +125,12 @@ def build_overlap_graph(
             b = reads[b_id]
             if min_jaccard > 0.0 and feature_jaccard(a, b) < min_jaccard:
                 continue
-            aln = align_best_orientation(a, b, sub_score=sub_score, gap_factor=gap_factor)
+            aln = align_best_orientation(a, b, sub_score=scorer, gap_factor=gap_factor)
             kind = classify_overlap(aln, len(a), len(b))
             if kind not in ("dovetail", "containment"):
                 continue
             b_used = reverse_segments(b) if aln.reversed_b else b
-            overlap_bp = min(
-                _span_bp(a, aln.a_start, aln.a_end),
-                _span_bp(b_used, aln.b_start, aln.b_end),
-            )
+            overlap_bp = _weighted_overlap(aln.columns, a, b_used, weight)
             if overlap_bp < min_overlap_bp:
                 continue
             identity = aln.score / (match_score * overlap_bp) if overlap_bp else 0.0
@@ -229,6 +275,7 @@ def cluster_consensus(
     *,
     sub_score: SubScore,
     gap_factor: float,
+    weight: Mapping[str, float] | None = None,
 ) -> ClusterConsensus:
     """Seed-anchored consensus: per seed position, the majority feature over members.
 
@@ -237,6 +284,7 @@ def cluster_consensus(
     consensus uses the seed's segment lengths as the backbone coordinate (v1). Members linked
     only transitively (not overlapping the seed) contribute no votes — a v1 limitation.
     """
+    scorer = _weighted_sub_score(sub_score, weight)
     seed_segments = reads[cluster.seed]
     votes: list[Counter[str]] = [Counter() for _ in seed_segments]
     for position, (feature, _length) in enumerate(seed_segments):
@@ -250,9 +298,7 @@ def cluster_consensus(
             if cluster.reversed_relative_to_seed[member]
             else list(reads[member])
         )
-        aln = align_local(
-            member_segments, seed_segments, sub_score=sub_score, gap_factor=gap_factor
-        )
+        aln = align_local(member_segments, seed_segments, sub_score=scorer, gap_factor=gap_factor)
         for member_idx, seed_idx in aln.columns:
             votes[seed_idx][member_segments[member_idx][0]] += 1
 
@@ -274,9 +320,10 @@ def assemble(
     sub_score: SubScore,
     gap_factor: float,
     match_score: float = 1.0,
-    min_overlap_bp: int = 1,
+    min_overlap_bp: float = 1,
     min_identity: float = 0.8,
     min_jaccard: float = 0.0,
+    weight: Mapping[str, float] | None = None,
 ) -> tuple[list[Cluster], list[OverlapEdge]]:
     """Build the overlap graph and cluster — returns ``(clusters, edges)``."""
     edges = build_overlap_graph(
@@ -287,5 +334,6 @@ def assemble(
         min_overlap_bp=min_overlap_bp,
         min_identity=min_identity,
         min_jaccard=min_jaccard,
+        weight=weight,
     )
     return cluster_reads(reads, edges), edges

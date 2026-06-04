@@ -130,6 +130,14 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   flag). Substitution scorer + all overlap thresholds are options; `--min-length` keeps the
   long-read-only default. Rendering of the layouts is left to the plotting tier. This
   completes Engine B (aligner -> overlap graph -> clusters -> consensus -> CLI).
+- Engine B **feature weighting** (anti-chaining) — `core/feature_assembly` per-feature
+  `weight` scales both the match reward and the overlap-length criterion so overlaps must
+  rest on distinctive structure; `idf_weights` (frequency) and
+  `FeatureHierarchy.interspersed_repeat_features` (the `Interspersed_Repeat` subtree). The
+  `cluster --weight-method` defaults to `repeat-mask` (zero interspersed repeats + `nonrepeat`).
+  Validated on real v2 data: repeat-mask cuts a 223/250-read mega-cluster to 127 (singletons
+  11 -> 112); the residual is a structurally-coherent telomeric group whose sub-division is
+  left to community detection (open). See `docs/audit/rearrangement_detection.md` §10.
 
 ### Notes
 

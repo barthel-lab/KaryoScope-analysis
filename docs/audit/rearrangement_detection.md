@@ -261,3 +261,22 @@ replace connected components with **community detection** (modularity) to resist
 Runtime was ~50–60 s for 250 reads in pure Python — fine for a subset, but the Jaccard
 prefilter pruned little (long reads share many features), so larger subsets will want the
 repeat down-weighting (also fewer edges) or minimizer-style seeding.
+
+**v2 fix implemented — feature weighting (`--weight-method`).** Per-feature weights scale
+both the match reward and the overlap-length criterion, so an overlap must rest on
+*distinctive* shared content. Two builders: `repeat-mask` (default) zeroes the hierarchy's
+`Interspersed_Repeat` subtree (LINE/SINE/LTR/DNA/…) plus `nonrepeat`; `idf` down-weights by
+read frequency. Findings on the U2OS subset:
+
+- **`idf` (gentle, linear `1 − df/N` + 0.1 floor) did *not* work** — long reads are so
+  repeat-dominated that even floored repeat content × huge overlap length clears the
+  threshold (largest cluster 223 → **244**, *worse*). Frequency also can't separate the
+  drivers cleanly here: `SINE` (0.60) and `canonical_telomere` (0.54) have nearly equal
+  prevalence, so any frequency cutoff that removes SINE also removes telomere.
+- **`repeat-mask` works for the repeat-chaining** — masking by *biology* (the interspersed-
+  repeat class) cleanly keeps telomere (not in the `repeat` featureset) while zeroing
+  LINE/SINE/LTR/DNA/nonrepeat: largest cluster 223 → **127**, singletons 11 → **112**.
+- The **residual 127-read cluster is structurally coherent**, not repeat chaining: it is
+  held together by near-universal *structural* features in this telomeric read set
+  (`canonical_telomere`/`TAR1`). Subdividing it into haplotypes is the **community-detection**
+  job — the remaining v2 lever (modularity on the within-cluster overlap graph), still open.
