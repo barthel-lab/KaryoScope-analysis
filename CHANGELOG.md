@@ -61,6 +61,14 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   + an adaptive-threshold sidecar (F5). Constants are CLI options (F4); alignment-QC
   columns intentionally omitted (they move to `cluster-diagnostics`, F6). Second
   fully-migrated tool; completes the data-foundation tier.
+- End-to-end tests for `overlay-annotations` and `build-feature-matrix` on real
+  `KS_human_CHM13_v2` HeLa data: fast default tests run on tiny committed fixtures
+  (`tests/data/v2_subset/`, carved from the full BEDs by a documented, deterministic
+  `make_subset.py`), and `@pytest.mark.integration` tests run the same pipelines on
+  the full `data/raw_bed/` BEDs (skipped when that large data is absent). They assert
+  the real contracts: C4-valid output, `seq_id` conservation, the F2 column schema,
+  coverage self-consistency (`bp`/`frac` sum to `total_bp`/1), and telomere
+  interspersion over an overlay composite.
 
 ### Notes
 
