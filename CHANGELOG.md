@@ -32,7 +32,9 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
 - `core/io/bed.py`: annotation-BED reader/writer enforcing the **C4 invariant**
   (rows grouped by `seq_id`; each sequence's intervals form a gapless,
   non-overlapping partition) — malformed input and gaps/overlaps are errors (C2);
-  `.gz` (gzip/bgzip) read transparently.
+  `.gz` (gzip/bgzip) read transparently. Provides both an eager
+  `read_annotation_bed` and a streaming `iter_annotation_rows` (one row at a time,
+  same C4 validation) for single-pass overlays.
 - `core/annotation_resolution.py`: the `overlay-annotations` resolution engine —
   a `precedence` (default winner) + an ordered list of class-based `rules` (M2),
   with `emit` forms passthrough / `{literal}` / `composite`. Specs are validated
@@ -45,11 +47,18 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   `telomere_like`, `arm_multigroup1`→`arm`, `array_multigroup1`→`array`,
   `acrocentric_multigroup1`→`acrocentric`, `noncentromeric`→`rDNA`). Loaded via
   `load_builtin_preset`; validated against the hierarchy.
-- **`overlay-annotations` subcommand** (replaces `KaryoScope_merge_beds.py`): reads one
-  C4-validated annotation BED per featureset, refines the tracks per `seq_id`, resolves
-  each segment via a preset / custom spec / the default basic overlay, and writes one
-  resolved annotation BED. Validates input features against the hierarchy (C2). First
-  fully-migrated tool, wired into the `karyoscope-analysis` CLI.
+- **`overlay-annotations` subcommand** (replaces `KaryoScope_merge_beds.py`): a
+  **single-pass, streaming k-way overlay**. It reads every per-featureset BED
+  concurrently and sweeps a line across the union of track boundaries per `seq_id`,
+  resolving each segment via a preset / custom spec / the default basic overlay and
+  coalescing — holding only the *current* interval of each track, so it runs in
+  `O(featuresets)` memory regardless of input size (peak ~2 MB vs ~420 MB for the
+  in-memory approach on a full sample, byte-identical output). Tracks must present
+  sequences in the same order (lockstep, validated — no fragile name comparison);
+  order/coverage/span disagreements are errors. Validates input features against the
+  hierarchy as they are first seen (C2), and writes output atomically (temp file +
+  replace, so a mid-stream error leaves no partial file). First fully-migrated tool,
+  wired into the `karyoscope-analysis` CLI.
 - `core/seq_features.py`: pure per-`seq_id` feature metrics for `build-feature-matrix`
   — coverage (`bp`/`frac`/`total_bp`), 1-bp-step sliding-window density
   (`dmax`/…/`dterminal`), `max_block_bp` (gap-bridged), hierarchy-derived

@@ -8,6 +8,10 @@ legacy ``KaryoScope_merge_beds.py``.
 
 from __future__ import annotations
 
+import gzip
+import os
+import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import click
@@ -21,7 +25,7 @@ from karyoscope_analysis.core.annotation_resolution import (
     load_spec_file,
 )
 from karyoscope_analysis.core.feature_vocab import FeatureHierarchy
-from karyoscope_analysis.core.io.bed import read_annotation_bed, write_annotation_bed
+from karyoscope_analysis.core.io.bed import BedRow, iter_annotation_rows
 
 
 def _parse_beds(bed_specs: tuple[str, ...]) -> dict[str, Path]:
@@ -35,6 +39,30 @@ def _parse_beds(bed_specs: tuple[str, ...]) -> dict[str, Path]:
             raise click.BadParameter(f"--bed featureset {feature_set!r} given more than once")
         beds[feature_set] = Path(path)
     return beds
+
+
+def _write_streaming(output: Path, rows: Iterator[BedRow]) -> int:
+    """Stream ``rows`` to ``output``, writing atomically (temp file + replace).
+
+    Keeps memory flat (one row at a time) while guaranteeing the output file appears
+    only if the whole overlay succeeds — a mid-stream error leaves no partial file.
+    """
+    out_dir = str(output.parent) or "."
+    fd, tmp_name = tempfile.mkstemp(dir=out_dir, prefix=f"{output.name}.", suffix=".tmp")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    opener = gzip.open if output.suffix == ".gz" else open
+    count = 0
+    try:
+        with opener(tmp, "wt", newline="") as fh:
+            for seq_id, start, end, feature in rows:
+                fh.write(f"{seq_id}\t{start}\t{end}\t{feature}\n")
+                count += 1
+        tmp.replace(output)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return count
 
 
 @click.command(
@@ -114,11 +142,11 @@ def cmd(
     except SpecError as exc:
         raise click.ClickException(str(exc)) from exc
 
+    # Stream every input BED concurrently — only the current interval of each is held.
+    streams = {fs: iter_annotation_rows(path) for fs, path in bed_paths.items()}
     try:
-        beds = {fs: read_annotation_bed(path) for fs, path in bed_paths.items()}
-        rows = list(core.overlay_annotations(beds, spec, hierarchy))
+        count = _write_streaming(output, core.overlay_streams(streams, spec, hierarchy))
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    write_annotation_bed(output, rows)
-    click.echo(f"Wrote {len(rows)} resolved intervals to {output}")
+    click.echo(f"Wrote {count} resolved intervals to {output}")

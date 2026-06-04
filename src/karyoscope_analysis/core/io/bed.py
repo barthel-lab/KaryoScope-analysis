@@ -79,8 +79,59 @@ def iter_bed_rows(path: str | Path) -> Iterator[BedRow]:
             yield seq_id, start, end, feature
 
 
+def iter_annotation_rows(path: str | Path, *, validate: bool = True) -> Iterator[BedRow]:
+    """Stream ``(seq_id, start, end, feature)`` rows, enforcing the C4 invariant on the fly.
+
+    The streaming counterpart of :func:`read_annotation_bed`: it never holds more than
+    one row in memory, so several BEDs can be overlaid in a single pass without loading
+    any of them (see :func:`karyoscope_analysis.core.overlay_annotations.overlay_streams`).
+
+    Args:
+        path: BED path (``.gz`` handled transparently).
+        validate: enforce C4 (contiguous ``seq_id`` grouping + a gapless,
+            non-overlapping partition per sequence).
+
+    Raises:
+        ValueError: on a malformed row (see :func:`iter_bed_rows`) or, when
+            ``validate`` is set, a C4 violation (non-contiguous ``seq_id``, a gap,
+            or an overlap).
+    """
+    path = Path(path)
+    seen: set[str] = set()
+    prev_seq: str | None = None
+    prev_end: int | None = None
+
+    for seq_id, start, end, feature in iter_bed_rows(path):
+        if seq_id != prev_seq:
+            if validate and seq_id in seen:
+                raise ValueError(
+                    f"{path}: rows for seq_id {seq_id!r} are not contiguous; the file "
+                    f"must be grouped/sorted by seq_id (C4 invariant)"
+                )
+            seen.add(seq_id)
+            prev_seq = seq_id
+            prev_end = None
+        elif validate and prev_end is not None:
+            if start < prev_end:
+                raise ValueError(
+                    f"{path}: overlap in seq_id {seq_id!r}: interval starts at {start} "
+                    f"but previous ended at {prev_end} (C4 requires a partition)"
+                )
+            if start > prev_end:
+                raise ValueError(
+                    f"{path}: gap in seq_id {seq_id!r}: interval starts at {start} but "
+                    f"previous ended at {prev_end} (C4 requires a gapless tiling)"
+                )
+        yield seq_id, start, end, feature
+        prev_end = end
+
+
 def read_annotation_bed(path: str | Path, *, validate: bool = True) -> dict[str, list[Interval]]:
     """Read a 4-column annotation BED grouped by ``seq_id``, preserving file order.
+
+    Eagerly materializes the whole file as ``{seq_id: [(start, end, feature), ...]}``.
+    For overlaying several BEDs without loading them, prefer the streaming
+    :func:`iter_annotation_rows`.
 
     Args:
         path: BED path (``.gz`` handled transparently).
@@ -96,37 +147,9 @@ def read_annotation_bed(path: str | Path, *, validate: bool = True) -> dict[str,
             ``validate`` is set, a C4 violation (non-contiguous ``seq_id``, a gap,
             or an overlap).
     """
-    path = Path(path)
     groups: dict[str, list[Interval]] = {}
-    seen: set[str] = set()
-    prev_seq: str | None = None
-    prev_end: int | None = None
-
-    for seq_id, start, end, feature in iter_bed_rows(path):
-        if seq_id != prev_seq:
-            if validate and seq_id in seen:
-                raise ValueError(
-                    f"{path}: rows for seq_id {seq_id!r} are not contiguous; the file "
-                    f"must be grouped/sorted by seq_id (C4 invariant)"
-                )
-            seen.add(seq_id)
-            prev_seq = seq_id
-            prev_end = None
-            groups.setdefault(seq_id, [])
-        elif validate and prev_end is not None:
-            if start < prev_end:
-                raise ValueError(
-                    f"{path}: overlap in seq_id {seq_id!r}: interval starts at {start} "
-                    f"but previous ended at {prev_end} (C4 requires a partition)"
-                )
-            if start > prev_end:
-                raise ValueError(
-                    f"{path}: gap in seq_id {seq_id!r}: interval starts at {start} but "
-                    f"previous ended at {prev_end} (C4 requires a gapless tiling)"
-                )
-        groups[seq_id].append((start, end, feature))
-        prev_end = end
-
+    for seq_id, start, end, feature in iter_annotation_rows(path, validate=validate):
+        groups.setdefault(seq_id, []).append((start, end, feature))
     return groups
 
 
