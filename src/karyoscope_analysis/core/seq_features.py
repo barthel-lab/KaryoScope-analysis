@@ -89,6 +89,125 @@ def max_block_bp(coverage: np.ndarray, gap_tol: int = DEFAULT_BLOCK_GAP_TOL) -> 
     return max(end - start for start, end in zip(merged_starts, merged_ends, strict=True))
 
 
+def max_block_bp_segments(
+    segments: Sequence[tuple[int, int]], gap_tol: int = DEFAULT_BLOCK_GAP_TOL
+) -> int:
+    """Longest covered block over disjoint ``[start, end)`` segments, bridging gaps ``<= gap_tol``.
+
+    The interval-native equivalent of :func:`max_block_bp` — same result, but ``O(n
+    segments)`` instead of ``O(span)`` (no dense coverage array). Used by
+    :func:`window_densities` so a feature's contiguity cost scales with its intervals,
+    not the sequence length.
+    """
+    if not segments:
+        return 0
+    ordered = sorted(segments)
+    best = 0
+    run_start, run_end = ordered[0]
+    for start, end in ordered[1:]:
+        if start - run_end <= gap_tol:
+            run_end = max(run_end, end)
+        else:
+            best = max(best, run_end - run_start)
+            run_start, run_end = start, end
+    return max(best, run_end - run_start)
+
+
+def _window_sum_stats(
+    segs: Sequence[tuple[int, int]], span: int, window_size: int
+) -> tuple[int, int, float, int, int]:
+    """Exact ``(max, min, median, first, last)`` of the 1-bp-step window coverage counts.
+
+    ``segs`` are a feature's sorted, disjoint ``[start, end)`` intervals in ``[0, span)``;
+    ``window_size <= span``. Let ``S(i)`` be the feature bp in window ``[i, i+window_size)``
+    for ``i`` in ``[0, span-window_size]``. This returns the max/min/median of ``S`` plus
+    ``S(0)`` and ``S(span-window_size)`` — **byte-identical** to ``np.max/min/median`` over
+    the dense window-sum array — in ``O(len(segs) + window_size)`` instead of ``O(span)``.
+
+    ``S`` is piecewise-linear (slope in ``{-1, 0, +1}``) with breakpoints only where a
+    window edge crosses an interval boundary, so it is summarized run by run: max/min from
+    run endpoints, and the value histogram (bounded by ``window_size``) via a difference
+    array, from which the order-statistic median is read off.
+    """
+    w = window_size
+    imax = span - w
+    n = imax + 1  # number of windows
+
+    # S(0): feature coverage in [0, w).
+    s0 = 0
+    for st, en in segs:
+        if st >= w:
+            break  # sorted -> no later interval overlaps [0, w)
+        s0 += min(en, w) - max(st, 0)
+
+    # S's slope (in {-1, 0, +1}) changes only where a window edge crosses an interval
+    # boundary. Record each change as a delta at that i, then sweep — so the slope is
+    # tracked incrementally (no per-run coverage probe). dS(i) = cov(i+w) - cov(i):
+    # cov(i) toggles at i in {s (-1), e (+1)}; cov(i+w) at i in {s-w (+1), e-w (-1)}.
+    deltas: dict[int, int] = defaultdict(int)
+    for st, en in segs:
+        deltas[st] -= 1
+        deltas[en] += 1
+        deltas[st - w] += 1
+        deltas[en - w] -= 1
+    positions = sorted(p for p in deltas if 0 < p <= imax)
+    slope = sum(d for p, d in deltas.items() if p <= 0)  # slope on the run starting at i=0
+    boundaries = [0, *positions, imax + 1]
+
+    # Sparse value histogram as a difference map keyed by window-sum value (O(runs), not
+    # O(window)): each run contributes a point mass (slope 0) or a unit-height value range.
+    diff: dict[int, int] = defaultdict(int)
+    cur = s0
+    s_max = s_min = s_last = s0
+    for k in range(len(boundaries) - 1):
+        a, b = boundaries[k], boundaries[k + 1]
+        count = b - a
+        first_val = cur
+        if slope == 0:
+            if first_val > s_max:
+                s_max = first_val
+            elif first_val < s_min:
+                s_min = first_val
+            diff[first_val] += count
+            diff[first_val + 1] -= count
+            last_val = first_val
+        else:
+            last_val = cur + slope * (count - 1)
+            hi, lo = (first_val, last_val) if slope < 0 else (last_val, first_val)
+            if hi > s_max:
+                s_max = hi
+            if lo < s_min:
+                s_min = lo
+            diff[lo] += 1
+            diff[hi + 1] -= 1
+        s_last = last_val  # the final run ends at i = imax
+        cur += slope * count
+        if b <= imax:  # advance the slope by the event at the next boundary
+            slope += deltas[b]
+
+    # Median = mean of the two central order statistics (matches numpy for even n).
+    # Walk the sparse histogram as run-length segments of constant count.
+    lo_k, hi_k = (n - 1) // 2, n // 2
+    keys = sorted(diff)
+    v_lo = v_hi = 0
+    lo_done = False
+    level = cum = 0
+    for j, key in enumerate(keys):
+        level += diff[key]
+        if level <= 0:
+            continue
+        width = keys[j + 1] - key  # next key always exists while level > 0
+        seg_windows = level * width
+        if not lo_done and lo_k < cum + seg_windows:
+            v_lo = key + (lo_k - cum) // level
+            lo_done = True
+        if hi_k < cum + seg_windows:
+            v_hi = key + (hi_k - cum) // level
+            break
+        cum += seg_windows
+    return s_max, s_min, (v_lo + v_hi) / 2, s0, s_last
+
+
 def window_densities(
     intervals: Sequence[Interval],
     *,
@@ -99,7 +218,8 @@ def window_densities(
 
     A window's density is the fraction of its bp covered by the feature; the window
     steps by 1 bp (fully overlapping). Sequences shorter than ``window_size`` get their
-    whole-sequence coverage fraction broadcast to every density field.
+    whole-sequence coverage fraction broadcast to every density field. Computed straight
+    from the intervals (``O(intervals + window_size)`` per feature) — no dense array.
     """
     if not intervals:
         return {}
@@ -109,34 +229,31 @@ def window_densities(
     if span <= 0:
         return {}
 
-    by_feature: dict[str, list[Interval]] = defaultdict(list)
+    by_feature: dict[str, list[tuple[int, int]]] = defaultdict(list)
     for start, end, feature in intervals:
-        by_feature[feature].append((start, end, feature))
+        by_feature[feature].append((start - seq_start, end - seq_start))  # local coords
 
     result: dict[str, DensityStats] = {}
-    for feature, ivals in by_feature.items():
-        coverage = np.zeros(span, dtype=np.int64)
-        for start, end, _ in ivals:
-            coverage[start - seq_start : end - seq_start] = 1
-        block = max_block_bp(coverage, gap_tol)
+    for feature, segs in by_feature.items():
+        segs.sort()
+        block = max_block_bp_segments(segs, gap_tol)
 
         if span < window_size:
-            frac = float(coverage.sum()) / span
+            frac = sum(end - start for start, end in segs) / span
             result[feature] = DensityStats(frac, frac, frac, frac, frac, frac, frac, block)
             continue
 
-        cumsum = np.concatenate([[0], np.cumsum(coverage)])
-        window_sums = cumsum[window_size:] - cumsum[:-window_size]
-        first = float(coverage[:window_size].sum()) / window_size
-        last = float(coverage[-window_size:].sum()) / window_size
+        s_max, s_min, s_med, s_first, s_last = _window_sum_stats(segs, span, window_size)
+        dfirst = s_first / window_size
+        dlast = s_last / window_size
         result[feature] = DensityStats(
-            dmax=float(window_sums.max()) / window_size,
-            dmin=float(window_sums.min()) / window_size,
-            dmedian=float(np.median(window_sums)) / window_size,
-            dfirst=first,
-            dlast=last,
-            dterminal=max(first, last),
-            dterminal_min=min(first, last),
+            dmax=s_max / window_size,
+            dmin=s_min / window_size,
+            dmedian=s_med / window_size,
+            dfirst=dfirst,
+            dlast=dlast,
+            dterminal=max(dfirst, dlast),
+            dterminal_min=min(dfirst, dlast),
             max_block_bp=block,
         )
     return result

@@ -22,7 +22,7 @@ reader stays purely structural.
 from __future__ import annotations
 
 import gzip
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -151,6 +151,55 @@ def read_annotation_bed(path: str | Path, *, validate: bool = True) -> dict[str,
     for seq_id, start, end, feature in iter_annotation_rows(path, validate=validate):
         groups.setdefault(seq_id, []).append((start, end, feature))
     return groups
+
+
+def iter_aligned_groups(
+    named_streams: Mapping[str, Iterator[BedRow]],
+) -> Iterator[tuple[str, dict[str, list[Interval]]]]:
+    """Walk several annotation-row streams in lockstep, yielding one sequence at a time.
+
+    For each ``seq_id`` (in the streams' shared order) yields ``(seq_id, {name:
+    [(start, end, feature), ...]})`` holding only that one sequence's intervals from each
+    stream — so consumers that need a whole sequence at once (e.g. ``build-feature-matrix``
+    density metrics) still run in ``O(one sequence)`` memory rather than loading every file.
+
+    All streams must present the same sequences in the same order (cf. ``overlay_streams``;
+    no lexicographic assumption). A disagreement — a stream ahead/behind on ``seq_id``, or
+    one ending before the others — is a ``ValueError``.
+    """
+    names = list(named_streams)
+    iters = {n: iter(s) for n, s in named_streams.items()}
+    current: dict[str, BedRow | None] = {n: next(iters[n], None) for n in names}
+
+    while True:
+        if all(current[n] is None for n in names):
+            return
+        seq_id: str | None = None
+        for n in names:
+            row = current[n]
+            if row is None:
+                raise ValueError(
+                    f"featureset {n!r} ran out of sequences before the others; all "
+                    f"featuresets must cover the same seq_ids in the same order"
+                )
+            if seq_id is None:
+                seq_id = row[0]
+            elif row[0] != seq_id:
+                raise ValueError(
+                    f"featureset {n!r} is at seq_id {row[0]!r} but expected {seq_id!r}; "
+                    f"featuresets must list seq_ids in the same order"
+                )
+
+        groups: dict[str, list[Interval]] = {}
+        for n in names:
+            ivals: list[Interval] = []
+            row = current[n]
+            while row is not None and row[0] == seq_id:
+                ivals.append((row[1], row[2], row[3]))
+                row = next(iters[n], None)
+            current[n] = row
+            groups[n] = ivals
+        yield seq_id, groups
 
 
 def write_annotation_bed(path: str | Path, rows: Iterable[BedRow]) -> None:

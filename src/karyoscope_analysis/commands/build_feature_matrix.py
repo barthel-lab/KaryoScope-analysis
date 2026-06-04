@@ -10,14 +10,13 @@ columns move to ``cluster-diagnostics``; decision F6).
 from __future__ import annotations
 
 import gzip
-from collections.abc import Mapping
 from pathlib import Path
 
 import click
 
 from karyoscope_analysis.core import build_feature_matrix as core
 from karyoscope_analysis.core.feature_vocab import FeatureHierarchy
-from karyoscope_analysis.core.io.bed import read_annotation_bed
+from karyoscope_analysis.core.io.bed import iter_annotation_rows
 
 
 def _parse_beds(bed_specs: tuple[str, ...]) -> dict[str, Path]:
@@ -130,11 +129,13 @@ def cmd(
     """Build the wide per-sequence feature matrix."""
     bed_paths = _parse_beds(bed_specs)
     hierarchy = FeatureHierarchy.from_tsv(hierarchy_path)
-    beds: Mapping[str, dict] = {fs: read_annotation_bed(p) for fs, p in bed_paths.items()}
+    # Stream every input BED concurrently (lockstep by seq_id) — only one sequence's
+    # intervals per featureset is held at a time, never the whole files.
+    streams = {fs: iter_annotation_rows(p) for fs, p in bed_paths.items()}
 
     try:
-        matrix = core.build_feature_matrix(
-            beds,
+        matrix = core.build_feature_matrix_streaming(
+            streams,
             hierarchy,
             window_size=window_size,
             gap_tol=block_gap_tol,

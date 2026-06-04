@@ -64,12 +64,20 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   (`dmax`/…/`dterminal`), `max_block_bp` (gap-bridged), hierarchy-derived
   interspersion, and the adaptive-threshold computation. Every magic constant
   (window size, block-gap tolerance, threshold factor/bounds) is a parameter (F4).
+  The sliding-window density is computed **analytically from the intervals**
+  (`O(intervals + window)`, no dense per-feature coverage array, cumsum, or
+  full-array median) — byte-identical to the old dense computation, verified by a
+  property test over thousands of random partitions.
 - **`build-feature-matrix` subcommand** (replaces the matrix-building part of
-  `KaryoScope_sequence_annotate.py`): reads one annotation BED per featureset and
-  emits the wide per-`seq_id` matrix (`{featureset}__{metric}__{feature}` schema, F2)
-  + an adaptive-threshold sidecar (F5). Constants are CLI options (F4); alignment-QC
-  columns intentionally omitted (they move to `cluster-diagnostics`, F6). Second
-  fully-migrated tool; completes the data-foundation tier.
+  `KaryoScope_sequence_annotate.py`): a **single-pass, streaming** build — every
+  featureset BED is read concurrently in lockstep by `seq_id` (via
+  `core/io/bed.iter_aligned_groups`), so only one sequence's intervals are held at a
+  time. Emits the wide per-`seq_id` matrix (`{featureset}__{metric}__{feature}`
+  schema, F2) + an adaptive-threshold sidecar (F5). Constants are CLI options (F4);
+  alignment-QC columns intentionally omitted (they move to `cluster-diagnostics`, F6).
+  On a full sample: peak memory ~1244 MB → ~218 MB (5.7×) and read+compute ~58s → ~21s
+  (2.8×), output byte-identical. Second fully-migrated tool; completes the
+  data-foundation tier.
 - End-to-end tests for `overlay-annotations` and `build-feature-matrix` on real
   `KS_human_CHM13_v2` HeLa data: fast default tests run on tiny committed fixtures
   (`tests/data/v2_subset/`, carved from the full BEDs by a documented, deterministic
