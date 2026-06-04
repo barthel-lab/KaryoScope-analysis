@@ -189,7 +189,7 @@ Each read is an ordered `(feature, length)` sequence (the coalesced overlay). A
 The alignment returns its score, the aligned segment-index columns, and the aligned spans,
 which classify the overlap as **dovetail**, **containment**, or **internal**.
 
-### Layout — the overlap graph (`core/feature_assembly.py`, next)
+### Layout — the overlap graph (`core/feature_assembly.py`)
 
 * **Edges = *proper* overlaps only** (dovetail or containment that clear a minimum overlap
   length and a minimum normalized concordance). Internal-only matches are rejected — they are
@@ -232,3 +232,32 @@ suffices at subset scale, with minimizer-style seeding as the escape hatch.
 - distance-shift test (compare A–B *distance distributions* exp vs control) — optional refinement.
 - self-pairs (`A` close to another `A`, for tandem amplification) — possible extension.
 - inversions — treated as rare; revisit if data demands.
+
+## 10. Validation on v2 data (findings)
+
+Both engines were run on the committed `KS_human_CHM13_v2` overlays (priority preset,
+`region`/`repeat`/`subtelomeric`).
+
+**Engine A** — `detect-rearrangements` U2OS (ALT) vs IMR90 (primary), length-stratified at
+50 kb, ran on the full overlays in ~6 s. Output is well-formed (CMH + BH-FDR); the top
+signal is satellite↔telomere / satellite↔repeat colocalization differences (plausible for
+ALT). Two caveats confirmed in practice: (a) with no `--reference` the artifact floor is 0,
+so `reference_abnormal` is trivially true everywhere and the floor gate is inactive — a real
+normal baseline (annotated CHM13 reads) is needed before calls are trustworthy; (b) at this
+read count q-values are astronomically small for almost everything, so the **effect-size and
+floor gates**, not the p-value, are what actually discriminate. (Dedup warning fired, as
+designed.)
+
+**Engine B** — `cluster` on a 250 long-read U2OS subset ran end-to-end (aligner → graph →
+clusters → consensus; orientation conflicts flagged; singletons kept) but **over-merged**:
+223/250 reads in one cluster, whose consensus is dominated by interspersed repeats
+(LINE/SINE/LTR) at high support. The cause is the chaining the design anticipated — long
+reads share *ubiquitous* interspersed-repeat content, so they form genuine proper overlaps
+through generic repeats. Tightening the edge criteria helps but doesn't resolve it
+(overlap ≥ 30 kb, identity ≥ 0.9 → largest cluster 223 → 91; 110 clusters, 20 multi-read).
+**v2 fix (needed before Engine B is usable on real data):** down-weight / mask ubiquitous
+repeat-class features in the aligner so overlaps must rest on *distinctive* structure, and/or
+replace connected components with **community detection** (modularity) to resist chaining.
+Runtime was ~50–60 s for 250 reads in pure Python — fine for a subset, but the Jaccard
+prefilter pruned little (long reads share many features), so larger subsets will want the
+repeat down-weighting (also fewer edges) or minimizer-style seeding.
