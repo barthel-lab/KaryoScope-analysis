@@ -121,6 +121,44 @@ def test_composite_all_is_basic_overlay(h):
     assert spec.resolve({"region": "bSat", "repeat": "LINE"}) == "bSat:LINE"
 
 
+def test_explicit_composite_emit(h):
+    # {composite: [chromosome, region]} joins those featuresets in the listed order.
+    spec = load_spec(
+        {
+            "name": "explicit",
+            "precedence": ["chromosome", "region", "subtelomeric"],
+            "rules": [
+                {
+                    "when": {"subtelomeric": ["canonical_telomere"]},
+                    "emit": {"composite": ["chromosome", "subtelomeric"], "sep": ":"},
+                },
+                {"emit": {"composite": ["chromosome", "region"], "sep": ":"}},  # catch-all
+            ],
+        },
+        h,
+    )
+    assert (
+        spec.resolve({"chromosome": "chr13", "region": "aSat", "subtelomeric": "nonsubtelomeric"})
+        == "chr13:aSat"
+    )
+    assert (
+        spec.resolve({"chromosome": "chr13", "region": "arm", "subtelomeric": "canonical_telomere"})
+        == "chr13:canonical_telomere"
+    )
+
+
+def test_explicit_composite_rejects_unknown_featureset(h):
+    with pytest.raises(SpecError, match="not in precedence"):
+        load_spec(
+            {
+                "name": "bad",
+                "precedence": ["region", "subtelomeric"],
+                "rules": [{"emit": {"composite": ["region", "chromosome"]}}],
+            },
+            h,
+        )
+
+
 # --- validation -----------------------------------------------------------------
 def test_rejects_unknown_featureset(h):
     with pytest.raises(SpecError, match="unknown feature set"):

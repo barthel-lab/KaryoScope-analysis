@@ -20,6 +20,9 @@ feature tuple, a spec is compact:
   (default separator ``_``), e.g. ``DJ_TAR1``.
 * ``{composite: all, sep: ":"}`` — join *all* precedence featuresets (the basic
   overlay/“composite” mode, e.g. ``region:repeat``).
+* ``{composite: [chromosome, subtelomeric], sep: ":"}`` — join an *explicit* list of
+  featuresets, in the given order (e.g. ``chr13:canonical_telomere``); lets a rule tag a
+  resolved structural feature with another layer such as chromosome.
 
 Specs are validated structurally (jsonschema) and semantically against the database
 :class:`~karyoscope_analysis.core.feature_vocab.FeatureHierarchy` (every featureset,
@@ -41,7 +44,7 @@ from karyoscope_analysis.core.feature_vocab import FeatureHierarchy
 
 #: Reserved ``emit`` word; no featureset may be named this.
 COMPOSITE = "composite"
-_DEFAULT_SEP = {"when": "_", "all": ":"}
+_DEFAULT_SEP = {"when": "_", "all": ":", "explicit": ":"}
 
 #: jsonschema for the *structure* of a spec (semantics are checked in the loader).
 SPEC_SCHEMA: dict[str, Any] = {
@@ -76,7 +79,16 @@ SPEC_SCHEMA: dict[str, Any] = {
                                 "additionalProperties": False,
                                 "properties": {
                                     "literal": {"type": "string"},
-                                    "composite": {"enum": ["when", "all"]},
+                                    "composite": {
+                                        "oneOf": [
+                                            {"enum": ["when", "all"]},
+                                            {
+                                                "type": "array",
+                                                "items": {"type": "string"},
+                                                "minItems": 1,
+                                            },
+                                        ]
+                                    },
                                     "sep": {"type": "string"},
                                 },
                             },
@@ -99,8 +111,9 @@ class Emit:
 
     kind: Literal["featureset", "literal", "composite"]
     value: str | None = None  # featureset name (featureset) or literal value (literal)
-    of: Literal["when", "all"] = "when"  # composite scope
+    of: Literal["when", "all", "explicit"] = "when"  # composite scope
     sep: str = "_"
+    featuresets: tuple[str, ...] = ()  # explicit composite: the featuresets to join, in order
 
 
 @dataclass(frozen=True)
@@ -137,11 +150,12 @@ class ResolutionSpec:
         if emit.kind == "literal":
             assert emit.value is not None
             return emit.value
-        featuresets = (
-            self.precedence
-            if emit.of == "all"
-            else tuple(fs for fs in self.precedence if fs in rule.when)
-        )
+        if emit.of == "explicit":
+            featuresets = emit.featuresets
+        elif emit.of == "all":
+            featuresets = self.precedence
+        else:  # "when"
+            featuresets = tuple(fs for fs in self.precedence if fs in rule.when)
         return emit.sep.join(segment[fs] for fs in featuresets)
 
 
@@ -187,8 +201,21 @@ def _parse_emit(raw: Any, precedence: tuple[str, ...], ctx: str) -> Emit:
         return Emit("featureset", value=raw)
     if "literal" in raw:
         return Emit("literal", value=str(raw["literal"]))
-    of = raw["composite"]
-    return Emit("composite", of=of, sep=raw.get("sep", _DEFAULT_SEP[of]))
+    composite = raw["composite"]
+    if isinstance(composite, list):
+        featuresets = tuple(composite)
+        for fs in featuresets:
+            if fs not in precedence:
+                raise SpecError(
+                    f"{ctx}: composite featureset {fs!r} is not in precedence {list(precedence)}"
+                )
+        return Emit(
+            "composite",
+            of="explicit",
+            featuresets=featuresets,
+            sep=raw.get("sep", _DEFAULT_SEP["explicit"]),
+        )
+    return Emit("composite", of=composite, sep=raw.get("sep", _DEFAULT_SEP[composite]))
 
 
 def load_spec(data: Mapping[str, Any], hierarchy: FeatureHierarchy) -> ResolutionSpec:

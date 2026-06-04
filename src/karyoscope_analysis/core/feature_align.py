@@ -195,6 +195,41 @@ def hierarchy_substitution(
     return score
 
 
+def chromosome_aware_substitution(
+    structural: SubScore, *, cross_chromosome_penalty: float = -2.0
+) -> SubScore:
+    """Wrap a structural scorer to handle ``chromosome:structural`` composite labels.
+
+    Each label is split on the first ``:`` into ``(chromosome, structural)``. The structural
+    layer is scored by ``structural`` (e.g. :func:`hierarchy_substitution`). When both labels
+    carry a chromosome layer, ``cross_chromosome_penalty`` (per bp, negative) is added **unless
+    they are the same *specific* chromosome** (a label starting with ``chr``). So positions
+    only reinforce an overlap when they agree on a specific chromosome; different chromosomes
+    *and* ambiguous labels (``autosome``/``categorized``/...) are penalized, which stops reads
+    chaining through unresolved chromosome assignments. The penalty is **soft** (finite): a few
+    ambiguous positions don't break an otherwise-strong same-chromosome overlap, and a
+    translocation read still aligns to each chromosome over its matching half (bridging the two
+    clusters). Labels with no chromosome layer are neutral, so this degrades to ``structural``
+    for non-composite labels.
+    """
+
+    def split(label: str) -> tuple[str | None, str]:
+        chrom, sep, struct = label.partition(":")
+        return (chrom, struct) if sep else (None, label)
+
+    def score(fa: str, fb: str) -> float:
+        chrom_a, struct_a = split(fa)
+        chrom_b, struct_b = split(fb)
+        base = structural(struct_a, struct_b)
+        if chrom_a is not None and chrom_b is not None:
+            same_specific = chrom_a == chrom_b and chrom_a.startswith("chr")
+            if not same_specific:
+                return base + cross_chromosome_penalty
+        return base
+
+    return score
+
+
 def feature_jaccard(a: Iterable[Segment], b: Iterable[Segment]) -> float:
     """Jaccard overlap of the two reads' feature *sets* — a cheap O(N^2) prefilter."""
     fa = {feat for feat, _ in a}

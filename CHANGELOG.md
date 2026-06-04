@@ -138,6 +138,18 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   Validated on real v2 data: repeat-mask cuts a 223/250-read mega-cluster to 127 (singletons
   11 -> 112); the residual is a structurally-coherent telomeric group whose sub-division is
   left to community detection (open). See `docs/audit/rearrangement_detection.md` §10.
+- Engine B **chromosome identity** (the bigger anti-chaining lever) — a
+  `chromosome-telomere-satellite` overlay preset emits two-layer `chromosome:structural`
+  labels (e.g. `chr13:canonical_telomere`), enabled by a new **explicit-list composite emit**
+  (`{composite: [chromosome, subtelomeric]}`) in the resolution spec. The aligner gains
+  `chromosome_aware_substitution` (and the `cluster --cross-chromosome-penalty` option): the
+  structural layer is hierarchy-graded; the chromosome layer adds a soft per-bp penalty unless
+  two positions are the *same specific chromosome* (different/ambiguous chromosomes penalized),
+  so reads cluster by chromosome and translocation reads still bridge. Validated: under
+  `telomere-satellite` the subset chained almost entirely (249/250), and the chromosome
+  composite splits it into
+  clean per-chromosome clusters (largest 18) with multi-chromosome clusters surfacing as
+  candidate translocations. See `docs/audit/rearrangement_detection.md` §10.
 
 ### Notes
 

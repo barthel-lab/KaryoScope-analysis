@@ -24,6 +24,7 @@ EXPECTED_PRESETS = {
     "priority",
     "chromosome-acrocentric",
     "telomere-acrocentric",
+    "chromosome-telomere-satellite",
 }
 
 
@@ -42,6 +43,20 @@ def test_preset_loads_and_is_v2_valid(name, h):
     spec = load_builtin_preset(name, h)
     assert spec.name == name
     assert spec.precedence  # non-empty
+
+
+def test_chromosome_telomere_satellite_composite(h):
+    spec = load_builtin_preset("chromosome-telomere-satellite", h)
+    # default (catch-all): chromosome:region
+    assert (
+        spec.resolve({"chromosome": "chr13", "region": "aSat", "subtelomeric": "nonsubtelomeric"})
+        == "chr13:aSat"
+    )
+    # telomere overrides -> chromosome:subtelomeric
+    assert (
+        spec.resolve({"chromosome": "chr6", "region": "arm", "subtelomeric": "canonical_telomere"})
+        == "chr6:canonical_telomere"
+    )
 
 
 def test_telomere_acrocentric_composite(h):

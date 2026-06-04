@@ -1,0 +1,16 @@
+# overlay-annotations preset: chromosome-telomere-satellite
+#
+# The telomere-satellite structural resolution (telomere overrides satellite/region),
+# tagged with the chromosome each position belongs to, as a two-layer `chromosome:structural`
+# label (e.g. chr13:canonical_telomere, chr6:aSat). The chromosome layer is the key
+# discriminator for Engine B clustering (reads group by chromosome end); a translocation read
+# carries two chromosome layers and bridges the two chromosome clusters.
+#
+# Structural layer == the `telomere-satellite` preset; chromosome is prepended via an explicit
+# composite. The second rule has no `when`, so it is the catch-all default (chromosome:region).
+name: chromosome-telomere-satellite
+precedence: [chromosome, region, subtelomeric]
+rules:
+  - when: {subtelomeric: [canonical_telomere, noncanonical_telomere, telomere_like, ITS, TAR1]}
+    emit: {composite: [chromosome, subtelomeric], sep: ":"}
+  - emit: {composite: [chromosome, region], sep: ":"}

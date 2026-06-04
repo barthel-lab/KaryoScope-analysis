@@ -110,6 +110,22 @@ def test_hierarchy_substitution_tiers(h):
     assert score("arm", "novel") == 0.0
 
 
+def test_chromosome_aware_substitution(h):
+    struct = fa.hierarchy_substitution(h, match=1.0, partial=0.5, mismatch=-1.0)
+    score = fa.chromosome_aware_substitution(struct, cross_chromosome_penalty=-2.0)
+    # same chromosome: structural layer decides
+    assert score("chr6:aSat", "chr6:aSat") == 1.0  # exact
+    assert score("chr6:aSat", "chr6:bSat") == 0.5  # sibling satellites -> partial
+    # different specific chromosomes: structural match + cross-chromosome penalty
+    assert score("chr6:aSat", "chr21:aSat") == pytest.approx(1.0 - 2.0)
+    # ambiguous chromosome label (not chr*): penalized (can't confirm same chromosome)
+    assert score("chr6:aSat", "autosome:aSat") == pytest.approx(1.0 - 2.0)
+    assert score("autosome:aSat", "autosome:aSat") == pytest.approx(1.0 - 2.0)
+    # no chromosome layer -> degrades to the structural scorer (no penalty)
+    assert score("aSat", "bSat") == 0.5
+    assert score("aSat", "arm") == -1.0
+
+
 def test_feature_jaccard_prefilter():
     a = [("X", 10), ("Y", 10)]
     b = [("Y", 10), ("Z", 10)]

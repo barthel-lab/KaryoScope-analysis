@@ -14,7 +14,12 @@ from pathlib import Path
 import click
 
 from karyoscope_analysis.core import feature_assembly as asm
-from karyoscope_analysis.core.feature_align import Segment, hierarchy_substitution, to_segments
+from karyoscope_analysis.core.feature_align import (
+    Segment,
+    chromosome_aware_substitution,
+    hierarchy_substitution,
+    to_segments,
+)
 from karyoscope_analysis.core.feature_vocab import FeatureHierarchy
 from karyoscope_analysis.core.io.bed import read_annotation_bed
 
@@ -128,6 +133,14 @@ def _sidecar(output: Path, suffix: str) -> Path:
     help="Minimum weight for the most ubiquitous features (idf method).",
 )
 @click.option(
+    "--cross-chromosome-penalty",
+    default=-2.0,
+    show_default=True,
+    type=float,
+    help="Per-bp penalty when two `chromosome:feature` labels name different specific "
+    "chromosomes (soft, so translocation reads still bridge). Ignored for non-composite labels.",
+)
+@click.option(
     "--output",
     "-o",
     required=True,
@@ -148,6 +161,7 @@ def cmd(
     min_jaccard: float,
     weight_method: str,
     weight_floor: float,
+    cross_chromosome_penalty: float,
     output: Path,
 ) -> None:
     """Cluster reads into structural haplotypes and write clusters/consensus/layout."""
@@ -156,7 +170,12 @@ def cmd(
         raise click.ClickException("no reads left to cluster after filtering")
 
     hierarchy = FeatureHierarchy.from_tsv(hierarchy_path)
-    sub_score = hierarchy_substitution(hierarchy, match=match, partial=partial, mismatch=mismatch)
+    # Structural scorer (hierarchy-tiered), wrapped to be chromosome-layer aware. The wrapper
+    # is a no-op for plain (non-composite) labels, so this is safe for any overlay.
+    sub_score = chromosome_aware_substitution(
+        hierarchy_substitution(hierarchy, match=match, partial=partial, mismatch=mismatch),
+        cross_chromosome_penalty=cross_chromosome_penalty,
+    )
     if weight_method == "repeat-mask":
         masked = hierarchy.interspersed_repeat_features | {"nonrepeat"}
         weight: dict[str, float] | None = dict.fromkeys(masked, 0.0)

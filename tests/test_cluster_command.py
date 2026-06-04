@@ -89,9 +89,7 @@ def test_cluster_cli_repeat_mask_breaks_repeat_only_overlap(cli_runner, tmp_path
     # x and y dovetail ONLY through a shared LINE block (a genome-wide interspersed repeat);
     # the flanks (chr1/chr2) are unrelated, so the LINE block is the only positive overlap.
     bed = tmp_path / "overlay.bed"
-    bed.write_text(
-        "x\t0\t2000\tchr1\nx\t2000\t4000\tLINE\ny\t0\t2000\tLINE\ny\t2000\t4000\tchr2\n"
-    )
+    bed.write_text("x\t0\t2000\tchr1\nx\t2000\t4000\tLINE\ny\t0\t2000\tLINE\ny\t2000\t4000\tchr2\n")
     common = [
         "cluster",
         "--input",

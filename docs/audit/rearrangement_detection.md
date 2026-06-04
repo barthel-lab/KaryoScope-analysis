@@ -280,3 +280,25 @@ read frequency. Findings on the U2OS subset:
   held together by near-universal *structural* features in this telomeric read set
   (`canonical_telomere`/`TAR1`). Subdividing it into haplotypes is the **community-detection**
   job — the remaining v2 lever (modularity on the within-cluster overlap graph), still open.
+
+**The bigger lever: chromosome identity (`chromosome-telomere-satellite` preset + layer-aware
+scorer).** The deeper issue is that *structural features alone can't tell chromosome ends
+apart* — reads from different chromosomes look alike (telomere → subtelomere → satellite →
+arm). Under `telomere-satellite` (no `repeat`), the U2OS subset chained almost completely
+(**249/250 in one cluster**, and `idf` didn't help — the ubiquitous feature is now `arm`).
+Adding the chromosome featureset as a **two-layer `chromosome:structural` label** (new preset,
+emitting `chr13:canonical_telomere` etc.) is the fix:
+
+- The aligner's substitution scorer is **layer-aware** (`chromosome_aware_substitution`):
+  the structural layer is hierarchy-graded as before; the chromosome layer adds a **soft
+  per-bp penalty unless the two positions are the same *specific* chromosome** (`chr…`).
+  Different chromosomes *and* ambiguous labels (`autosome`/`categorized`/…) are penalized, so
+  reads don't chain through unresolved assignments; the penalty is finite, so a translocation
+  read still bridges the two chromosomes over its matching halves.
+- On the U2OS subset: the 249-blob breaks into **clean per-chromosome clusters** (largest 18;
+  e.g. chr4×18, chr18×10, chr7×8, chr20×7), with the **multi-chromosome clusters surfacing as
+  candidate translocations** (chr4+chr5, chr14+chr18, …). Runtime ~3 s for 250 reads.
+- Treating ambiguous chromosome labels as *neutral* (the first try) re-chained them into an
+  `autosome` blob (largest 84); the **strict** rule above resolved it. (Grading ambiguous
+  labels through the chromosome hierarchy — `chr5` is consistent with its parent `autosome` —
+  is a possible future refinement.)
