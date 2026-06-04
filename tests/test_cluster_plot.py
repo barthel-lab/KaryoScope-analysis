@@ -47,6 +47,25 @@ def test_render_cluster_svg():
     assert "HSat3" in svg  # auto-colored feature appears in the legend
 
 
+def test_render_clusters_svg_stacks_panels():
+    panels = [
+        render.ClusterPanel(
+            "cluster_0  n=1  chr13",
+            [render.PlacedRead("a", True, False, 0, [(0, 100, "chr13:aSat")])],
+            [(0, 100, "chr13:aSat")],
+        ),
+        render.ClusterPanel(
+            "cluster_1  n=1  chr21",
+            [render.PlacedRead("b", True, False, 0, [(0, 100, "chr21:bSat")])],
+            [(0, 100, "chr21:bSat")],
+        ),
+    ]
+    svg = render.render_clusters_svg(panels, {})
+    assert svg.startswith("<svg") and svg.rstrip().endswith("</svg>")
+    assert "cluster_0  n=1  chr13" in svg and "cluster_1  n=1  chr21" in svg  # both panels
+    assert "aSat" in svg and "bSat" in svg  # one shared legend (structural layer)
+
+
 def test_render_reversed_member_reflects_coordinates():
     # a reversed 2-segment read: oriented order is [second, first].
     placed = [render.PlacedRead("r", False, True, 0, [(0, 30, "A"), (30, 100, "B")])]
@@ -103,3 +122,51 @@ def test_cluster_plot_cli(cli_runner, tmp_path: Path):
     svg = svg_out.read_text()
     assert svg.startswith("<svg") and "<rect" in svg
     assert "x" in svg and "y" in svg  # both reads labeled
+
+
+def test_cluster_plot_cli_all_clusters(cli_runner, tmp_path: Path):
+    # Drive the combined mode directly from hand-written layout/consensus (two clusters).
+    overlay = tmp_path / "overlay.bed"
+    overlay.write_text(
+        "a\t0\t1000\taSat\na\t1000\t2000\tbSat\n"
+        "b\t0\t1000\tbSat\nb\t1000\t2000\tgSat\n"
+        "c\t0\t1000\tct\nc\t1000\t2000\trDNA\n"
+        "d\t0\t1000\trDNA\nd\t1000\t2000\tarm\n"
+    )
+    layout = tmp_path / "c.layout.tsv"
+    layout.write_text(
+        "cluster_id\tread_id\tis_seed\treversed\toffset\tlength\n"
+        "cluster_0\ta\t1\t0\t0\t2000\ncluster_0\tb\t0\t0\t1000\t2000\n"
+        "cluster_1\tc\t1\t0\t0\t2000\ncluster_1\td\t0\t0\t1000\t2000\n"
+    )
+    consensus = tmp_path / "c.consensus.bed"
+    consensus.write_text(
+        "cluster_id\tstart\tend\tfeature\tsupport\tcoverage\n"
+        "cluster_0\t0\t1000\taSat\t1\t1\ncluster_0\t1000\t2000\tbSat\t2\t2\n"
+        "cluster_1\t0\t1000\tct\t1\t1\ncluster_1\t1000\t2000\trDNA\t2\t2\n"
+    )
+    out = tmp_path / "all.svg"
+    res = cli_runner.invoke(
+        main,
+        [
+            "cluster-plot",
+            "--layout",
+            str(layout),
+            "--consensus",
+            str(consensus),
+            "--overlay",
+            str(overlay),
+            "--colors",
+            str(COLORS_TSV),
+            "--min-cluster-size",
+            "2",
+            "-o",
+            str(out),
+        ],  # no --cluster-id -> all clusters
+    )
+    assert res.exit_code == 0, res.output
+    assert "2 cluster" in res.output  # both clusters rendered
+    svg = out.read_text()
+    assert svg.startswith("<svg")
+    assert "cluster_0" in svg and "cluster_1" in svg  # two panels in one SVG
+    assert "aSat" in svg and "rDNA" in svg  # features from both clusters in the shared legend
