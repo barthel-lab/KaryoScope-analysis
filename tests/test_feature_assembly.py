@@ -116,3 +116,41 @@ def test_reversed_member_marked_relative_to_seed():
     assert c.seed == "seed"
     assert c.reversed_relative_to_seed["seed"] is False
     assert c.reversed_relative_to_seed["rev"] is True
+
+
+# ----------------------------------------------------------------- consensus
+def _consensus(reads, cluster):
+    return asm.cluster_consensus(reads, cluster, sub_score=EXACT, gap_factor=0.01)
+
+
+def test_consensus_singleton_is_the_read_itself():
+    reads = {"x": [("A", 100), ("B", 50)]}
+    clusters, _ = asm.assemble(reads, **PARAMS)
+    cons = _consensus(reads, clusters[0])
+    assert cons.segments() == [("A", 100), ("B", 50)]
+    assert [p.support for p in cons.positions] == [1, 1]
+    assert [p.coverage for p in cons.positions] == [1, 1]
+
+
+def test_consensus_counts_agreement_support():
+    reads = {
+        "seed": [("A", 100), ("B", 100), ("C", 100)],  # longest tie -> "seed" wins by id
+        "m": [("B", 100), ("C", 100), ("D", 100)],  # overlaps B, C
+    }
+    clusters, _ = asm.assemble(reads, **PARAMS)
+    cons = _consensus(reads, clusters[0])
+    assert cons.seed == "seed"
+    assert [p.feature for p in cons.positions] == ["A", "B", "C"]
+    assert [p.support for p in cons.positions] == [1, 2, 2]  # A seed-only; B,C agreed
+    assert [p.coverage for p in cons.positions] == [1, 2, 2]
+    assert cons.segments() == [("A", 100), ("B", 100), ("C", 100)]
+
+
+def test_consensus_orients_reversed_members():
+    seed = [("A", 300), ("B", 100), ("C", 100)]  # 500 bp -> unambiguous seed
+    reads = {"seed": seed, "rev": reverse_segments([("A", 300), ("B", 100)])}
+    clusters, _ = asm.assemble(reads, **PARAMS)
+    cons = _consensus(reads, clusters[0])
+    assert cons.seed == "seed"
+    # rev (oriented back) covers A and B but not C
+    assert [p.support for p in cons.positions] == [2, 2, 1]

@@ -6,8 +6,9 @@
 > **Group A** bucket in `OPEN_QUESTIONS.md`): CMH across length buckets + BH-FDR +
 > recurrence/effect/floor gates, with read independence assumed (surfaced as a runtime
 > warning, not enforced — open item). **Engine B** (OLC clustering) is fully specified
-> (§8); its **feature aligner** (`core/feature_align.py`) is implemented — the overlap
-> graph, consensus, and CLI are next.
+> (§8); its **aligner, overlap graph + clustering, and seed-anchored consensus**
+> (`core/feature_align.py`, `core/feature_assembly.py`) are implemented — only the
+> `cluster` CLI remains.
 
 This document is the mental model and design for detecting **recurrent rearrangements**
 from KaryoScope-annotated long/short reads, superseding the old `cluster_analysis`

@@ -17,6 +17,7 @@ Consensus (seed-anchored majority over the layout) builds on this next.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -24,6 +25,7 @@ from karyoscope_analysis.core.feature_align import (
     Segment,
     SubScore,
     align_best_orientation,
+    align_local,
     classify_overlap,
     feature_jaccard,
     reverse_segments,
@@ -190,6 +192,80 @@ def cluster_reads(
         )
     clusters.sort(key=lambda c: (-c.size, c.seed))
     return clusters
+
+
+@dataclass(frozen=True)
+class ConsensusPosition:
+    """One position of a cluster's seed-anchored consensus."""
+
+    feature: str  # majority feature at this seed position
+    length: int  # the seed segment's length (the backbone coordinate)
+    support: int  # votes for the majority feature (incl. the seed)
+    coverage: int  # total votes at this position (incl. the seed)
+
+
+@dataclass(frozen=True)
+class ClusterConsensus:
+    """A cluster's seed-anchored consensus structural sequence."""
+
+    seed: str
+    positions: tuple[ConsensusPosition, ...]
+
+    def segments(self) -> list[Segment]:
+        """The consensus as a ``(feature, length)`` sequence (the backbone structure)."""
+        return [(p.feature, p.length) for p in self.positions]
+
+
+def _majority(counter: Counter[str], prefer: str) -> str:
+    """Most-voted feature; ties broken toward ``prefer`` (the seed), then lexicographically."""
+    best = max(counter.values())
+    tied = sorted(feat for feat, count in counter.items() if count == best)
+    return prefer if prefer in tied else tied[0]
+
+
+def cluster_consensus(
+    reads: Mapping[str, Sequence[Segment]],
+    cluster: Cluster,
+    *,
+    sub_score: SubScore,
+    gap_factor: float,
+) -> ClusterConsensus:
+    """Seed-anchored consensus: per seed position, the majority feature over members.
+
+    Each member is oriented to the seed and locally aligned to it; every aligned column
+    votes its feature at the corresponding seed position (the seed votes for itself). The
+    consensus uses the seed's segment lengths as the backbone coordinate (v1). Members linked
+    only transitively (not overlapping the seed) contribute no votes — a v1 limitation.
+    """
+    seed_segments = reads[cluster.seed]
+    votes: list[Counter[str]] = [Counter() for _ in seed_segments]
+    for position, (feature, _length) in enumerate(seed_segments):
+        votes[position][feature] += 1  # the seed votes for itself
+
+    for member in cluster.members:
+        if member == cluster.seed:
+            continue
+        member_segments = (
+            reverse_segments(reads[member])
+            if cluster.reversed_relative_to_seed[member]
+            else list(reads[member])
+        )
+        aln = align_local(
+            member_segments, seed_segments, sub_score=sub_score, gap_factor=gap_factor
+        )
+        for member_idx, seed_idx in aln.columns:
+            votes[seed_idx][member_segments[member_idx][0]] += 1
+
+    positions = tuple(
+        ConsensusPosition(
+            feature=_majority(votes[position], prefer=feature),
+            length=length,
+            support=votes[position][_majority(votes[position], prefer=feature)],
+            coverage=sum(votes[position].values()),
+        )
+        for position, (feature, length) in enumerate(seed_segments)
+    )
+    return ClusterConsensus(seed=cluster.seed, positions=positions)
 
 
 def assemble(

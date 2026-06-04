@@ -119,8 +119,12 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   identity (internal-only repeat matches rejected; the anti-chaining safeguard), then groups
   reads into connected-component clusters via a **parity union-find** that assigns each read
   an orientation relative to its cluster seed (longest read) and flags orientation
-  conflicts. Singletons kept. `assemble()` returns `(clusters, edges)`. Seed-anchored
-  consensus and the `cluster` CLI build on it next.
+  conflicts. Singletons kept. `assemble()` returns `(clusters, edges)`.
+- `core/feature_assembly.py` `cluster_consensus`: Engine B's **seed-anchored consensus** —
+  each cluster member is oriented to the seed and locally aligned to it, and every aligned
+  column votes its feature at the corresponding seed position (the seed votes for itself).
+  Yields the per-position majority feature with support/coverage over the seed backbone.
+  The `cluster` CLI builds on it next.
 
 ### Notes
 
