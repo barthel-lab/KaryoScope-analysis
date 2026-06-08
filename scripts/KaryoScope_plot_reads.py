@@ -1641,7 +1641,8 @@ def _run_animation(png_path, num_reads, args, config=None,
             left_margin=scaled_left_margin,
             ratio=scaled_ratio,
             max_zoom=1.0, scale_bar_padding=10,
-            include_header=args.animate_include_header)
+            include_header=args.animate_include_header,
+            zoom_mode=args.animate_zoom)
     else:
         create_vertical_panning(
             png_path, mp4_path, duration, args.animate_fps, vw, vh,

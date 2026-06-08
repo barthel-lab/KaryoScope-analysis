@@ -27,6 +27,7 @@ nav:
   - Sequence Annotation: Sequence_Annotation.md
   - Cluster Annotation: Cluster_Annotation.md
   - Cluster Plot: Cluster_Plot.md
+  - Plot Reads & Animations: Plot_Reads.md
 
 plugins:
   - search

@@ -371,6 +371,7 @@ def create_adaptive_horizontal_panning(
     uniform_zoom=True,
     top_bias=0.0,
     include_header=True,
+    zoom_mode="adaptive",
 ):
     """Horizontal panning with adaptive zoom.
 
@@ -458,7 +459,7 @@ def create_adaptive_horizontal_panning(
         legend_h = total_h - viewport_height
 
     total_frames = int(duration * fps)
-    pan_start = max(0, content_start - 10)
+    pan_start = max(left_margin, content_start - 10)
     pan_end = content_end
     pan_distance = max(1, pan_end - pan_start)
 
@@ -469,6 +470,8 @@ def create_adaptive_horizontal_panning(
     bg_tuple = (0, 0, 0) if background == "black" else (255, 255, 255)
     content_padding = 10
     min_content_h = 20
+
+    global_max_ch = max(min_content_h, float(profile.max()))
 
     # For uniform zoom, crop width varies per frame based on zoom level
     # For vertical-only zoom, fixed_crop_w stays constant
@@ -514,7 +517,10 @@ def create_adaptive_horizontal_panning(
         # Content height at current x position (below top_margin)
         # Look ahead based on pan position to get content height
         x_preview = int(pan_start + t * pan_distance)
-        ch = max(min_content_h, profile[min(x_preview, len(profile) - 1)])
+        if zoom_mode == "fixed":
+            ch = global_max_ch
+        else:
+            ch = max(min_content_h, profile[min(x_preview, len(profile) - 1)])
 
         # Vertical zoom: scale content to fit in available viewport height
         available_height = viewport_height - reads_top_y
