@@ -198,6 +198,17 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   singletons and the all-`p_arm` chr5 read drops out of the chr5 cluster, leaving three
   structurally-justified clusters (chr12+chr9; chr20; chr5+`canonical_telomere`). Off by default
   (0); recommended with a weighting method.
+- Engine B **scales to a whole sample** — three levers so `cluster` no longer needs the
+  O(N²) all-vs-all alignment that made 4005 reads intractable (43 min, unfinished):
+  (1) a **blocking index** (`--block-min-bp`) that buckets reads by the *specific chromosome*
+  leaf of their composite labels and only aligns within-bucket pairs (translocation reads join
+  every chromosome they span, so the signal is kept; ambiguous `autosome`/`categorized` content
+  is excluded); (2) **scorer memoization** (the substitution scorer is called per DP cell but has
+  only ~hundreds of distinct feature pairs); (3) **process parallelism** (`--workers/-j`) over the
+  candidate pairs via `fork`, so workers inherit the reads + scorer copy-on-write (no pickling)
+  and the result is identical to serial. Full U2OS (4005 reads, w1001/τ0 overlay) now clusters in
+  **~100 s on 8 cores** (≈6.4× speedup), vs >8 min serial / 43 min unoptimized. See the
+  "running on a whole sample" runbook in `docs/audit/rearrangement_detection.md` §13.
 - **`cluster-plot` subcommand** + `core/cluster_plot.py` + `core/io/colors.py`: the package's
   single **read-renderer** (collapsing the legacy `plot-reads`/`cluster-plot`/`telogator-reads-viz`).
   Renders **one cluster (`--cluster-id`) or all clusters stacked in one SVG** (omit `--cluster-id`;

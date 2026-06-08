@@ -134,6 +134,24 @@ def _sidecar(output: Path, suffix: str) -> Path:
     help="Weight threshold above which a feature counts as distinctive (for --min-distinctive-bp).",
 )
 @click.option(
+    "--block-min-bp",
+    default=0.0,
+    show_default=True,
+    type=float,
+    help="Blocking index: only align reads sharing a feature with at least this many bp in both "
+    "(0 = off, all-vs-all). Lets clustering scale to whole samples by skipping the O(N^2) scan; "
+    "with composite labels this compares only same-chromosome reads. Set near --min-overlap-bp.",
+)
+@click.option(
+    "--workers",
+    "-j",
+    default=1,
+    show_default=True,
+    type=int,
+    help="Align candidate read pairs across this many processes (exact; uses fork, so best on "
+    "Linux/HPC). 1 = serial.",
+)
+@click.option(
     "--weight-method",
     type=click.Choice(["repeat-mask", "idf", "genome-freq", "uniform"]),
     default="repeat-mask",
@@ -187,6 +205,8 @@ def cmd(
     min_jaccard: float,
     min_distinctive_bp: float,
     distinctive_weight: float,
+    block_min_bp: float,
+    workers: int,
     weight_method: str,
     genome_weights_path: Path | None,
     weight_floor: float,
@@ -227,6 +247,8 @@ def cmd(
         min_jaccard=min_jaccard,
         min_distinctive_bp=min_distinctive_bp,
         distinctive_weight=distinctive_weight,
+        block_min_bp=block_min_bp,
+        workers=workers,
         weight=weight,
     )
     consensuses = [

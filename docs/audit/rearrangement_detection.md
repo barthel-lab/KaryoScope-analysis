@@ -402,3 +402,70 @@ Residual limitations: connected-components can still in principle link reads thr
 shared feature (community detection remains a possible refinement), and — the next workstream —
 the layout is a single seed-relative offset per read (so matching features drift in the plot
 rather than stacking) and the consensus spans only the seed, not the union of all reads.
+
+## 13. Scaling `cluster` to a whole sample (blocking + memoization + parallelism)
+
+The OLC aligner is all-vs-all: 49 reads (~1.2k pairs) ran in 11 s, but 4005 reads is ~8M pairs,
+each a full Smith-Waterman, and was intractable (43 min, unfinished). Three exact (non-lossy)
+levers fixed it:
+
+1. **Blocking index (`--block-min-bp`).** Reads are bucketed by the **specific-chromosome leaf**
+   of their composite labels (`chr5:p_arm` → `chr5`), summing bp per chromosome; only reads
+   sharing a chromosome with ≥ `--block-min-bp` are aligned. A `min_overlap_bp` edge needs
+   substantial same-specific-chromosome content (the layer-aware scorer penalizes cross-chromosome),
+   so a non-candidate pair can't form an edge. **Translocation reads** are indexed under *every*
+   chromosome they span (a chr12+chr9 read is in both buckets), so the translocation signal is
+   kept. Bucketing on the chromosome leaf (not the full `chr:struct` composite) is deliberate —
+   composite buckets would miss a pair that clusters through a *different* shared element (one read
+   `mon`, another `aSat` at the homologous spot). Measured on U2OS: 8M → ~0.9M candidate pairs at
+   `--block-min-bp 2000`; ambiguous composites (`categorized:*`, `autosome:*`) are excluded as keys.
+2. **Scorer memoization.** The substitution scorer is invoked once per DP cell but has only
+   ~hundreds of distinct `(feature, feature)` argument pairs across a run; caching it removes the
+   per-cell hierarchy/chromosome recomputation.
+3. **Process parallelism (`--workers`/`-j`).** Candidate-pair alignments are independent (edges
+   merge afterward in the union-find), so they fan out across processes via `fork` — each worker
+   inherits `reads` + the scorer copy-on-write (only pair chunks and edge results cross the
+   boundary). Output is identical to serial (edges sorted by `(a, b)`); a unit test pins this.
+
+**Result:** full U2OS (4005 reads, w1001/τ0 overlay) clusters in **~100 s on 8 cores** (≈6.4×;
+648 s CPU), into 2509 clusters (40 multi-read) — vs >8 min serial and 43 min unoptimized. More
+cores scale further. (`fork` is required, so this is best on Linux/HPC; it also works on macOS for
+this pure-Python path.) If a single chromosome bucket is ever too big, a similarity-preserving
+sub-bucket (MinHash/LSH on the feature multiset) is the next lever — kept in reserve as it is
+*lossy*, unlike the three above.
+
+### Runbook — whole-sample clustering (e.g. on HPC)
+
+Inputs needed (the package + `data/chm13v2_feature_weights.tsv` are committed; the large
+`data/raw_bed/*.bed.gz` telogator featureset BEDs and the DB `hierarchy.tsv` are **gitignored**,
+so copy them to the machine). The genome weights are committed, so the 475 MB CHM13 reference BEDs
+are only needed to *recompute* weights, not to cluster.
+
+```bash
+DB=/path/to/KS_human_CHM13_v2            # hierarchy.tsv lives here
+S=U2OS                                   # sample
+RAW=data/raw_bed/$S.telogator.1.KS_human_CHM13_v2
+
+# 1. bin each featureset (window 1001, tau 0 = always descend to a specific leaf)
+for fs in region subtelomeric chromosome; do
+  karyoscope-analysis bin-annotations --input $RAW.$fs.smoothed.features.bed.gz \
+    --hierarchy $DB/hierarchy.tsv --feature-set $fs \
+    --window 1001 --majority-fraction 0 -o $S.$fs.binned.bed.gz
+done
+
+# 2. overlay with the chromosome-telomere-satellite preset
+karyoscope-analysis overlay-annotations \
+  --bed chromosome=$S.chromosome.binned.bed.gz --bed region=$S.region.binned.bed.gz \
+  --bed subtelomeric=$S.subtelomeric.binned.bed.gz \
+  --hierarchy $DB/hierarchy.tsv --preset chromosome-telomere-satellite -o $S.overlay.bed
+
+# 3. cluster ALL reads (scaled): genome-freq weights + distinctive + blocking + parallel
+karyoscope-analysis cluster --input $S.overlay.bed --hierarchy $DB/hierarchy.tsv --min-length 0 \
+  --weight-method genome-freq --genome-weights data/chm13v2_feature_weights.tsv \
+  --min-distinctive-bp 1000 --block-min-bp 2000 --workers <NCORES> -o $S.clusters.tsv
+
+# 4. plot the multi-read clusters
+karyoscope-analysis cluster-plot --layout $S.clusters.layout.tsv \
+  --consensus $S.clusters.consensus.bed --overlay $S.overlay.bed \
+  --colors $DB/colors.tsv --min-cluster-size 2 -o $S.clusters.svg
+```

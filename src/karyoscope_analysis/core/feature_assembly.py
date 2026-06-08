@@ -17,9 +17,11 @@ Consensus (seed-anchored majority over the layout) builds on this next.
 
 from __future__ import annotations
 
+import multiprocessing as mp
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from itertools import islice
 
 from karyoscope_analysis.core.feature_align import (
     Segment,
@@ -127,6 +129,138 @@ class OverlapEdge:
     flipped: bool  # B is in the opposite orientation to A
 
 
+def _all_pairs(n: int):
+    """Yield every ``(ai, bi)`` index pair with ``ai < bi`` (the all-vs-all fallback)."""
+    for ai in range(n):
+        for bi in range(ai + 1, n):
+            yield ai, bi
+
+
+def _block_key(feature: str) -> str | None:
+    """Blocking key for a feature: the *specific chromosome* of a composite label, else the label.
+
+    ``chr5:p_arm`` -> ``chr5`` (so all chr5 reads bucket together regardless of which arm —
+    robust to structural-label differences); a bare label -> itself; an *ambiguous* chromosome
+    layer (``autosome``/``categorized``/…) -> ``None`` (not a key — an edge needs the same
+    *specific* chromosome, so ambiguous content can't seed a candidate pair).
+    """
+    chrom, sep, _struct = feature.partition(":")
+    if not sep:
+        return feature
+    return chrom if chrom.startswith("chr") else None
+
+
+def _candidate_pairs(
+    ids: Sequence[str], reads: Mapping[str, Sequence[Segment]], block_min_bp: float
+) -> list[tuple[int, int]]:
+    """Read-index pairs sharing a blocking key with ≥ ``block_min_bp`` bp in both.
+
+    Buckets reads by :func:`_block_key` (specific chromosome for composite labels) and returns
+    the union of within-bucket pairs, so only plausibly-overlapping reads are aligned — avoiding
+    the O(N²) all-vs-all scan and the cross-chromosome blow-up from ambiguous composites.
+    """
+    index: dict[str, list[int]] = {}
+    for idx, read_id in enumerate(ids):
+        bp: dict[str, float] = {}
+        for feature, length in reads[read_id]:
+            key = _block_key(feature)
+            if key is not None:
+                bp[key] = bp.get(key, 0.0) + length
+        for key, total in bp.items():
+            if total >= block_min_bp:
+                index.setdefault(key, []).append(idx)  # idx ascending -> pairs stay (lo, hi)
+    pairs: set[tuple[int, int]] = set()
+    for members in index.values():
+        for x in range(len(members)):
+            for y in range(x + 1, len(members)):
+                pairs.add((members[x], members[y]))
+    return sorted(pairs)
+
+
+def _memoized(scorer: SubScore) -> SubScore:
+    """Cache the (pure) substitution scorer — it is called once per DP cell but has only a few
+    hundred distinct ``(feature, feature)`` argument pairs across an entire run."""
+    cache: dict[tuple[str, str], float] = {}
+
+    def scored(fa: str, fb: str) -> float:
+        key = (fa, fb)
+        value = cache.get(key)
+        if value is None:
+            value = scorer(fa, fb)
+            cache[key] = value
+        return value
+
+    return scored
+
+
+@dataclass(frozen=True)
+class _EdgeParams:
+    """The numeric thresholds for accepting an overlap edge (bundled to pass to workers)."""
+
+    gap_factor: float
+    match_score: float
+    min_overlap_bp: float
+    min_identity: float
+    min_jaccard: float
+    min_distinctive_bp: float
+    distinctive_weight: float
+
+
+def _edge_for_pair(
+    ai: int,
+    bi: int,
+    ids: Sequence[str],
+    reads: Mapping[str, Sequence[Segment]],
+    scorer: SubScore,
+    weight: Mapping[str, float] | None,
+    params: _EdgeParams,
+) -> OverlapEdge | None:
+    """Align read ``ai`` vs ``bi`` and return the accepted :class:`OverlapEdge`, or ``None``."""
+    a = reads[ids[ai]]
+    b = reads[ids[bi]]
+    if params.min_jaccard > 0.0 and feature_jaccard(a, b) < params.min_jaccard:
+        return None
+    aln = align_best_orientation(a, b, sub_score=scorer, gap_factor=params.gap_factor)
+    kind = classify_overlap(aln, len(a), len(b))
+    if kind not in ("dovetail", "containment"):
+        return None
+    b_used = reverse_segments(b) if aln.reversed_b else b
+    overlap_bp = _weighted_overlap(aln.columns, a, b_used, weight)
+    if overlap_bp < params.min_overlap_bp:
+        return None
+    identity = aln.score / (params.match_score * overlap_bp) if overlap_bp else 0.0
+    if identity < params.min_identity:
+        return None
+    if params.min_distinctive_bp > 0.0 and (
+        _distinctive_overlap(aln.columns, a, b_used, weight, params.distinctive_weight)
+        < params.min_distinctive_bp
+    ):
+        return None  # overlap rests only on filler (e.g. shared arm) -> not an edge
+    return OverlapEdge(ids[ai], ids[bi], aln.score, identity, overlap_bp, kind, aln.reversed_b)
+
+
+#: Per-worker state, populated by fork inheritance (copy-on-write — never pickled).
+_WORKER: dict = {}
+
+
+def _edges_for_chunk(chunk: Sequence[tuple[int, int]]) -> list[OverlapEdge]:
+    """Worker entry point: edges for a chunk of read-index pairs, using forked-in state."""
+    g = _WORKER
+    edges = []
+    for ai, bi in chunk:
+        edge = _edge_for_pair(ai, bi, g["ids"], g["reads"], g["scorer"], g["weight"], g["params"])
+        if edge is not None:
+            edges.append(edge)
+    return edges
+
+
+def _iter_chunks(items, size: int):
+    """Yield ``items`` in lists of at most ``size`` (one parallel task each)."""
+    it = iter(items)
+    while batch := list(islice(it, size)):
+        yield batch
+
+
 def build_overlap_graph(
     reads: Mapping[str, Sequence[Segment]],
     *,
@@ -138,6 +272,8 @@ def build_overlap_graph(
     min_jaccard: float = 0.0,
     min_distinctive_bp: float = 0.0,
     distinctive_weight: float = 0.15,
+    block_min_bp: float = 0.0,
+    workers: int = 1,
     weight: Mapping[str, float] | None = None,
 ) -> list[OverlapEdge]:
     """Compute the proper-overlap edges among ``reads`` (``{read_id: segments}``).
@@ -150,37 +286,48 @@ def build_overlap_graph(
     content; ``min_distinctive_bp`` additionally rejects overlaps explained only by filler
     (e.g. a shared chromosome arm) — the fix for arm-chaining. The ``min_jaccard`` feature-set
     prefilter prunes obviously-disjoint pairs cheaply (0 = off).
+
+    ``block_min_bp`` (0 = off) enables a **blocking index** so the alignment is not run on all
+    O(N²) pairs: reads are bucketed by the features they carry at least ``block_min_bp`` of, and
+    only reads sharing such a "major" feature are compared. Since a ``min_overlap_bp`` edge
+    requires substantial shared content (with composite labels, of the same chromosome), reads
+    sharing no major feature can't form one — so this scales to whole samples (a heuristic seed,
+    like minimizer seeding: an edge resting solely on many sub-``block_min_bp`` features is missed).
     """
-    scorer = _weighted_sub_score(sub_score, weight)
+    scorer = _memoized(_weighted_sub_score(sub_score, weight))
     ids = sorted(reads)
-    edges: list[OverlapEdge] = []
-    for ai in range(len(ids)):
-        a_id = ids[ai]
-        a = reads[a_id]
-        for bi in range(ai + 1, len(ids)):
-            b_id = ids[bi]
-            b = reads[b_id]
-            if min_jaccard > 0.0 and feature_jaccard(a, b) < min_jaccard:
-                continue
-            aln = align_best_orientation(a, b, sub_score=scorer, gap_factor=gap_factor)
-            kind = classify_overlap(aln, len(a), len(b))
-            if kind not in ("dovetail", "containment"):
-                continue
-            b_used = reverse_segments(b) if aln.reversed_b else b
-            overlap_bp = _weighted_overlap(aln.columns, a, b_used, weight)
-            if overlap_bp < min_overlap_bp:
-                continue
-            identity = aln.score / (match_score * overlap_bp) if overlap_bp else 0.0
-            if identity < min_identity:
-                continue
-            if min_distinctive_bp > 0.0 and (
-                _distinctive_overlap(aln.columns, a, b_used, weight, distinctive_weight)
-                < min_distinctive_bp
-            ):
-                continue  # overlap rests only on filler (e.g. shared arm) -> not an edge
-            edges.append(
-                OverlapEdge(a_id, b_id, aln.score, identity, overlap_bp, kind, aln.reversed_b)
-            )
+    params = _EdgeParams(
+        gap_factor, match_score, min_overlap_bp, min_identity, min_jaccard,
+        min_distinctive_bp, distinctive_weight,
+    )
+    pair_iter = (
+        _candidate_pairs(ids, reads, block_min_bp)
+        if block_min_bp > 0.0
+        else _all_pairs(len(ids))
+    )
+
+    if workers and workers > 1:  # align candidate pairs across processes (fork: shared state)
+        pairs = list(pair_iter)
+        _WORKER.update(ids=ids, reads=reads, scorer=scorer, weight=weight, params=params)
+        try:
+            chunksize = max(1, len(pairs) // (workers * 8))
+            ctx = mp.get_context("fork")
+            edges = []
+            with ctx.Pool(workers) as pool:
+                for chunk_edges in pool.imap_unordered(
+                    _edges_for_chunk, _iter_chunks(pairs, chunksize)
+                ):
+                    edges.extend(chunk_edges)
+        finally:
+            _WORKER.clear()
+        edges.sort(key=lambda e: (e.a, e.b))  # match the serial path's order (determinism)
+        return edges
+
+    edges = []
+    for ai, bi in pair_iter:
+        edge = _edge_for_pair(ai, bi, ids, reads, scorer, weight, params)
+        if edge is not None:
+            edges.append(edge)
     return edges
 
 
@@ -426,6 +573,8 @@ def assemble(
     min_jaccard: float = 0.0,
     min_distinctive_bp: float = 0.0,
     distinctive_weight: float = 0.15,
+    block_min_bp: float = 0.0,
+    workers: int = 1,
     weight: Mapping[str, float] | None = None,
 ) -> tuple[list[Cluster], list[OverlapEdge]]:
     """Build the overlap graph and cluster — returns ``(clusters, edges)``."""
@@ -439,6 +588,8 @@ def assemble(
         min_jaccard=min_jaccard,
         min_distinctive_bp=min_distinctive_bp,
         distinctive_weight=distinctive_weight,
+        block_min_bp=block_min_bp,
+        workers=workers,
         weight=weight,
     )
     return cluster_reads(reads, edges), edges

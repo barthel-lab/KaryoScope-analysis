@@ -50,6 +50,50 @@ def test_min_distinctive_bp_rejects_filler_only_overlap():
     assert not asm.build_overlap_graph(reads, min_distinctive_bp=100, **common)
 
 
+# ----------------------------------------------------------------- blocking index
+def test_block_min_bp_only_compares_reads_sharing_a_major_feature():
+    # x & y share a big "Q" block (dovetail); z shares nothing major with either.
+    reads = {
+        "x": [("P", 2000), ("Q", 3000)],
+        "y": [("Q", 3000), ("R", 2000)],
+        "z": [("S", 4000), ("T", 4000)],
+    }
+    pairs = asm._candidate_pairs(["x", "y", "z"], reads, block_min_bp=2500)
+    # only (x, y) share a >= 2500 bp feature (Q); z is isolated
+    assert pairs == [(0, 1)]
+    # the blocked graph still finds the x-y dovetail edge, and z makes none
+    edges = asm.build_overlap_graph(
+        reads, sub_score=EXACT, gap_factor=0.01, min_overlap_bp=1, min_identity=0.5,
+        block_min_bp=2500,
+    )
+    assert {tuple(sorted((e.a, e.b))) for e in edges} == {("x", "y")}
+    # same edges as all-vs-all here (z shares nothing alignable anyway)
+    full = asm.build_overlap_graph(
+        reads, sub_score=EXACT, gap_factor=0.01, min_overlap_bp=1, min_identity=0.5
+    )
+    assert {tuple(sorted((e.a, e.b))) for e in edges} == {tuple(sorted((e.a, e.b))) for e in full}
+
+
+# ----------------------------------------------------------------- parallel == serial
+def test_workers_match_serial():
+    reads = {
+        "a": [("P", 30), ("Q", 100), ("R", 80)],
+        "b": [("Q", 100), ("R", 80), ("S", 40)],
+        "c": [("R", 80), ("S", 40), ("T", 50)],
+        "d": [("X", 90), ("Y", 90)],
+        "e": [("Y", 90), ("Z", 90)],
+    }
+    common = dict(sub_score=EXACT, gap_factor=0.01, min_overlap_bp=50, min_identity=0.9)
+    serial = asm.build_overlap_graph(reads, **common, workers=1)
+    parallel = asm.build_overlap_graph(reads, **common, workers=2)
+    key = lambda es: sorted((e.a, e.b, round(e.score, 6), e.flipped) for e in es)  # noqa: E731
+    assert key(serial) == key(parallel)
+    # and with the blocking index on
+    assert key(asm.build_overlap_graph(reads, **common, block_min_bp=50, workers=1)) == key(
+        asm.build_overlap_graph(reads, **common, block_min_bp=50, workers=2)
+    )
+
+
 # ----------------------------------------------------------------- overlap graph
 def test_dovetail_makes_an_edge():
     reads = {
