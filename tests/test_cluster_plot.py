@@ -47,6 +47,26 @@ def test_render_cluster_svg():
     assert "HSat3" in svg  # auto-colored feature appears in the legend
 
 
+def test_chromosome_layer_and_color():
+    colors = {"chr4": "#abc123", "p_arm": "#111111"}
+    assert render.chromosome_layer("chr4:p_arm") == "chr4"
+    assert render.chromosome_layer("aSat") == ""  # non-composite -> no chromosome
+    assert render.chromosome_color("chr4:p_arm", colors) == "#abc123"  # by chromosome layer
+    auto = render.chromosome_color("chr9:bSat", {})
+    assert auto in render._AUTO_PALETTE
+
+
+def test_chromosome_track_renders_dual_tracks_and_legend():
+    placed = [render.PlacedRead("x", True, False, [(0, 100, "chr4:p_arm"), (100, 200, "chr22:q_arm")])]
+    consensus = [(0, 100, "chr4:p_arm"), (100, 200, "chr22:q_arm")]
+    colors = {"p_arm": "#111111", "q_arm": "#222222", "chr4": "#aaaaaa", "chr22": "#bbbbbb"}
+    on = render.render_cluster_svg(placed, consensus, 200, colors, chromosome_track=True)
+    assert "#aaaaaa" in on and "#bbbbbb" in on  # chromosome-colored track drawn
+    assert "Chromosomes" in on and "chr4" in on and "chr22" in on  # chromosome legend
+    off = render.render_cluster_svg(placed, consensus, 200, colors, chromosome_track=False)
+    assert "#aaaaaa" not in off and "Chromosomes" not in off  # no chromosome track when off
+
+
 def test_render_clusters_svg_stacks_panels():
     panels = [
         render.ClusterPanel(

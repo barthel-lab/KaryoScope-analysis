@@ -320,6 +320,36 @@ def test_consensus_layout_stacks_features_and_spans_union():
     ]
 
 
+def test_progressive_layout_places_transitive_members():
+    # a chain seed -- m1 -- m2 where m2 overlaps m1 (on S) but NOT the seed.
+    reads = {
+        "seed": [("P", 100), ("Q", 100), ("R", 100)],
+        "m1": [("Q", 100), ("R", 100), ("S", 100)],  # overlaps seed (Q,R)
+        "m2": [("S", 100), ("T", 100), ("U", 100)],  # overlaps m1 (S), not the seed
+    }
+    clusters, edges = asm.assemble(
+        reads, sub_score=EXACT, gap_factor=0.01, min_overlap_bp=50, min_identity=0.5
+    )
+    assert len(clusters) == 1  # one connected chain
+    neighbors: dict[str, list[str]] = {}
+    for e in edges:
+        neighbors.setdefault(e.a, []).append(e.b)
+        neighbors.setdefault(e.b, []).append(e.a)
+
+    def sstart(layout, rid):
+        seg = {r.read_id: r for r in layout.placed}[rid]
+        return next(s for s, _e, f in seg.segments if f == "S")
+
+    # progressive: m2 is placed via m1, so its S stacks on m1's S
+    prog = asm.consensus_layout(
+        reads, clusters[0], neighbors=neighbors, sub_score=EXACT, gap_factor=0.01
+    )
+    assert sstart(prog, "m1") == sstart(prog, "m2")
+    # star (no neighbors): m2 can't align to the seed -> own coords -> NOT stacked
+    star = asm.consensus_layout(reads, clusters[0], sub_score=EXACT, gap_factor=0.01)
+    assert sstart(star, "m1") != sstart(star, "m2")
+
+
 def test_consensus_layout_orients_reversed_members():
     seed = [("A", 300), ("B", 100), ("C", 100)]  # 500 bp -> unambiguous seed
     reads = {"seed": seed, "rev": reverse_segments([("A", 300), ("B", 100)])}

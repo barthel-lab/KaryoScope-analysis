@@ -277,7 +277,7 @@ def cmd(
     else:
         weight = None
 
-    clusters, _edges = asm.assemble(
+    clusters, edges = asm.assemble(
         reads,
         sub_score=sub_score,
         gap_factor=gap_factor,
@@ -293,8 +293,16 @@ def cmd(
         communities=communities,
         weight=weight,
     )
+    # overlap-graph adjacency drives the progressive layout (place each read against an
+    # already-placed *overlapping* neighbour, not just the seed).
+    neighbors: dict[str, list[str]] = {}
+    for e in edges:
+        neighbors.setdefault(e.a, []).append(e.b)
+        neighbors.setdefault(e.b, []).append(e.a)
     layouts = [
-        asm.consensus_layout(reads, c, sub_score=sub_score, gap_factor=gap_factor, weight=weight)
+        asm.consensus_layout(
+            reads, c, neighbors=neighbors, sub_score=sub_score, gap_factor=gap_factor, weight=weight
+        )
         for c in clusters
     ]
 

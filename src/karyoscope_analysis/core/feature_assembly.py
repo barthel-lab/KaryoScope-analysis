@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import bisect
 import multiprocessing as mp
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import islice
@@ -590,57 +590,88 @@ def _union_consensus(placed: Sequence[LaidOutRead], width: int) -> tuple[Consens
     return tuple(out)
 
 
+def _place_against(
+    stored: Sequence[Segment],
+    parent_oriented: Sequence[Segment],
+    parent_bounds: Sequence[float],
+    scorer: SubScore,
+    gap_factor: float,
+) -> tuple[list[Segment], list[float], bool]:
+    """Place a read against an already-placed parent: returns ``(oriented, cons_bounds, reversed)``.
+
+    Tries both orientations of the read, keeps the one aligning better to the parent, and maps the
+    read's segment boundaries to consensus coordinates via the parent's (so matched features land
+    on the parent's coordinate). If nothing aligns, the read keeps its own coordinates.
+    """
+    forward = list(stored)
+    reverse = reverse_segments(stored)
+    aln_f = align_local(forward, parent_oriented, sub_score=scorer, gap_factor=gap_factor)
+    aln_r = align_local(reverse, parent_oriented, sub_score=scorer, gap_factor=gap_factor)
+    oriented, aln, reversed_ = (
+        (reverse, aln_r, True) if aln_r.score > aln_f.score else (forward, aln_f, False)
+    )
+    cum = _cumulative_bp(oriented)
+    if aln.columns:
+        mp = _anchor_map([(cum[ui], parent_bounds[pj]) for ui, pj in aln.columns])
+        bounds = [mp(x) for x in cum]
+    else:
+        bounds = [float(x) for x in cum]
+    return oriented, bounds, reversed_
+
+
 def consensus_layout(
     reads: Mapping[str, Sequence[Segment]],
     cluster: Cluster,
     *,
+    neighbors: Mapping[str, Sequence[str]] | None = None,
     sub_score: SubScore,
     gap_factor: float,
     weight: Mapping[str, float] | None = None,
 ) -> ClusterLayout:
     """Lay a cluster out in consensus coordinates: place every read so matched features stack.
 
-    Each member is oriented to the seed and locally aligned to it; its aligned columns become
-    anchors for a piecewise-linear coordinate map (:func:`_anchor_map`), so a member segment lands
-    on the consensus coordinate of the seed segment it matches (aligned features stack vertically;
-    overhangs extend the frame). The whole layout is shifted so the leftmost edge is 0, the
-    consensus spans the **union** of all reads, and :func:`_union_consensus` majority-votes the
-    feature at each grid interval. A member that doesn't align to the seed is placed at its own
-    coordinates (offset 0) — a fallback for transitive links.
+    **Progressive layout.** Starting from the seed (the frame), reads are placed by breadth-first
+    walk over the overlap graph (``neighbors``): each read is aligned to an already-placed
+    *overlapping* neighbour and its segment boundaries mapped to consensus coordinates via that
+    neighbour's (a piecewise-linear :func:`_anchor_map`, slope-1 outside the anchors). So aligned
+    features stack vertically, orientation propagates correctly even for reads that don't overlap
+    the seed directly, and overhangs extend the frame. The layout is then shifted so the leftmost
+    edge is 0, the consensus spans the **union** of all reads, and :func:`_union_consensus`
+    majority-votes the feature at each grid interval. Without ``neighbors`` this degrades to a
+    star from the seed (every read placed against the seed); reads with no edge path from the seed
+    fall back to their own coordinates.
     """
     scorer = _memoized(_weighted_sub_score(sub_score, weight))
-    seed_segments = reads[cluster.seed]
-    seed_cum = _cumulative_bp(seed_segments)
+    members = set(cluster.members)
+    seed = cluster.seed
+    if neighbors is None:  # star: every member placed directly against the seed
+        neighbors = {seed: [m for m in cluster.members if m != seed]}
+
+    seed_oriented = list(reads[seed])
+    placed: dict[str, tuple[list[Segment], list[float], bool]] = {
+        seed: (seed_oriented, [float(x) for x in _cumulative_bp(seed_oriented)], False)
+    }
+    queue = deque([seed])
+    while queue:
+        parent = queue.popleft()
+        parent_oriented, parent_bounds, _ = placed[parent]
+        for child in neighbors.get(parent, ()):
+            if child not in members or child in placed:
+                continue
+            placed[child] = _place_against(
+                reads[child], parent_oriented, parent_bounds, scorer, gap_factor
+            )
+            queue.append(child)
+    for member in cluster.members:  # members unreachable via edges: place at their own coordinates
+        if member not in placed:
+            seg = list(reads[member])
+            placed[member] = (seg, [float(x) for x in _cumulative_bp(seg)], False)
 
     raw: list[tuple[str, bool, bool, list[Interval]]] = []
-    for member in cluster.members:
-        if member == cluster.seed:
-            segments = list(reads[member])
-            cum = _cumulative_bp(segments)
-            raw.append(
-                (member, True, False, [(cum[i], cum[i + 1], segments[i][0]) for i in range(len(segments))])
-            )
-            continue
-        # Orient each member by whichever orientation aligns *better* to the seed. The parity
-        # from the cluster's union-find is global and can disagree with the direct best fit, which
-        # is what the plot should show — so trust the alignment for placement/display.
-        forward = list(reads[member])
-        reverse = reverse_segments(reads[member])
-        aln_f = align_local(forward, seed_segments, sub_score=scorer, gap_factor=gap_factor)
-        aln_r = align_local(reverse, seed_segments, sub_score=scorer, gap_factor=gap_factor)
-        segments, aln, reversed_ = (
-            (reverse, aln_r, True) if aln_r.score > aln_f.score else (forward, aln_f, False)
-        )
-        cum = _cumulative_bp(segments)
-        if aln.columns:
-            mp = _anchor_map([(cum[mi], seed_cum[sj]) for mi, sj in aln.columns])
-            placed_segs = [
-                (round(mp(cum[i])), round(mp(cum[i + 1])), segments[i][0])
-                for i in range(len(segments))
-            ]
-        else:
-            placed_segs = [(cum[i], cum[i + 1], segments[i][0]) for i in range(len(segments))]
-        raw.append((member, False, reversed_, placed_segs))
+    for rid in cluster.members:
+        oriented, bounds, reversed_ = placed[rid]
+        segs = [(round(bounds[k]), round(bounds[k + 1]), oriented[k][0]) for k in range(len(oriented))]
+        raw.append((rid, rid == seed, reversed_, segs))
 
     starts = [s for *_, segs in raw for s, _e, _f in segs]
     ends = [e for *_, segs in raw for _s, e, _f in segs]

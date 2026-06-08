@@ -13,6 +13,15 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
 
 ### Added
 
+- Engine B **progressive layout**: `consensus_layout` now places reads by a breadth-first walk
+  over the overlap graph — each read is aligned to an already-placed *overlapping neighbour* (and
+  oriented by best fit to it), not the seed alone — so reads that don't overlap the seed directly
+  (transitive members of a cluster) land in the right place and orientation, and coordinates/flips
+  propagate along the chain. Membership is unchanged (placement only). `cluster-plot` gains a
+  `--chromosome-track/--no-chromosome-track` option (default on): a thin chromosome-colored strip
+  is drawn directly under each read's structural track (shared DB color palette + a Chromosomes
+  legend), so structure and chromosome identity line up and translocations show two chromosome
+  colors at a glance.
 - Package skeleton: `src/karyoscope_analysis/` (src layout), hatchling build,
   `karyoscope-analysis` console entry point, `version` subcommand.
 - Tooling: `pyproject.toml` (ruff, pytest, coverage), `.pre-commit-config.yaml`,

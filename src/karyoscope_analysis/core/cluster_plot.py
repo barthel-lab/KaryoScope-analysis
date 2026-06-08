@@ -60,6 +60,19 @@ def feature_color(label: str, colors: Mapping[str, str]) -> str:
     return _AUTO_PALETTE[zlib.crc32(feature.encode()) % len(_AUTO_PALETTE)]
 
 
+def chromosome_layer(label: str) -> str:
+    """The chromosome layer of a composite label: ``chr13:aSat`` -> ``chr13``; ``aSat`` -> ``''``."""
+    return label.split(":", 1)[0] if ":" in label else ""
+
+
+def chromosome_color(label: str, colors: Mapping[str, str]) -> str:
+    """Color for a label's chromosome layer (colors file by chromosome, else a stable auto-color)."""
+    chrom = chromosome_layer(label)
+    if chrom in colors:
+        return colors[chrom]
+    return _AUTO_PALETTE[zlib.crc32(chrom.encode()) % len(_AUTO_PALETTE)]
+
+
 def _esc(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -70,15 +83,23 @@ def _draw_panel(
     panel: ClusterPanel,
     colors: Mapping[str, str],
     present: dict[str, str],
+    present_chrom: dict[str, str],
     *,
     width: int,
     label_width: int,
     row_height: int,
+    chromosome_track: bool,
 ) -> float:
-    """Draw one cluster panel (shared consensus x-scale) starting at ``y``; return the next ``y``."""
+    """Draw one cluster panel (shared consensus x-scale) starting at ``y``; return the next ``y``.
+
+    Each row is the structural-feature track and, directly below it (no gap), a thinner
+    chromosome-colored track (when ``chromosome_track``) — so a read's structure and its
+    chromosome identity line up.
+    """
     rows: list[tuple[str, bool, Sequence[Interval]]] = [("consensus", True, panel.consensus)]
     rows += [(r.read_id, r.is_seed, r.segments) for r in panel.placed]
     scale = max(1, width - label_width) / max(1, panel.width)
+    chrom_h = max(4, round(row_height * 0.55)) if chromosome_track else 0
 
     if panel.title:
         elements.append(
@@ -95,27 +116,34 @@ def _draw_panel(
             f'fill="{"#000" if emphasis else "#555"}">{_esc(tag[:36])}</text>'
         )
         for s, e, f in segs:
-            color = feature_color(f, colors)
-            present.setdefault(structural_feature(f), color)
             x = label_width + s * scale
             w = max(0.5, (e - s) * scale)
+            color = feature_color(f, colors)
+            present.setdefault(structural_feature(f), color)
             elements.append(
                 f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{row_height}" fill="{color}" />'
             )
-        y += row_height + 2
+            if chromosome_track and chromosome_layer(f):
+                cc = chromosome_color(f, colors)
+                present_chrom.setdefault(chromosome_layer(f), cc)
+                elements.append(
+                    f'<rect x="{x:.1f}" y="{y + row_height:.1f}" width="{w:.1f}" '
+                    f'height="{chrom_h}" fill="{cc}" />'
+                )
+        y += row_height + chrom_h + 2
     return y + 10  # gap after the panel
 
 
-def _draw_legend(elements: list[str], y: float, present: Mapping[str, str], width: int) -> float:
-    elements.append(f'<text x="6" y="{y:.0f}" font-size="10" font-weight="bold">Features</text>')
+def _legend_section(
+    elements: list[str], y: float, title: str, items: Mapping[str, str], width: int
+) -> float:
+    elements.append(f'<text x="6" y="{y:.0f}" font-size="10" font-weight="bold">{title}</text>')
     lx, ly = 6, y + 10
-    for feature, color in sorted(present.items()):
+    for name, color in sorted(items.items()):
         if lx + 150 > width:
             lx, ly = 6, ly + 16
         elements.append(f'<rect x="{lx}" y="{ly:.0f}" width="11" height="11" fill="{color}" />')
-        elements.append(
-            f'<text x="{lx + 15}" y="{ly + 10:.0f}" font-size="9">{_esc(feature)}</text>'
-        )
+        elements.append(f'<text x="{lx + 15}" y="{ly + 10:.0f}" font-size="9">{_esc(name)}</text>')
         lx += 150
     return ly + 24
 
@@ -127,17 +155,21 @@ def render_clusters_svg(
     width: int = 1200,
     row_height: int = 11,
     label_width: int = 220,
+    chromosome_track: bool = True,
 ) -> str:
-    """Render one or more cluster panels, stacked, into a single SVG with a shared legend."""
+    """Render one or more cluster panels, stacked, into a single SVG with shared legends."""
     elements: list[str] = []
     present: dict[str, str] = {}
+    present_chrom: dict[str, str] = {}
     y: float = 12
     for panel in panels:
         y = _draw_panel(
-            elements, y, panel, colors, present,
+            elements, y, panel, colors, present, present_chrom,
             width=width, label_width=label_width, row_height=row_height,
+            chromosome_track=chromosome_track,
         )
-    total_h = _draw_legend(elements, y + 4, present, width)
+    y = _legend_section(elements, y + 4, "Features", present, width)
+    total_h = _legend_section(elements, y + 6, "Chromosomes", present_chrom, width) if present_chrom else y
     body = "\n".join(elements)
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{int(total_h)}" '
@@ -155,6 +187,7 @@ def render_cluster_svg(
     row_height: int = 12,
     label_width: int = 220,
     title: str = "",
+    chromosome_track: bool = True,
 ) -> str:
     """Render a single cluster to an SVG (a one-panel :func:`render_clusters_svg`)."""
     return render_clusters_svg(
@@ -163,4 +196,5 @@ def render_cluster_svg(
         width=svg_width,
         row_height=row_height,
         label_width=label_width,
+        chromosome_track=chromosome_track,
     )
