@@ -209,6 +209,17 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   and the result is identical to serial. Full U2OS (4005 reads, w1001/τ0 overlay) now clusters in
   **~100 s on 8 cores** (≈6.4× speedup), vs >8 min serial / 43 min unoptimized. See the
   "running on a whole sample" runbook in `docs/audit/rearrangement_detection.md` §13.
+- Engine B **community detection** (`cluster --communities`, default on) — in-house weighted
+  **label propagation** subdivides each connected component so a sparse bridge (a noisy
+  multi-chromosome read, or a lone translocation) no longer transitively merges distinct groups.
+  Orientation parities still come from the component-wide union-find, so they stay consistent
+  within each sub-community. On the full U2OS run this dissolved a **1058-read mega-cluster** (it
+  spanned every chromosome — diagnosed as bridge-chaining through 52 noisy ≥3-chromosome reads,
+  whose chromosome layer is scattered slivers, not the large blocks a real complex rearrangement
+  would show) into **clean per-chromosome haplotype groups** (some chromosomes resolve into
+  *multiple* haplotype communities, e.g. chr18 → 148 + 83) and **24 recurrent translocation
+  candidates** (chr4+chr22 ×43, chr18+chr19 ×34, chr13+chr11 ×33, chr1+chr21 ×23, …). 4005 reads →
+  2544 clusters (75 multi-read), no mega-cluster.
 - **`cluster-plot` subcommand** + `core/cluster_plot.py` + `core/io/colors.py`: the package's
   single **read-renderer** (collapsing the legacy `plot-reads`/`cluster-plot`/`telogator-reads-viz`).
   Renders **one cluster (`--cluster-id`) or all clusters stacked in one SVG** (omit `--cluster-id`;

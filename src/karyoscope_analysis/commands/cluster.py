@@ -152,6 +152,14 @@ def _sidecar(output: Path, suffix: str) -> Path:
     "Linux/HPC). 1 = serial.",
 )
 @click.option(
+    "--communities/--no-communities",
+    default=True,
+    show_default=True,
+    help="Subdivide each connected component by label propagation, so a sparse bridge (a noisy "
+    "multi-chromosome read, or a lone translocation) doesn't transitively merge distinct groups "
+    "into one mega-cluster. --no-communities uses plain connected components.",
+)
+@click.option(
     "--weight-method",
     type=click.Choice(["repeat-mask", "idf", "genome-freq", "uniform"]),
     default="repeat-mask",
@@ -207,6 +215,7 @@ def cmd(
     distinctive_weight: float,
     block_min_bp: float,
     workers: int,
+    communities: bool,
     weight_method: str,
     genome_weights_path: Path | None,
     weight_floor: float,
@@ -249,6 +258,7 @@ def cmd(
         distinctive_weight=distinctive_weight,
         block_min_bp=block_min_bp,
         workers=workers,
+        communities=communities,
         weight=weight,
     )
     consensuses = [

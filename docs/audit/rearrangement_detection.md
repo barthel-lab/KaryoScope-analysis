@@ -434,6 +434,25 @@ this pure-Python path.) If a single chromosome bucket is ever too big, a similar
 sub-bucket (MinHash/LSH on the feature multiset) is the next lever — kept in reserve as it is
 *lossy*, unlike the three above.
 
+### Community detection (`--communities`, default on)
+
+Clustering all 4005 reads (connected components) produced a **1058-read mega-cluster spanning
+every chromosome** — chaining returned at scale. Diagnosis: it was *transitive bridge-chaining*,
+not one runaway chromosome — 708 single-chromosome reads glued by 292 two-chromosome reads and
+**52 reads spanning ≥3 chromosomes**. The ≥3-chromosome "hubs" are **noise**, not complex
+rearrangements: their chromosome layer is scattered small slivers (biggest block ~18 kb, most
+3–7 kb, 8–38 runs/read, ambiguous stretches mixed in), unlike the large clean blocks (~150 kb +
+~100 kb) of a real chr4+chr22 translocation read. Blanket-dropping multi-chromosome reads would
+risk genuine signal, so the fix is structure-aware: **weighted label propagation**
+(`_label_propagation`) subdivides each connected component — a read joins the community it shares
+the most overlap weight with, so a sparse bridge attaches to one group instead of merging all.
+Orientation parities still come from the component-wide union-find (consistent within each
+sub-community). Result on full U2OS: the mega-cluster dissolves into clean per-chromosome groups
+(several chromosomes resolve into *multiple* haplotype communities — chr18 → 148 + 83, chr20 →
+105 + 48) and 24 recurrent translocation candidates (chr4+chr22 ×43, chr18+chr19 ×34, chr13+chr11
+×33, chr1+chr21 ×23, …); 4005 reads → 2544 clusters (75 multi-read), no mega-cluster. (Louvain is
+the upgrade if label propagation ever proves too coarse/unstable; it was sufficient here.)
+
 ### Runbook — whole-sample clustering (e.g. on HPC)
 
 Inputs needed (the package + `data/chm13v2_feature_weights.tsv` are committed; the large

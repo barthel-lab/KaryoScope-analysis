@@ -18,7 +18,7 @@ Consensus (seed-anchored majority over the layout) builds on this next.
 from __future__ import annotations
 
 import multiprocessing as mp
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from itertools import islice
@@ -389,28 +389,85 @@ class Cluster:
     orientation_conflict: bool
 
 
+def _label_propagation(
+    node_ids: Sequence[str], edges: Sequence[OverlapEdge], *, max_iter: int = 100
+) -> dict[str, str]:
+    """Weighted, deterministic label propagation → ``{read_id: community_label}``.
+
+    Each read starts in its own community and repeatedly adopts the community with the greatest
+    total edge weight (overlap bp) among its neighbours, tie-broken by the lexicographically
+    smallest label (so it is deterministic and order-independent). Communities never cross
+    connected components; an isolated read keeps its own label. This subdivides the dense
+    per-chromosome / per-haplotype groups while a sparse "bridge" read (a noisy multi-chromosome
+    hub, or a single translocation read linking two groups) joins only its strongest neighbour
+    instead of merging everything into one component.
+    """
+    adj: dict[str, dict[str, float]] = {n: {} for n in node_ids}
+    for edge in edges:
+        if edge.a == edge.b:
+            continue
+        adj[edge.a][edge.b] = adj[edge.a].get(edge.b, 0.0) + edge.overlap_bp
+        adj[edge.b][edge.a] = adj[edge.b].get(edge.a, 0.0) + edge.overlap_bp
+
+    label = {n: n for n in node_ids}
+    order = sorted(node_ids)
+    for _ in range(max_iter):
+        changed = False
+        for node in order:
+            neighbours = adj[node]
+            if not neighbours:
+                continue
+            score: dict[str, float] = defaultdict(float)
+            for nbr, weight in neighbours.items():
+                score[label[nbr]] += weight
+            top = max(score.values())
+            best = min(lbl for lbl, sc in score.items() if sc == top)
+            if best != label[node]:
+                label[node] = best
+                changed = True
+        if not changed:
+            break
+    return label
+
+
 def cluster_reads(
-    reads: Mapping[str, Sequence[Segment]], edges: Sequence[OverlapEdge]
+    reads: Mapping[str, Sequence[Segment]],
+    edges: Sequence[OverlapEdge],
+    *,
+    communities: bool = False,
 ) -> list[Cluster]:
-    """Group reads into connected components, oriented to each component's longest read."""
+    """Group reads into clusters, oriented to each cluster's longest read.
+
+    By default a cluster is a **connected component** of the overlap graph. With
+    ``communities=True``, each component is subdivided by :func:`_label_propagation`, so a sparse
+    bridge (a noisy multi-chromosome hub, or a lone translocation read) no longer transitively
+    merges otherwise-distinct groups into one mega-cluster. Orientation parities come from the
+    component-wide union-find either way, so they stay consistent within each sub-community.
+    """
     dsu = _ParityDSU()
     for read_id in reads:
         dsu.add(read_id)
     for edge in edges:
         dsu.union(edge.a, edge.b, 1 if edge.flipped else 0)
 
-    components: dict[str, list[str]] = {}
-    for read_id in reads:
-        root, _ = dsu.find(read_id)
-        components.setdefault(root, []).append(read_id)
+    groups: dict[str, list[str]] = {}
+    if communities:
+        label = _label_propagation(list(reads), edges)
+        for read_id in reads:
+            groups.setdefault(label[read_id], []).append(read_id)
+    else:
+        for read_id in reads:
+            root, _ = dsu.find(read_id)
+            groups.setdefault(root, []).append(read_id)
 
     def total_bp(read_id: str) -> int:
         return sum(length for _, length in reads[read_id])
 
     clusters: list[Cluster] = []
-    for root, members in components.items():
+    for members in groups.values():
         seed = max(members, key=lambda r: (total_bp(r), r))
         _, seed_parity = dsu.find(seed)
+        seed_root, _ = dsu.find(seed)
         oriented = {}
         for member in members:
             _, parity = dsu.find(member)
@@ -422,7 +479,7 @@ def cluster_reads(
                 seed=seed,
                 reversed_relative_to_seed=oriented,
                 size=len(members),
-                orientation_conflict=root in dsu.conflicts,
+                orientation_conflict=seed_root in dsu.conflicts,
             )
         )
     clusters.sort(key=lambda c: (-c.size, c.seed))
@@ -575,6 +632,7 @@ def assemble(
     distinctive_weight: float = 0.15,
     block_min_bp: float = 0.0,
     workers: int = 1,
+    communities: bool = False,
     weight: Mapping[str, float] | None = None,
 ) -> tuple[list[Cluster], list[OverlapEdge]]:
     """Build the overlap graph and cluster — returns ``(clusters, edges)``."""
@@ -592,4 +650,4 @@ def assemble(
         workers=workers,
         weight=weight,
     )
-    return cluster_reads(reads, edges), edges
+    return cluster_reads(reads, edges, communities=communities), edges

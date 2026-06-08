@@ -74,6 +74,40 @@ def test_block_min_bp_only_compares_reads_sharing_a_major_feature():
     assert {tuple(sorted((e.a, e.b))) for e in edges} == {tuple(sorted((e.a, e.b))) for e in full}
 
 
+# ----------------------------------------------------------------- community detection
+def _edge(a, b, w, flipped=False):
+    return asm.OverlapEdge(a, b, w, 1.0, w, "dovetail", flipped)
+
+
+def test_label_propagation_splits_bridged_cliques():
+    # two triangles {a,b,c} and {x,y,z}, strongly internally connected, joined by ONE weak
+    # bridge edge c-x (a noisy hub link). LP should keep two communities; CC would merge them.
+    strong, weak = 10000.0, 1100.0
+    edges = [
+        _edge("a", "b", strong), _edge("a", "c", strong), _edge("b", "c", strong),
+        _edge("x", "y", strong), _edge("x", "z", strong), _edge("y", "z", strong),
+        _edge("c", "x", weak),  # the bridge
+    ]
+    label = asm._label_propagation(["a", "b", "c", "x", "y", "z"], edges)
+    assert label["a"] == label["b"] == label["c"]
+    assert label["x"] == label["y"] == label["z"]
+    assert label["a"] != label["x"]  # two communities, not one
+
+
+def test_cluster_reads_communities_vs_components():
+    reads = {n: [("P", 1000)] for n in ("a", "b", "c", "x", "y", "z")}  # lengths only matter for seed
+    strong, weak = 10000.0, 1100.0
+    edges = [
+        _edge("a", "b", strong), _edge("a", "c", strong), _edge("b", "c", strong),
+        _edge("x", "y", strong), _edge("x", "z", strong), _edge("y", "z", strong),
+        _edge("c", "x", weak),
+    ]
+    # connected components: one cluster of 6
+    assert [c.size for c in asm.cluster_reads(reads, edges)] == [6]
+    # communities: two clusters of 3
+    assert sorted(c.size for c in asm.cluster_reads(reads, edges, communities=True)) == [3, 3]
+
+
 # ----------------------------------------------------------------- parallel == serial
 def test_workers_match_serial():
     reads = {
