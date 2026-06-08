@@ -80,10 +80,13 @@ def _sidecar(output: Path, suffix: str) -> Path:
 )
 @click.option(
     "--gap-factor",
-    default=0.01,
+    default=0.1,
     show_default=True,
     type=float,
-    help="Per-bp gap cost: skipping a segment costs gap_factor x its length.",
+    help="Per-bp cost of any unmatched bp: skipping a segment (a spacing/distance difference) "
+    "and the length difference of a matched feature. Higher = reads must agree more strictly on "
+    "feature order/spacing/length. ~0.1 balances finer splitting against keeping real "
+    "(arm-length-varying) clusters; 0.3+ over-prunes.",
 )
 @click.option("--match", default=1.0, show_default=True, type=float, help="Exact-match score.")
 @click.option(

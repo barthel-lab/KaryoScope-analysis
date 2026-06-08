@@ -614,22 +614,33 @@ def consensus_layout(
 
     raw: list[tuple[str, bool, bool, list[Interval]]] = []
     for member in cluster.members:
-        reversed_ = cluster.reversed_relative_to_seed[member]
-        segments = reverse_segments(reads[member]) if reversed_ else list(reads[member])
-        cum = _cumulative_bp(segments)
         if member == cluster.seed:
-            placed_segs = [(cum[i], cum[i + 1], segments[i][0]) for i in range(len(segments))]
+            segments = list(reads[member])
+            cum = _cumulative_bp(segments)
+            raw.append(
+                (member, True, False, [(cum[i], cum[i + 1], segments[i][0]) for i in range(len(segments))])
+            )
+            continue
+        # Orient each member by whichever orientation aligns *better* to the seed. The parity
+        # from the cluster's union-find is global and can disagree with the direct best fit, which
+        # is what the plot should show — so trust the alignment for placement/display.
+        forward = list(reads[member])
+        reverse = reverse_segments(reads[member])
+        aln_f = align_local(forward, seed_segments, sub_score=scorer, gap_factor=gap_factor)
+        aln_r = align_local(reverse, seed_segments, sub_score=scorer, gap_factor=gap_factor)
+        segments, aln, reversed_ = (
+            (reverse, aln_r, True) if aln_r.score > aln_f.score else (forward, aln_f, False)
+        )
+        cum = _cumulative_bp(segments)
+        if aln.columns:
+            mp = _anchor_map([(cum[mi], seed_cum[sj]) for mi, sj in aln.columns])
+            placed_segs = [
+                (round(mp(cum[i])), round(mp(cum[i + 1])), segments[i][0])
+                for i in range(len(segments))
+            ]
         else:
-            aln = align_local(segments, seed_segments, sub_score=scorer, gap_factor=gap_factor)
-            if aln.columns:
-                mp = _anchor_map([(cum[mi], seed_cum[sj]) for mi, sj in aln.columns])
-                placed_segs = [
-                    (round(mp(cum[i])), round(mp(cum[i + 1])), segments[i][0])
-                    for i in range(len(segments))
-                ]
-            else:
-                placed_segs = [(cum[i], cum[i + 1], segments[i][0]) for i in range(len(segments))]
-        raw.append((member, member == cluster.seed, reversed_, placed_segs))
+            placed_segs = [(cum[i], cum[i + 1], segments[i][0]) for i in range(len(segments))]
+        raw.append((member, False, reversed_, placed_segs))
 
     starts = [s for *_, segs in raw for s, _e, _f in segs]
     ends = [e for *_, segs in raw for _s, e, _f in segs]

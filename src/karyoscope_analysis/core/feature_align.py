@@ -8,10 +8,10 @@ aligns two such sequences with a Smith-Waterman **local** alignment:
   unrelated, with ``novel`` neutral (built from the hierarchy by
   :func:`hierarchy_substitution`, but the aligner itself is hierarchy-agnostic);
 * match reward weighted by ``min(len_a, len_b)`` -- bp-weighted, so big shared blocks
-  dominate and specks contribute ~nothing, and length-change-lenient (the length difference
-  is neither rewarded nor penalized);
-* a linear per-bp gap -- skipping a segment costs ``gap_factor * its length``, so skipping a
-  large structural block is penalized in proportion;
+  dominate and specks contribute ~nothing -- minus a ``gap_factor`` charge on the length
+  *difference* ``|len_a - len_b|``, so matched features must agree on length;
+* a linear per-bp gap -- skipping a segment costs ``gap_factor * its length`` (a spacing /
+  distance difference), so ``gap_factor`` is the single strictness knob over unmatched bp;
 * the better of the two orientations of B (a read and its reverse get the same score).
 
 The result classifies the overlap as dovetail / containment / internal -- the input to the
@@ -68,9 +68,13 @@ def align_local(
     """Smith-Waterman local alignment of two feature-segment sequences (B as given).
 
     ``sub_score(fa, fb)`` is the per-bp base score; a matched column scores
-    ``sub_score * min(len_a, len_b)``. A gap (skipping a segment of length L) costs
-    ``gap_factor * L``. Returns the highest-scoring local alignment (empty if none is
-    positive).
+    ``sub_score * min(len_a, len_b) - gap_factor * |len_a - len_b|`` — the shared length is
+    rewarded and the **length mismatch is charged as a gap**, so ``gap_factor`` is the single
+    knob governing *all* unmatched bp: a skipped segment (cost ``gap_factor * L``, i.e. a spacing
+    /distance difference) and the length difference of a matched feature. Order is enforced by the
+    colinear alignment, so ``gap_factor`` (with ``min_identity`` downstream) controls how strictly
+    two reads must agree on feature order, spacing, and length. Returns the highest-scoring local
+    alignment (empty if none is positive).
     """
     n, m = len(a), len(b)
     # h[i][j] = best local score ending at A[i-1], B[j-1]; ptr: 0 stop, 1 diag, 2 up, 3 left.
@@ -82,7 +86,7 @@ def align_local(
         fa, la = a[i - 1]
         for j in range(1, m + 1):
             fb, lb = b[j - 1]
-            diag = h[i - 1][j - 1] + sub_score(fa, fb) * min(la, lb)
+            diag = h[i - 1][j - 1] + sub_score(fa, fb) * min(la, lb) - gap_factor * abs(la - lb)
             up = h[i - 1][j] - gap_factor * la
             left = h[i][j - 1] - gap_factor * lb
             cell = 0.0

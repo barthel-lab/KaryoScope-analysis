@@ -67,10 +67,13 @@ def test_length_weighting_favours_large_blocks():
     assert big.score > small.score  # 100 vs 2
 
 
-def test_length_change_is_lenient():
-    # matching arm(12k) to arm(15k) scores min(12k,15k); the 3k difference is not penalized.
-    aln = fa.align_local([("X", 12000)], [("X", 15000)], sub_score=EXACT, gap_factor=1.0)
-    assert aln.score == pytest.approx(12000.0)
+def test_length_mismatch_is_charged_as_a_gap():
+    # matching X(12k) to X(15k): reward min(12k,15k) minus gap_factor*|12k-15k| (the length
+    # difference is a gap), so gap_factor controls how strictly lengths must agree.
+    strict = fa.align_local([("X", 12000)], [("X", 15000)], sub_score=EXACT, gap_factor=1.0)
+    assert strict.score == pytest.approx(12000.0 - 3000.0)  # 12000 - 1.0*3000 = 9000
+    lenient = fa.align_local([("X", 12000)], [("X", 15000)], sub_score=EXACT, gap_factor=0.01)
+    assert lenient.score == pytest.approx(12000.0 - 30.0)  # small penalty at low gap_factor
 
 
 def test_gap_bridges_an_inserted_block_when_cheap():

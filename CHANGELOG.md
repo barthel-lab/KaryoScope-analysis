@@ -242,6 +242,17 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   translocation candidates (chr4+chr22 ×34, chr13+chr11 ×33, chr14+chr22 ×28, chr21+chr1 ×23, …).
   `cluster-plot` titles now list **all** major chromosomes (`chr4+chr22`), so translocations are
   labeled as such.
+- Engine B aligner now enforces **feature order, spacing, and length**, not just shared content.
+  A matched column scores `sub·min(len) − gap_factor·|len_a − len_b|` — the length mismatch is
+  charged as a gap — so `gap_factor` is the single knob over *all* unmatched bp (a skipped segment
+  = a spacing difference, and a matched feature's length difference), with `min_identity` as the
+  flexibility dial. Order was always enforced (the alignment is colinear). Default `--gap-factor`
+  raised 0.01 → **0.1**: on full U2OS this tightens the under-splitting (largest cluster 131 → 50,
+  53 → 71 clusters) while *keeping* the recurrent translocations (14 → 16); 0.3 over-prunes
+  (translocations collapse, because a flat penalty punishes legitimate arm-length capture
+  variation). Also a **layout orientation fix**: `consensus_layout` now orients each read by its
+  best-fitting alignment to the seed (try both), instead of the union-find parity that can
+  disagree — fixing reads drawn flipped (e.g. by a misplaced `ct`).
 - **`cluster-plot` subcommand** + `core/cluster_plot.py` + `core/io/colors.py`: the package's
   single **read-renderer** (collapsing the legacy `plot-reads`/`cluster-plot`/`telogator-reads-viz`).
   Renders **one cluster (`--cluster-id`) or all clusters stacked in one SVG** (omit `--cluster-id`;
