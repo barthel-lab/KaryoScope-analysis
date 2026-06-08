@@ -32,6 +32,11 @@ from karyoscope_analysis.core.feature_align import (
 )
 
 
+def _structural(feature: str) -> str:
+    """The structural layer of a (possibly composite) label: ``chr13:aSat`` -> ``aSat``."""
+    return feature.split(":", 1)[1] if ":" in feature else feature
+
+
 def idf_weights(reads: Mapping[str, Sequence[Segment]], *, floor: float = 0.1) -> dict[str, float]:
     """Per-feature weight ``max(floor, 1 - document_frequency)`` over the read set.
 
@@ -40,19 +45,24 @@ def idf_weights(reads: Mapping[str, Sequence[Segment]], *, floor: float = 0.1) -
     Engine B answer to repeat-driven chaining: ubiquitous interspersed repeats (LINE/SINE/…)
     stop driving overlaps, so edges must rest on distinctive structure. ``floor`` keeps even
     ubiquitous features slightly informative (and avoids fully disconnecting the graph).
+
+    Keyed by the **structural layer** so it is meaningful on ``chromosome:structural`` overlays
+    (otherwise every chromosome's copy of a feature is counted as a distinct rare feature).
     """
     n = len(reads)
     if n == 0:
         return {}
     document_frequency: Counter[str] = Counter()
     for segments in reads.values():
-        for feature in {feat for feat, _ in segments}:
+        for feature in {_structural(feat) for feat, _ in segments}:
             document_frequency[feature] += 1
     return {feat: max(floor, 1.0 - count / n) for feat, count in document_frequency.items()}
 
 
 def _weight(weight: Mapping[str, float] | None, feature: str) -> float:
-    return weight.get(feature, 1.0) if weight is not None else 1.0
+    """Weight for a feature, looked up by its **structural layer** (so weighting works on
+    ``chromosome:structural`` composite labels). Unknown features default to ``1.0``."""
+    return weight.get(_structural(feature), 1.0) if weight is not None else 1.0
 
 
 def _weighted_sub_score(sub_score: SubScore, weight: Mapping[str, float] | None) -> SubScore:

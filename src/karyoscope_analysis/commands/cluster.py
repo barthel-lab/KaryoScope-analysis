@@ -21,6 +21,7 @@ from karyoscope_analysis.core.feature_align import (
     to_segments,
 )
 from karyoscope_analysis.core.feature_vocab import FeatureHierarchy
+from karyoscope_analysis.core.genome_weights import load_structural_weights
 from karyoscope_analysis.core.io.bed import read_annotation_bed
 
 logger = logging.getLogger(__name__)
@@ -118,12 +119,21 @@ def _sidecar(output: Path, suffix: str) -> Path:
 )
 @click.option(
     "--weight-method",
-    type=click.Choice(["repeat-mask", "idf", "uniform"]),
+    type=click.Choice(["repeat-mask", "idf", "genome-freq", "uniform"]),
     default="repeat-mask",
     show_default=True,
     help="Per-feature weighting (anti-chaining): 'repeat-mask' zeroes genome-wide "
-    "interspersed-repeat features (LINE/SINE/... + nonrepeat) so overlaps rest on "
-    "distinctive structure; 'idf' down-weights by frequency; 'uniform' weights all equally.",
+    "interspersed-repeat features (LINE/SINE/... + nonrepeat); 'genome-freq' weights by "
+    "information content from the reference genome (--genome-weights; down-weights ubiquitous "
+    "features like arm, keeps rare ones like telomere); 'idf' down-weights by read frequency; "
+    "'uniform' weights all equally. All operate on the structural layer of composite labels.",
+)
+@click.option(
+    "--genome-weights",
+    "genome_weights_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Weights TSV from `genome-weights` (required for --weight-method genome-freq).",
 )
 @click.option(
     "--weight-floor",
@@ -160,6 +170,7 @@ def cmd(
     min_identity: float,
     min_jaccard: float,
     weight_method: str,
+    genome_weights_path: Path | None,
     weight_floor: float,
     cross_chromosome_penalty: float,
     output: Path,
@@ -181,6 +192,10 @@ def cmd(
         weight: dict[str, float] | None = dict.fromkeys(masked, 0.0)
     elif weight_method == "idf":
         weight = asm.idf_weights(reads, floor=weight_floor)
+    elif weight_method == "genome-freq":
+        if genome_weights_path is None:
+            raise click.UsageError("--weight-method genome-freq requires --genome-weights")
+        weight = load_structural_weights(genome_weights_path)
     else:
         weight = None
 

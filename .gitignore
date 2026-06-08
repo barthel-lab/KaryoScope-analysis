@@ -67,3 +67,9 @@ tmp/
 
 # Keep committed test fixtures (override any ignores above)
 !tests/data/**
+plots_preview/
+
+# CHM13 genome-wide reference annotations (~475 MB, per-base smoothed) — too large for git;
+# the committed data/chm13v2_feature_weights.tsv is the derived artifact (regenerate with
+# `karyoscope-analysis genome-weights`).
+data/raw_bed/chm13v2.0.*

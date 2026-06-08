@@ -302,3 +302,88 @@ emitting `chr13:canonical_telomere` etc.) is the fix:
   `autosome` blob (largest 84); the **strict** rule above resolved it. (Grading ambiguous
   labels through the chromosome hierarchy — `chr5` is consistent with its parent `autosome` —
   is a possible future refinement.)
+
+## 11. Pre-overlay denoise — hierarchical binning (`bin-annotations`)
+
+The raw featureset BEDs are extremely fragmented: telogator's per-base annotation shreds a
+single biological region into a chaotic alternation of tiny segments (e.g. an rDNA array
+read as hundreds of interleaved 1–93 bp `rDNA`/`ct`/`novel` slivers). That fragmentation
+propagates through the overlay into the feature-segment sequences Engine B aligns and the
+read plots, making both noisy. `bin-annotations` is a **rolling-window mode filter** that
+runs on each featureset BED *before* `overlay-annotations` to collapse this noise while
+preserving the C4 partition and the sequence length.
+
+**Why a hierarchical vote, not a flat mode.** A flat mode is fragile when related siblings
+split their vote: a window of `aSat` 20 / `bSat` 40 / `arm` 40 is 60 % satellite, yet a flat
+count hands it to `arm`. So the per-feature window bp propagate **up the database tree**, and
+the call descends from the root into the dominant child while its subtree holds a majority,
+stopping at the deepest node that still does (`core/annotation_binning.py`). The same window
+descends `categorized → centromeric` (60 of 100) and — with the default node-relative
+threshold — on to `bSat` (40 of the **60** at `centromeric`); when subtypes split evenly it
+honestly stops at the `centromeric` ancestor instead of guessing a leaf.
+
+- **Knobs.** `--majority-fraction` (τ, default 0.5); `--threshold-scope` = `node` (τ relative
+  to the current node — the conditional majority, more specific, the default) or `window` (τ
+  relative to the whole window — conservative, climbs to internal nodes more readily). The
+  node scope can descend to a leaf holding < τ of the whole window when the top-level split is
+  near-even; that is an inherently ambiguous boundary, and τ tunes it.
+- **Boundaries stay sharp.** If no top-level group has a majority (e.g. a clean 50/50 boundary
+  between two unrelated features), the descent falls back to flat plurality (ties toward the
+  deeper label) rather than emitting the generic root — so binning denoises interiors without
+  smearing a vague label across every boundary.
+- **`novel`** votes as a top-level leaf (a novel-dominated window stays `novel`); every other
+  out-of-tree label is the C2 error.
+
+**Validation (U2OS v2, `region`).** Strong fragmentation reduction: at window 101 / node /
+τ=0.5, **1,375,812 → 218,558 intervals (6.3×)**, the worst read **6,812 → 896 (7.6×)**, its
+shredded rDNA/ct alternation resolved into coherent multi-kb `rDNA`/`ct` blocks; at window
+1001 / τ=0, **→ 29,891 intervals (46×)**. Internal-node calls (`centromeric`, `alpha_hor`,
+`arm`) appear where subtypes/arms abut at τ>0; **τ=0 always descends to a specific leaf**
+(hierarchy-aware plurality), which is what we want for the chromosome layer (always a specific
+`chr*`, never an ambiguous `autosome`/`categorized`).
+
+**O(intervals), window-independent.** Between the O(intervals) breakpoints where the window's
+entering/leaving base crosses an interval edge, the per-feature counts are linear in the step
+offset, so the descent is evaluated O(1) times per segment via `_descent_run`, which returns a
+*conservative* lower bound on how many forward steps the call stays constant (recompute-and-
+merge keeps the output exact regardless of how tight the bound is). Cost no longer grows with
+the window: ~23–28 s for the full `region` BED at *either* window 101 or 1001, vs ~160 s for
+the original per-base version. A per-base reference (`bin_intervals_naive`) pins the fast path
+in a 600-case property test (τ ∈ {0 … 1}, both scopes), and the fast output is byte-identical
+to the original implementation on the real U2OS `region` BED.
+
+## 12. Feature weighting from the reference genome (`genome-weights`, `--weight-method genome-freq`)
+
+The over-merging in §10/the arm-star problem is, at root, clustering on a *ubiquitous* feature:
+the chromosome **arm** is shared by every read of a chromosome, so sharing it carries little
+information. Read-frequency (`idf`) can't fix this — long telomere reads are uniformly
+arm-dominated. The principled signal is **genome-wide coverage**: `core/genome_weights.py`
+tallies each feature's bp in the annotated CHM13 reference (one C4 BED per featureset), takes
+its fraction `p` of its featureset's partition, and uses information content `-ln(p)` scaled to
+`(0, 1]` by the rarest feature across all featuresets. So:
+
+| feature | genome fraction | weight |
+| --- | --- | --- |
+| `q_arm` | 56.8 % | 0.027 |
+| `p_arm` | 26.3 % | 0.064 |
+| `ct` | 8.5 % | 0.119 |
+| `aSat` | 0.015 % | 0.423 |
+| `canonical_telomere` | 0.0028 % | 0.505 |
+| `nonsubtelomeric` | 99.8 % | 0.0001 |
+
+This crushes the arm while keeping `canonical_telomere` informative (genome-rare) — telomere is
+*not* filler, contrary to a first guess; the genome decides. Because τ=0 binning emits the
+**leaves** (`p_arm`/`q_arm`, not the internal `arm`), the down-weighting lands on the labels we
+actually produce. A latent bug is fixed alongside: `_weight`/`idf_weights` now key on the
+**structural layer** of `chromosome:structural` labels, so weighting applies on composite
+overlays at all (previously `repeat-mask`/`idf` silently no-op'd there).
+
+**Validation (U2OS, w1001/τ0 binned, chr-tel-sat overlay, 49-read subset, `--weight-method
+genome-freq`).** Clustering ran in ~11 s (vs ~460 s on the w101 binned overlay — w1001 cuts the
+per-read segment count that drives the O(N²·L²) aligner). The multi-read clusters are now
+chromosome-coherent and surface **recurrent candidate translocations**: a chr4-centric cluster
+with 3 reads showing chr4+chr22, and a 2-read chr12+chr9 cluster — where before (uniform
+weights) reads were glued by a shared `p_arm` block into a star whose consensus just echoed the
+seed. Residual limitations unchanged: connected-components can still link a pure-arm read to a
+translocation read through the shared arm (community detection, open), and the seed-anchored
+consensus is still v1.

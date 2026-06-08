@@ -13,6 +13,26 @@ PARAMS = dict(
 )
 
 
+# ----------------------------------------------------------------- weighting (structural layer)
+def test_weight_looks_up_structural_layer():
+    w = {"q_arm": 0.03, "canonical_telomere": 0.5}
+    assert asm._weight(w, "chr1:q_arm") == 0.03  # composite -> structural lookup
+    assert asm._weight(w, "q_arm") == 0.03  # bare label still works
+    assert asm._weight(w, "chrX:canonical_telomere") == 0.5
+    assert asm._weight(w, "chr2:p_arm") == 1.0  # unknown -> default 1.0
+    assert asm._weight(None, "chr1:q_arm") == 1.0  # no weighting
+
+
+def test_idf_weights_keyed_by_structural_layer():
+    reads = {
+        "a": [("chr1:q_arm", 100), ("chr1:aSat", 50)],
+        "b": [("chr2:q_arm", 100), ("chr2:bSat", 50)],
+    }
+    w = asm.idf_weights(reads)
+    assert "q_arm" in w and "chr1:q_arm" not in w  # structural keys, not composites
+    assert w["q_arm"] < w["aSat"]  # q_arm in both reads (ubiquitous), aSat in one
+
+
 # ----------------------------------------------------------------- overlap graph
 def test_dovetail_makes_an_edge():
     reads = {

@@ -47,6 +47,30 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   `telomere_like`, `arm_multigroup1`→`arm`, `array_multigroup1`→`array`,
   `acrocentric_multigroup1`→`acrocentric`, `noncentromeric`→`rDNA`). Loaded via
   `load_builtin_preset`; validated against the hierarchy.
+- **`bin-annotations` subcommand** + `core/annotation_binning.py`: a **hierarchy-aware
+  rolling-window mode filter**, run *before* `overlay-annotations` to denoise a single
+  featureset BED. Each base's feature is replaced by the locally dominant feature in a
+  centered window (default 101 bp, clipped at sequence ends; output length and the C4
+  partition are preserved). The vote is **not flat** — per-feature window bp propagate up
+  the database tree and the call is found by descending from the root into the dominant
+  child while its subtree holds a majority, stopping at the deepest node that still does;
+  so related siblings (e.g. `aSat`/`bSat` under `centromeric`) reinforce each other rather
+  than splitting their vote and losing to an unrelated minority, and a split among subtypes
+  honestly reports their ancestor. Knobs: `--majority-fraction` (τ, default 0.5; **0 = always
+  descend to a specific leaf**, no internal/ambiguous labels) and
+  `--threshold-scope` (`node` = conditional majority relative to the current node, more
+  specific [default]; `window` = relative to the whole window, conservative); a window with
+  no top-level majority falls back to flat plurality (keeps clean boundaries sharp). `novel`
+  votes as a top-level leaf; every other label must be in the featureset (C2). Streams one
+  sequence at a time (`O(one sequence)` memory), atomic output. Strongly fragmentation-
+  reducing on real data (U2OS region: 1.38M → 219k intervals at window 101, 6.3×; → 30k at
+  window 1001, 46×). **O(intervals) and window-independent**: between the O(intervals)
+  breakpoints where the window's entering/leaving base crosses an interval edge the per-feature
+  counts are linear, so the descent is evaluated O(1) times per segment (a conservative
+  "constant for the next N steps" bound; recompute-and-merge keeps it exact) — cost no longer
+  grows with the window (U2OS region ~23–28 s at *either* window 101 or 1001, vs ~160 s for the
+  original per-base version). A per-base reference (`bin_intervals_naive`) pins the fast path in
+  a 600-case property test (τ ∈ {0, …, 1}, both scopes).
 - **`overlay-annotations` subcommand** (replaces `KaryoScope_merge_beds.py`): a
   **single-pass, streaming k-way overlay**. It reads every per-featureset BED
   concurrently and sweeps a line across the union of track boundaries per `seq_id`,
@@ -150,6 +174,20 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   composite splits it into
   clean per-chromosome clusters (largest 18) with multi-chromosome clusters surfacing as
   candidate translocations. See `docs/audit/rearrangement_detection.md` §10.
+- **`genome-weights` subcommand** + `core/genome_weights.py`: per-feature **information-content
+  weights from the annotated CHM13 reference** (one C4 BED per featureset). Tallies each
+  feature's genome bp, takes its fraction `p` of its featureset's partition, and writes
+  `-ln(p)` scaled to `(0, 1]` by the rarest feature across all featuresets (ubiquitous → ~0,
+  rare → 1). New `cluster --weight-method genome-freq --genome-weights <tsv>` applies them.
+  This is the principled answer to *structural* chaining (read-frequency `idf` couldn't
+  separate the drivers): genome-wide, `q_arm`/`p_arm` cover 57%/26% of the genome → weight
+  0.027/0.064 (crushed), while `canonical_telomere` covers 0.003% → weight 0.51 (kept
+  informative). **Also fixes a latent bug:** `_weight`/`idf_weights` now key on the
+  **structural layer** of `chromosome:structural` labels, so weighting actually applies on
+  composite overlays (previously `repeat-mask`/`idf` silently no-op'd there). Validated on the
+  U2OS w1001/τ0 binned subset: clusters become chromosome-coherent and recurrent
+  candidate translocations surface (chr4+chr22 across 3 reads; chr12+chr9 across 2), where
+  before reads were glued by shared `p_arm` with a meaningless consensus.
 - **`cluster-plot` subcommand** + `core/cluster_plot.py` + `core/io/colors.py`: the package's
   single **read-renderer** (collapsing the legacy `plot-reads`/`cluster-plot`/`telogator-reads-viz`).
   Renders **one cluster (`--cluster-id`) or all clusters stacked in one SVG** (omit `--cluster-id`;
