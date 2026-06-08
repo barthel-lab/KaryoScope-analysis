@@ -188,6 +188,16 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   U2OS w1001/τ0 binned subset: clusters become chromosome-coherent and recurrent
   candidate translocations surface (chr4+chr22 across 3 reads; chr12+chr9 across 2), where
   before reads were glued by shared `p_arm` with a meaningless consensus.
+- Engine B **distinctive-overlap edge criterion** (`cluster --min-distinctive-bp`,
+  `--distinctive-weight`) — the final anti-arm-chaining lever. An edge now also requires a
+  minimum bp of matched *distinctive* features (weight ≥ `--distinctive-weight`, default 0.15),
+  so an overlap explained only by filler (a shared chromosome arm) is rejected even though its
+  weighted overlap is large (huge arm block × tiny weight). Genome-frequency weighting alone
+  left ~150 kb arm blocks clearing the weighted-overlap floor; this closes that gap. Validated
+  on the U2OS w1001/τ0 subset at `--min-distinctive-bp 1000`: the chr4 arm-star dissolves to
+  singletons and the all-`p_arm` chr5 read drops out of the chr5 cluster, leaving three
+  structurally-justified clusters (chr12+chr9; chr20; chr5+`canonical_telomere`). Off by default
+  (0); recommended with a weighting method.
 - **`cluster-plot` subcommand** + `core/cluster_plot.py` + `core/io/colors.py`: the package's
   single **read-renderer** (collapsing the legacy `plot-reads`/`cluster-plot`/`telogator-reads-viz`).
   Renders **one cluster (`--cluster-id`) or all clusters stacked in one SVG** (omit `--cluster-id`;

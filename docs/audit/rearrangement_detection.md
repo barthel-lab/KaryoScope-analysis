@@ -384,6 +384,21 @@ per-read segment count that drives the O(N²·L²) aligner). The multi-read clus
 chromosome-coherent and surface **recurrent candidate translocations**: a chr4-centric cluster
 with 3 reads showing chr4+chr22, and a 2-read chr12+chr9 cluster — where before (uniform
 weights) reads were glued by a shared `p_arm` block into a star whose consensus just echoed the
-seed. Residual limitations unchanged: connected-components can still link a pure-arm read to a
-translocation read through the shared arm (community detection, open), and the seed-anchored
-consensus is still v1.
+seed. **Distinctive-overlap edge criterion (`--min-distinctive-bp`).** Genome-freq weighting alone
+didn't fully kill arm-chaining: `p_arm` weight 0.064 × a shared 150 kb arm block ≈ 9,600
+weighted bp, still above the overlap floor, so pure-arm reads still formed edges. The fix is to
+require an edge to carry a minimum bp of matched **distinctive** features (weight ≥
+`--distinctive-weight`, default 0.15 — above `arm`/`ct`/`p_arm`/`q_arm`, below the satellites and
+telomere); an overlap built only of filler scores 0 here and is rejected. Crucially the bar must
+be **small** (~1 kb): a real same-chromosome-arm translocation pair (cluster_2, chr12 q_arm +
+chr9 p_arm) shares only ~2 kb of distinctive `mon`/`ITS`, whereas a pure-arm interloper shares 0.
+
+Validated (U2OS w1001/τ0 subset, genome-freq, `--min-distinctive-bp 1000`): the chr4 arm-star
+dissolves to singletons, and the all-`p_arm` chr5 read (which had no telomere) drops out of the
+chr5 cluster, leaving three structurally-justified pairs — chr12+chr9 (translocation), chr20,
+and chr5+`canonical_telomere`. This matches a read-by-read maintainer review of the plots.
+
+Residual limitations: connected-components can still in principle link reads through a *rare*
+shared feature (community detection remains a possible refinement), and — the next workstream —
+the layout is a single seed-relative offset per read (so matching features drift in the plot
+rather than stacking) and the consensus spans only the seed, not the union of all reads.

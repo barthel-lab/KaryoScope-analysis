@@ -33,6 +33,23 @@ def test_idf_weights_keyed_by_structural_layer():
     assert w["q_arm"] < w["aSat"]  # q_arm in both reads (ubiquitous), aSat in one
 
 
+# ----------------------------------------------------------------- distinctive overlap
+def test_min_distinctive_bp_rejects_filler_only_overlap():
+    # x's suffix == y's prefix == a big down-weighted "arm" block (a filler dovetail).
+    reads = {
+        "x": [("aSat", 400), ("arm", 5000)],
+        "y": [("arm", 5000), ("bSat", 400)],
+    }
+    weight = {"arm": 0.03, "aSat": 0.5, "bSat": 0.5}  # arm = filler
+    common = dict(
+        sub_score=EXACT, gap_factor=0.01, min_overlap_bp=1, min_identity=0.5, weight=weight
+    )
+    # without the distinctive criterion the shared arm alone makes an edge
+    assert asm.build_overlap_graph(reads, **common)
+    # requiring 100 bp of matched distinctive content (weight >= 0.15) -> arm doesn't count -> no edge
+    assert not asm.build_overlap_graph(reads, min_distinctive_bp=100, **common)
+
+
 # ----------------------------------------------------------------- overlap graph
 def test_dovetail_makes_an_edge():
     reads = {

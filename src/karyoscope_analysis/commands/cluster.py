@@ -118,6 +118,22 @@ def _sidecar(output: Path, suffix: str) -> Path:
     help="Feature-set Jaccard prefilter (0 = off).",
 )
 @click.option(
+    "--min-distinctive-bp",
+    default=0.0,
+    show_default=True,
+    type=float,
+    help="Minimum bp of matched DISTINCTIVE features (weight >= --distinctive-weight) for an "
+    "edge (0 = off). Rejects overlaps explained only by filler like a shared chromosome arm "
+    "(anti-chaining); use with a weighting method.",
+)
+@click.option(
+    "--distinctive-weight",
+    default=0.15,
+    show_default=True,
+    type=float,
+    help="Weight threshold above which a feature counts as distinctive (for --min-distinctive-bp).",
+)
+@click.option(
     "--weight-method",
     type=click.Choice(["repeat-mask", "idf", "genome-freq", "uniform"]),
     default="repeat-mask",
@@ -169,6 +185,8 @@ def cmd(
     min_overlap_bp: int,
     min_identity: float,
     min_jaccard: float,
+    min_distinctive_bp: float,
+    distinctive_weight: float,
     weight_method: str,
     genome_weights_path: Path | None,
     weight_floor: float,
@@ -207,6 +225,8 @@ def cmd(
         min_overlap_bp=min_overlap_bp,
         min_identity=min_identity,
         min_jaccard=min_jaccard,
+        min_distinctive_bp=min_distinctive_bp,
+        distinctive_weight=distinctive_weight,
         weight=weight,
     )
     consensuses = [

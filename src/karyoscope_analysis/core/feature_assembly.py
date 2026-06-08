@@ -91,6 +91,29 @@ def _weighted_overlap(
     return total
 
 
+def _distinctive_overlap(
+    columns: Sequence[tuple[int, int]],
+    a: Sequence[Segment],
+    b: Sequence[Segment],
+    weight: Mapping[str, float] | None,
+    distinctive_weight: float,
+) -> float:
+    """Raw bp of matched columns whose feature is *distinctive* (weight ≥ ``distinctive_weight``).
+
+    The anti-arm-chaining criterion: an overlap built only of filler (low-weight ``arm``/``ct``)
+    contributes 0 here, so it fails ``min_distinctive_bp`` even though its *weighted* overlap is
+    large (a huge arm block times a small weight). Distinctiveness uses the structural-layer weight
+    (via :func:`_weight`); with no weighting every feature counts (so this reduces to raw bp).
+    """
+    total = 0.0
+    for i, j in columns:
+        fa, la = a[i]
+        fb, lb = b[j]
+        if min(_weight(weight, fa), _weight(weight, fb)) >= distinctive_weight:
+            total += min(la, lb)
+    return total
+
+
 @dataclass(frozen=True)
 class OverlapEdge:
     """An accepted proper overlap between two reads."""
@@ -113,16 +136,20 @@ def build_overlap_graph(
     min_overlap_bp: float = 1,
     min_identity: float = 0.8,
     min_jaccard: float = 0.0,
+    min_distinctive_bp: float = 0.0,
+    distinctive_weight: float = 0.15,
     weight: Mapping[str, float] | None = None,
 ) -> list[OverlapEdge]:
     """Compute the proper-overlap edges among ``reads`` (``{read_id: segments}``).
 
     A pair becomes an edge iff its best-orientation alignment is a dovetail or containment,
-    has at least ``min_overlap_bp`` of (weighted) overlap, and normalized identity ≥
-    ``min_identity``. With ``weight`` (e.g. from :func:`idf_weights`), match rewards and the
-    overlap length are scaled per feature, so the overlap must rest on *distinctive* shared
-    content — the fix for repeat-driven chaining. The ``min_jaccard`` feature-set prefilter
-    prunes obviously-disjoint pairs cheaply (0 = off).
+    has at least ``min_overlap_bp`` of (weighted) overlap, normalized identity ≥
+    ``min_identity``, and at least ``min_distinctive_bp`` bp of matched *distinctive* features
+    (weight ≥ ``distinctive_weight``). With ``weight`` (e.g. genome-frequency), match rewards
+    and the overlap length are scaled per feature, so the overlap rests on *distinctive* shared
+    content; ``min_distinctive_bp`` additionally rejects overlaps explained only by filler
+    (e.g. a shared chromosome arm) — the fix for arm-chaining. The ``min_jaccard`` feature-set
+    prefilter prunes obviously-disjoint pairs cheaply (0 = off).
     """
     scorer = _weighted_sub_score(sub_score, weight)
     ids = sorted(reads)
@@ -146,6 +173,11 @@ def build_overlap_graph(
             identity = aln.score / (match_score * overlap_bp) if overlap_bp else 0.0
             if identity < min_identity:
                 continue
+            if min_distinctive_bp > 0.0 and (
+                _distinctive_overlap(aln.columns, a, b_used, weight, distinctive_weight)
+                < min_distinctive_bp
+            ):
+                continue  # overlap rests only on filler (e.g. shared arm) -> not an edge
             edges.append(
                 OverlapEdge(a_id, b_id, aln.score, identity, overlap_bp, kind, aln.reversed_b)
             )
@@ -392,6 +424,8 @@ def assemble(
     min_overlap_bp: float = 1,
     min_identity: float = 0.8,
     min_jaccard: float = 0.0,
+    min_distinctive_bp: float = 0.0,
+    distinctive_weight: float = 0.15,
     weight: Mapping[str, float] | None = None,
 ) -> tuple[list[Cluster], list[OverlapEdge]]:
     """Build the overlap graph and cluster — returns ``(clusters, edges)``."""
@@ -403,6 +437,8 @@ def assemble(
         min_overlap_bp=min_overlap_bp,
         min_identity=min_identity,
         min_jaccard=min_jaccard,
+        min_distinctive_bp=min_distinctive_bp,
+        distinctive_weight=distinctive_weight,
         weight=weight,
     )
     return cluster_reads(reads, edges), edges
