@@ -173,3 +173,22 @@ class FeatureHierarchy:
         if "Interspersed_Repeat" not in self.features("repeat"):
             return frozenset()
         return self.descendants("repeat", "Interspersed_Repeat", include_root=True)
+
+    @property
+    def filler_features(self) -> frozenset[str]:
+        """Structural features that are *filler* for clustering — read-set-ubiquitous or
+        structureless: the telomeres (canonical + noncanonical + the ``telomere_like`` parent),
+        chromosome ``arm`` (p/q), centromere-transition ``ct``, and the ``non-``/``novel``
+        catch-alls. Everything else (satellites, ``ITS``/``TAR1``, ``rDNA``, …) is *distinctive*.
+
+        Telomere is genome-*rare* (high genome-frequency weight) yet sits on every chromosome end,
+        so reads chosen for being telomere-containing all share it — a frequency weight can't flag
+        it as uninformative, hence this explicit set (decisions D4; cf. ``rearrangement_detection.md``).
+        """
+        return frozenset(
+            self.canonical_telomere
+            | self.noncanonical_telomere
+            | self.arm_features
+            | self.ct_features
+            | {"telomere_like", "nonsubtelomeric", "nonrepeat", "novel", "categorized"}
+        )

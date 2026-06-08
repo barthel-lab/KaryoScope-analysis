@@ -131,7 +131,17 @@ def _sidecar(output: Path, suffix: str) -> Path:
     default=0.15,
     show_default=True,
     type=float,
-    help="Weight threshold above which a feature counts as distinctive (for --min-distinctive-bp).",
+    help="Weight threshold above which a feature counts as distinctive (used only if the "
+    "hierarchy filler set is unavailable; normally distinctiveness = 'not filler').",
+)
+@click.option(
+    "--min-interesting-bp",
+    default=2000.0,
+    show_default=True,
+    type=float,
+    help="Drop a read from clustering unless it has at least this many bp of *distinctive* "
+    "(non-filler) features — satellites, ITS/TAR1, rDNA. Filters out 'boring' telomere/arm-only "
+    "reads that would otherwise chain through shared telomere. 0 = keep all reads.",
 )
 @click.option(
     "--block-min-bp",
@@ -213,6 +223,7 @@ def cmd(
     min_jaccard: float,
     min_distinctive_bp: float,
     distinctive_weight: float,
+    min_interesting_bp: float,
     block_min_bp: float,
     workers: int,
     communities: bool,
@@ -228,6 +239,23 @@ def cmd(
         raise click.ClickException("no reads left to cluster after filtering")
 
     hierarchy = FeatureHierarchy.from_tsv(hierarchy_path)
+    # "Filler" = read-set-ubiquitous / structureless features (telomere, arm, ct, non-*); a read's
+    # *interesting* content is everything else (satellites, ITS/TAR1, rDNA). Used both to drop
+    # boring reads and to require an edge rest on shared distinctive content (anti-chaining).
+    filler = hierarchy.filler_features
+    if min_interesting_bp > 0.0:
+        reads = {
+            rid: segs
+            for rid, segs in reads.items()
+            if sum(length for f, length in segs if asm._structural(f) not in filler)
+            >= min_interesting_bp
+        }
+        if not reads:
+            raise click.ClickException(
+                f"no reads left after the interesting-content filter (--min-interesting-bp "
+                f"{min_interesting_bp:g}); all reads are telomere/arm-only"
+            )
+
     # Structural scorer (hierarchy-tiered), wrapped to be chromosome-layer aware. The wrapper
     # is a no-op for plain (non-composite) labels, so this is safe for any overlay.
     sub_score = chromosome_aware_substitution(
@@ -256,6 +284,7 @@ def cmd(
         min_jaccard=min_jaccard,
         min_distinctive_bp=min_distinctive_bp,
         distinctive_weight=distinctive_weight,
+        filler_features=filler,
         block_min_bp=block_min_bp,
         workers=workers,
         communities=communities,

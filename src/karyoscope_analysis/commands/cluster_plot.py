@@ -22,14 +22,25 @@ def _read_tsv(path: Path) -> list[dict[str, str]]:
     return [dict(zip(header, line.split("\t"), strict=True)) for line in lines[1:]]
 
 
-def _dominant_chromosome(consensus: list[render.Interval]) -> str:
-    """Most-covered chromosome layer of a consensus (``chr:feature`` labels), or ''."""
+def _major_chromosomes(consensus: list[render.Interval], min_frac: float = 0.10) -> str:
+    """All specific chromosomes covering ≥ ``min_frac`` of a consensus, e.g. ``chr4+chr22``.
+
+    Labels translocation clusters with every chromosome they span (not just the dominant one);
+    ambiguous chromosome layers (``autosome``/…) and tiny slivers are dropped. '' if none.
+    """
     by_chrom: dict[str, int] = {}
+    total = 0
     for s, e, feature in consensus:
+        total += e - s
         chrom, sep, _ = feature.partition(":")
-        if sep:
+        if sep and chrom.startswith("chr"):
             by_chrom[chrom] = by_chrom.get(chrom, 0) + (e - s)
-    return max(by_chrom, key=by_chrom.get) if by_chrom else ""  # type: ignore[arg-type]
+    if total == 0:
+        return ""
+    major = sorted(
+        (c for c, v in by_chrom.items() if v >= min_frac * total), key=lambda c: -by_chrom[c]
+    )
+    return "+".join(major)
 
 
 @click.command(name="cluster-plot", help="Render Engine B cluster(s) as an SVG of read tracks.")
@@ -135,7 +146,7 @@ def cmd(
         span = max(
             [e for r in placed for _s, e, _f in r.segments] + [e for _s, e, _f in consensus] + [1]
         )
-        chrom = _dominant_chromosome(consensus_by_cluster.get(cid, []))
+        chrom = _major_chromosomes(consensus_by_cluster.get(cid, []))
         title = f"{cid}  n={len(placed)}" + (f"  {chrom}" if chrom else "")
         panels.append(render.ClusterPanel(title=title, width=span, placed=placed, consensus=consensus))
 

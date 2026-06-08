@@ -101,19 +101,26 @@ def _distinctive_overlap(
     b: Sequence[Segment],
     weight: Mapping[str, float] | None,
     distinctive_weight: float,
+    filler: frozenset[str] | None,
 ) -> float:
-    """Raw bp of matched columns whose feature is *distinctive* (weight ≥ ``distinctive_weight``).
+    """Raw bp of matched columns whose feature is *distinctive* (not filler).
 
-    The anti-arm-chaining criterion: an overlap built only of filler (low-weight ``arm``/``ct``)
-    contributes 0 here, so it fails ``min_distinctive_bp`` even though its *weighted* overlap is
-    large (a huge arm block times a small weight). Distinctiveness uses the structural-layer weight
-    (via :func:`_weight`); with no weighting every feature counts (so this reduces to raw bp).
+    The anti-chaining criterion: an overlap built only of filler contributes 0 here, so it fails
+    ``min_distinctive_bp`` even if its weighted overlap is large. When ``filler`` is given, a
+    feature is distinctive iff its structural layer is **not** in that set (used to exclude the
+    read-set-ubiquitous telomere + arm/ct, which a genome-frequency *weight* can't catch because
+    telomere is genome-rare). Otherwise distinctiveness falls back to ``weight ≥ distinctive_weight``
+    (and with no weighting every feature counts, i.e. raw bp).
     """
     total = 0.0
     for i, j in columns:
         fa, la = a[i]
         fb, lb = b[j]
-        if min(_weight(weight, fa), _weight(weight, fb)) >= distinctive_weight:
+        if filler is not None:
+            distinctive = _structural(fa) not in filler and _structural(fb) not in filler
+        else:
+            distinctive = min(_weight(weight, fa), _weight(weight, fb)) >= distinctive_weight
+        if distinctive:
             total += min(la, lb)
     return total
 
@@ -206,6 +213,7 @@ class _EdgeParams:
     min_jaccard: float
     min_distinctive_bp: float
     distinctive_weight: float
+    filler: frozenset[str] | None
 
 
 def _edge_for_pair(
@@ -234,10 +242,10 @@ def _edge_for_pair(
     if identity < params.min_identity:
         return None
     if params.min_distinctive_bp > 0.0 and (
-        _distinctive_overlap(aln.columns, a, b_used, weight, params.distinctive_weight)
+        _distinctive_overlap(aln.columns, a, b_used, weight, params.distinctive_weight, params.filler)
         < params.min_distinctive_bp
     ):
-        return None  # overlap rests only on filler (e.g. shared arm) -> not an edge
+        return None  # overlap rests only on filler (telomere/arm) -> not an edge
     return OverlapEdge(ids[ai], ids[bi], aln.score, identity, overlap_bp, kind, aln.reversed_b)
 
 
@@ -274,6 +282,7 @@ def build_overlap_graph(
     min_jaccard: float = 0.0,
     min_distinctive_bp: float = 0.0,
     distinctive_weight: float = 0.15,
+    filler_features: frozenset[str] | None = None,
     block_min_bp: float = 0.0,
     workers: int = 1,
     weight: Mapping[str, float] | None = None,
@@ -300,7 +309,7 @@ def build_overlap_graph(
     ids = sorted(reads)
     params = _EdgeParams(
         gap_factor, match_score, min_overlap_bp, min_identity, min_jaccard,
-        min_distinctive_bp, distinctive_weight,
+        min_distinctive_bp, distinctive_weight, filler_features,
     )
     pair_iter = (
         _candidate_pairs(ids, reads, block_min_bp)
@@ -646,6 +655,7 @@ def assemble(
     min_jaccard: float = 0.0,
     min_distinctive_bp: float = 0.0,
     distinctive_weight: float = 0.15,
+    filler_features: frozenset[str] | None = None,
     block_min_bp: float = 0.0,
     workers: int = 1,
     communities: bool = False,
@@ -662,6 +672,7 @@ def assemble(
         min_jaccard=min_jaccard,
         min_distinctive_bp=min_distinctive_bp,
         distinctive_weight=distinctive_weight,
+        filler_features=filler_features,
         block_min_bp=block_min_bp,
         workers=workers,
         weight=weight,

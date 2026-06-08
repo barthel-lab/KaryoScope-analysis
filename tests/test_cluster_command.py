@@ -38,6 +38,8 @@ def test_cluster_cli(cli_runner, tmp_path: Path):
             "500",
             "--min-identity",
             "0.9",
+            "--min-interesting-bp",
+            "0",  # keep the tiny synthetic reads (this test is about clustering, not the filter)
             "-o",
             str(out),
         ],

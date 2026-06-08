@@ -50,6 +50,23 @@ def test_min_distinctive_bp_rejects_filler_only_overlap():
     assert not asm.build_overlap_graph(reads, min_distinctive_bp=100, **common)
 
 
+def test_min_distinctive_bp_with_filler_set():
+    # filler-based distinctiveness: a shared telomere (genome-rare, so high weight) is filler and
+    # can't make an edge, but a shared satellite can.
+    telo = {
+        "x": [("aSat", 400), ("canonical_telomere", 5000)],
+        "y": [("canonical_telomere", 5000), ("bSat", 400)],
+    }
+    filler = frozenset({"canonical_telomere"})
+    common = dict(sub_score=EXACT, gap_factor=0.01, min_overlap_bp=1, min_identity=0.5)
+    assert not asm.build_overlap_graph(telo, min_distinctive_bp=100, filler_features=filler, **common)
+    sat = {  # now the shared block is a satellite (not filler) -> edge
+        "x": [("ct", 400), ("aSat", 5000)],
+        "y": [("aSat", 5000), ("ct", 400)],
+    }
+    assert asm.build_overlap_graph(sat, min_distinctive_bp=100, filler_features=filler, **common)
+
+
 # ----------------------------------------------------------------- blocking index
 def test_block_min_bp_only_compares_reads_sharing_a_major_feature():
     # x & y share a big "Q" block (dovetail); z shares nothing major with either.

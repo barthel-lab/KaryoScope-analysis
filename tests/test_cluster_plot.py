@@ -130,3 +130,16 @@ def test_cluster_plot_cli_all_clusters(cli_runner, tmp_path: Path):
     assert svg.startswith("<svg")
     assert "cluster_0" in svg and "cluster_1" in svg  # two panels in one SVG
     assert "aSat" in svg and "rDNA" in svg  # features from both clusters in the shared legend
+
+
+def test_major_chromosomes_labels_translocations():
+    from karyoscope_analysis.commands.cluster_plot import _major_chromosomes
+
+    # single chromosome
+    assert _major_chromosomes([(0, 1000, "chr4:p_arm"), (1000, 1100, "chr4:aSat")]) == "chr4"
+    # translocation: both chromosomes >= 10% -> joined, dominant first
+    assert _major_chromosomes([(0, 1500, "chr4:p_arm"), (1500, 2500, "chr22:q_arm")]) == "chr4+chr22"
+    # a tiny sliver (<10%) and ambiguous labels are dropped
+    assert _major_chromosomes(
+        [(0, 9000, "chr4:p_arm"), (9000, 9100, "chr22:q_arm"), (9100, 9300, "autosome:ct")]
+    ) == "chr4"

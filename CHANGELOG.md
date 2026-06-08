@@ -230,6 +230,18 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   reversed, start, end, feature` in consensus coords) and the consensus BED spans the union;
   `cluster-plot` draws straight from those coordinates (no `--overlay` needed) with length
   filtering off by default so a gap unambiguously means "didn't align".
+- Engine B **filler-aware distinctiveness** — a `FeatureHierarchy.filler_features` set (telomere +
+  arm + ct + non-* / novel) is now what "distinctive" means, replacing the genome-frequency weight
+  threshold for clustering. **Telomere is genome-rare (high weight) yet read-set-ubiquitous** (every
+  chromosome end), so the weight couldn't flag it; the explicit set can. Two effects: `cluster
+  --min-interesting-bp` (default 2000) **drops "boring" reads** (telomere/arm-only, no satellite /
+  ITS / TAR1 / rDNA content) before clustering, and the distinctive-overlap edge criterion counts
+  only non-filler shared content, so reads can no longer **chain through shared telomere**. On full
+  U2OS this dissolved the residual 323-read, 23-chromosome `cluster_0` (it was 53% boring reads) —
+  every cluster is now chromosome-coherent: 39 single-chromosome haplotype groups + 14 clean
+  translocation candidates (chr4+chr22 ×34, chr13+chr11 ×33, chr14+chr22 ×28, chr21+chr1 ×23, …).
+  `cluster-plot` titles now list **all** major chromosomes (`chr4+chr22`), so translocations are
+  labeled as such.
 - **`cluster-plot` subcommand** + `core/cluster_plot.py` + `core/io/colors.py`: the package's
   single **read-renderer** (collapsing the legacy `plot-reads`/`cluster-plot`/`telogator-reads-viz`).
   Renders **one cluster (`--cluster-id`) or all clusters stacked in one SVG** (omit `--cluster-id`;

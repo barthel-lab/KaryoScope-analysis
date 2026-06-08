@@ -88,7 +88,7 @@ def test_cluster_genome_freq_uses_weights(cli_runner, tmp_path: Path):
         [
             "cluster", "--input", str(overlay), "--hierarchy", str(HIERARCHY_TSV),
             "--weight-method", "genome-freq", "--genome-weights", str(weights),
-            "--min-overlap-bp", "1000", "-o", str(out),
+            "--min-overlap-bp", "1000", "--min-interesting-bp", "0", "-o", str(out),
         ],
     )
     assert res.exit_code == 0, res.output
@@ -103,7 +103,7 @@ def test_cluster_genome_freq_requires_weights_path(cli_runner, tmp_path: Path):
     res = cli_runner.invoke(
         main,
         ["cluster", "--input", str(overlay), "--hierarchy", str(HIERARCHY_TSV),
-         "--weight-method", "genome-freq", "-o", str(tmp_path / "c.tsv")],
+         "--weight-method", "genome-freq", "--min-interesting-bp", "0", "-o", str(tmp_path / "c.tsv")],
     )
     assert res.exit_code != 0
     assert "genome-freq requires --genome-weights" in res.output
