@@ -267,53 +267,51 @@ def test_weighting_keeps_distinctive_overlap():
     assert len(asm.build_overlap_graph(reads, **base, weight=weight)) == 1
 
 
-# ----------------------------------------------------------------- consensus
-def _consensus(reads, cluster):
-    return asm.cluster_consensus(reads, cluster, sub_score=EXACT, gap_factor=0.01)
+# ----------------------------------------------------------------- consensus-coordinate layout
+def _layout(reads, cluster):
+    return asm.consensus_layout(reads, cluster, sub_score=EXACT, gap_factor=0.01)
 
 
-def test_consensus_singleton_is_the_read_itself():
+def test_consensus_layout_singleton_is_the_read_itself():
     reads = {"x": [("A", 100), ("B", 50)]}
     clusters, _ = asm.assemble(reads, **PARAMS)
-    cons = _consensus(reads, clusters[0])
-    assert cons.segments() == [("A", 100), ("B", 50)]
-    assert [p.support for p in cons.positions] == [1, 1]
-    assert [p.coverage for p in cons.positions] == [1, 1]
+    lo = _layout(reads, clusters[0])
+    assert lo.seed == "x" and lo.width == 150
+    assert list(lo.placed[0].segments) == [(0, 100, "A"), (100, 150, "B")]
+    assert [(p.start, p.end, p.feature, p.support, p.coverage) for p in lo.consensus] == [
+        (0, 100, "A", 1, 1),
+        (100, 150, "B", 1, 1),
+    ]
 
 
-def test_consensus_counts_agreement_support():
+def test_consensus_layout_stacks_features_and_spans_union():
+    # member's B,C must land *under* the seed's B,C (stacking), and its D overhang must extend
+    # the consensus span beyond the seed (union span), not be truncated.
     reads = {
-        "seed": [("A", 100), ("B", 100), ("C", 100)],  # longest tie -> "seed" wins by id
-        "m": [("B", 100), ("C", 100), ("D", 100)],  # overlaps B, C
+        "seed": [("A", 100), ("B", 100), ("C", 100)],  # 0..300
+        "m": [("B", 100), ("C", 100), ("D", 100)],  # B,C align to seed; D overhangs
     }
     clusters, _ = asm.assemble(reads, **PARAMS)
-    cons = _consensus(reads, clusters[0])
-    assert cons.seed == "seed"
-    assert [p.feature for p in cons.positions] == ["A", "B", "C"]
-    assert [p.support for p in cons.positions] == [1, 2, 2]  # A seed-only; B,C agreed
-    assert [p.coverage for p in cons.positions] == [1, 2, 2]
-    assert cons.segments() == [("A", 100), ("B", 100), ("C", 100)]
+    lo = _layout(reads, clusters[0])
+    assert lo.seed == "seed" and lo.width == 400
+    placed = {r.read_id: r for r in lo.placed}
+    assert list(placed["seed"].segments) == [(0, 100, "A"), (100, 200, "B"), (200, 300, "C")]
+    assert list(placed["m"].segments) == [(100, 200, "B"), (200, 300, "C"), (300, 400, "D")]
+    # consensus spans the union (incl. D); B,C have support 2 (both reads agree)
+    assert [(p.feature, p.support, p.coverage) for p in lo.consensus] == [
+        ("A", 1, 1), ("B", 2, 2), ("C", 2, 2), ("D", 1, 1)
+    ]
 
 
-def test_cluster_layout_offsets():
-    # member dovetails the seed shifted right: B,C of the member align to seed's B,C (at 100bp).
-    reads = {
-        "seed": [("A", 100), ("B", 100), ("C", 100)],
-        "m": [("B", 100), ("C", 100), ("D", 100)],
-    }
-    clusters, _ = asm.assemble(reads, **PARAMS)
-    placements = asm.cluster_layout(reads, clusters[0], sub_score=EXACT, gap_factor=0.01)
-    by_read = {p.read_id: p for p in placements}
-    assert by_read["seed"].offset == 0 and by_read["seed"].is_seed
-    assert by_read["m"].offset == 100  # shifted so its B sits under the seed's B
-    assert by_read["m"].length == 300
-
-
-def test_consensus_orients_reversed_members():
+def test_consensus_layout_orients_reversed_members():
     seed = [("A", 300), ("B", 100), ("C", 100)]  # 500 bp -> unambiguous seed
     reads = {"seed": seed, "rev": reverse_segments([("A", 300), ("B", 100)])}
     clusters, _ = asm.assemble(reads, **PARAMS)
-    cons = _consensus(reads, clusters[0])
-    assert cons.seed == "seed"
-    # rev (oriented back) covers A and B but not C
-    assert [p.support for p in cons.positions] == [2, 2, 1]
+    lo = _layout(reads, clusters[0])
+    assert lo.seed == "seed"
+    placed = {r.read_id: r for r in lo.placed}
+    assert placed["rev"].reversed is True
+    # oriented back, rev's A,B stack under the seed's A,B
+    assert list(placed["rev"].segments) == [(0, 300, "A"), (300, 400, "B")]
+    # consensus: A,B agreed (support 2), C seed-only (support 1)
+    assert [p.support for p in lo.consensus] == [2, 2, 1]

@@ -220,6 +220,16 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   *multiple* haplotype communities, e.g. chr18 → 148 + 83) and **24 recurrent translocation
   candidates** (chr4+chr22 ×43, chr18+chr19 ×34, chr13+chr11 ×33, chr1+chr21 ×23, …). 4005 reads →
   2544 clusters (75 multi-read), no mega-cluster.
+- Engine B **consensus-coordinate layout** (`feature_assembly.consensus_layout`, replacing the
+  seed-anchored consensus + single-offset layout). Each read is placed in the cluster's consensus
+  frame via a piecewise-linear map through its read→seed **alignment columns** (slope-1 outside
+  the anchors), so **matched features stack vertically** instead of drifting (a chr20 cluster's
+  shared `HSat3` now lands at identical coordinates in both reads, vs ~20 kb off before), and a
+  read's overhang **extends the frame** so the consensus spans the **union** of all reads (not
+  just the seed). `cluster`'s `layout.tsv` is now **per-segment** (`cluster_id, read_id, is_seed,
+  reversed, start, end, feature` in consensus coords) and the consensus BED spans the union;
+  `cluster-plot` draws straight from those coordinates (no `--overlay` needed) with length
+  filtering off by default so a gap unambiguously means "didn't align".
 - **`cluster-plot` subcommand** + `core/cluster_plot.py` + `core/io/colors.py`: the package's
   single **read-renderer** (collapsing the legacy `plot-reads`/`cluster-plot`/`telogator-reads-viz`).
   Renders **one cluster (`--cluster-id`) or all clusters stacked in one SVG** (omit `--cluster-id`;

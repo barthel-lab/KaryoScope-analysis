@@ -17,9 +17,10 @@ Consensus (seed-anchored majority over the layout) builds on this next.
 
 from __future__ import annotations
 
+import bisect
 import multiprocessing as mp
 from collections import Counter, defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import islice
 
@@ -32,6 +33,7 @@ from karyoscope_analysis.core.feature_align import (
     feature_jaccard,
     reverse_segments,
 )
+from karyoscope_analysis.core.io.bed import Interval
 
 
 def _structural(feature: str) -> str:
@@ -487,88 +489,34 @@ def cluster_reads(
 
 
 @dataclass(frozen=True)
-class ConsensusPosition:
-    """One position of a cluster's seed-anchored consensus."""
-
-    feature: str  # majority feature at this seed position
-    length: int  # the seed segment's length (the backbone coordinate)
-    support: int  # votes for the majority feature (incl. the seed)
-    coverage: int  # total votes at this position (incl. the seed)
-
-
-@dataclass(frozen=True)
-class ClusterConsensus:
-    """A cluster's seed-anchored consensus structural sequence."""
-
-    seed: str
-    positions: tuple[ConsensusPosition, ...]
-
-    def segments(self) -> list[Segment]:
-        """The consensus as a ``(feature, length)`` sequence (the backbone structure)."""
-        return [(p.feature, p.length) for p in self.positions]
-
-
-def _majority(counter: Counter[str], prefer: str) -> str:
-    """Most-voted feature; ties broken toward ``prefer`` (the seed), then lexicographically."""
-    best = max(counter.values())
-    tied = sorted(feat for feat, count in counter.items() if count == best)
-    return prefer if prefer in tied else tied[0]
-
-
-def cluster_consensus(
-    reads: Mapping[str, Sequence[Segment]],
-    cluster: Cluster,
-    *,
-    sub_score: SubScore,
-    gap_factor: float,
-    weight: Mapping[str, float] | None = None,
-) -> ClusterConsensus:
-    """Seed-anchored consensus: per seed position, the majority feature over members.
-
-    Each member is oriented to the seed and locally aligned to it; every aligned column
-    votes its feature at the corresponding seed position (the seed votes for itself). The
-    consensus uses the seed's segment lengths as the backbone coordinate (v1). Members linked
-    only transitively (not overlapping the seed) contribute no votes — a v1 limitation.
-    """
-    scorer = _weighted_sub_score(sub_score, weight)
-    seed_segments = reads[cluster.seed]
-    votes: list[Counter[str]] = [Counter() for _ in seed_segments]
-    for position, (feature, _length) in enumerate(seed_segments):
-        votes[position][feature] += 1  # the seed votes for itself
-
-    for member in cluster.members:
-        if member == cluster.seed:
-            continue
-        member_segments = (
-            reverse_segments(reads[member])
-            if cluster.reversed_relative_to_seed[member]
-            else list(reads[member])
-        )
-        aln = align_local(member_segments, seed_segments, sub_score=scorer, gap_factor=gap_factor)
-        for member_idx, seed_idx in aln.columns:
-            votes[seed_idx][member_segments[member_idx][0]] += 1
-
-    positions = tuple(
-        ConsensusPosition(
-            feature=_majority(votes[position], prefer=feature),
-            length=length,
-            support=votes[position][_majority(votes[position], prefer=feature)],
-            coverage=sum(votes[position].values()),
-        )
-        for position, (feature, length) in enumerate(seed_segments)
-    )
-    return ClusterConsensus(seed=cluster.seed, positions=positions)
-
-
-@dataclass(frozen=True)
-class MemberPlacement:
-    """A cluster member's placement in the seed coordinate frame (for layout/plotting)."""
+class LaidOutRead:
+    """A cluster member placed in the consensus coordinate frame (for plotting)."""
 
     read_id: str
     is_seed: bool
     reversed: bool  # oriented relative to the seed
-    offset: int  # seed-relative bp offset of the member's start (0 for the seed)
-    length: int  # member length (bp), in the oriented frame
+    segments: tuple[Interval, ...]  # (start, end, feature) in consensus coordinates
+
+
+@dataclass(frozen=True)
+class ConsensusPosition:
+    """One interval of a cluster's union-spanning consensus."""
+
+    start: int
+    end: int
+    feature: str  # majority feature over the reads covering this interval
+    support: int  # reads voting the majority feature
+    coverage: int  # total reads covering this interval
+
+
+@dataclass(frozen=True)
+class ClusterLayout:
+    """A cluster laid out in consensus coordinates: placed reads + the union consensus."""
+
+    seed: str
+    width: int  # span of the consensus frame (leftmost edge → rightmost edge), shifted to 0
+    placed: tuple[LaidOutRead, ...]
+    consensus: tuple[ConsensusPosition, ...]
 
 
 def _cumulative_bp(segments: Sequence[Segment]) -> list[int]:
@@ -579,44 +527,112 @@ def _cumulative_bp(segments: Sequence[Segment]) -> list[int]:
     return out
 
 
-def cluster_layout(
+def _anchor_map(anchors: list[tuple[int, int]]) -> Callable[[int], float]:
+    """A piecewise-linear member-bp → consensus-bp map through ``(member, consensus)`` anchors.
+
+    Anchors (the read→seed aligned-column starts) are monotonic in both coordinates. Between
+    anchors the map interpolates linearly; outside, it extrapolates with slope 1 (bp-preserving),
+    so a read's overhangs extend the consensus frame beyond the seed.
+    """
+    ms = [m for m, _ in anchors]
+    cs = [c for _, c in anchors]
+
+    def mapped(p: int) -> float:
+        if p <= ms[0]:
+            return cs[0] - (ms[0] - p)
+        if p >= ms[-1]:
+            return cs[-1] + (p - ms[-1])
+        k = bisect.bisect_right(ms, p) - 1
+        m0, m1, c0, c1 = ms[k], ms[k + 1], cs[k], cs[k + 1]
+        return c0 if m1 == m0 else c0 + (p - m0) * (c1 - c0) / (m1 - m0)
+
+    return mapped
+
+
+def _union_consensus(placed: Sequence[LaidOutRead], width: int) -> tuple[ConsensusPosition, ...]:
+    """Majority-vote consensus over the union grid (all placed-segment boundaries)."""
+    breaks = {0, width}
+    for read in placed:
+        for s, e, _f in read.segments:
+            breaks |= {s, e}
+    bps = sorted(b for b in breaks if 0 <= b <= width)
+    if len(bps) < 2:
+        return ()
+    votes: list[Counter[str]] = [Counter() for _ in range(len(bps) - 1)]
+    for read in placed:
+        for s, e, f in read.segments:
+            for k in range(bisect.bisect_left(bps, s), bisect.bisect_left(bps, e)):
+                votes[k][f] += 1
+    out: list[ConsensusPosition] = []
+    for k, counter in enumerate(votes):
+        if not counter:
+            continue
+        top = max(counter.values())
+        feature = min(f for f, n in counter.items() if n == top)
+        nxt = ConsensusPosition(bps[k], bps[k + 1], feature, top, sum(counter.values()))
+        if out and out[-1].feature == feature and out[-1].end == nxt.start:  # coalesce
+            prev = out[-1]
+            out[-1] = ConsensusPosition(
+                prev.start, nxt.end, feature,
+                max(prev.support, nxt.support), max(prev.coverage, nxt.coverage),
+            )
+        else:
+            out.append(nxt)
+    return tuple(out)
+
+
+def consensus_layout(
     reads: Mapping[str, Sequence[Segment]],
     cluster: Cluster,
     *,
     sub_score: SubScore,
     gap_factor: float,
     weight: Mapping[str, float] | None = None,
-) -> list[MemberPlacement]:
-    """Place each cluster member in the seed's coordinate frame.
+) -> ClusterLayout:
+    """Lay a cluster out in consensus coordinates: place every read so matched features stack.
 
-    Reuses the member→seed alignment (oriented) to compute a **seed-relative bp offset**: the
-    first aligned column ``(i, j)`` pins member segment ``i`` under seed segment ``j``. The
-    seed is the frame (offset 0). Members linked only transitively (no seed overlap) get
-    offset 0 — a v1 limitation shared with the consensus. Members keep the cluster's
-    descending-length, then-id order.
+    Each member is oriented to the seed and locally aligned to it; its aligned columns become
+    anchors for a piecewise-linear coordinate map (:func:`_anchor_map`), so a member segment lands
+    on the consensus coordinate of the seed segment it matches (aligned features stack vertically;
+    overhangs extend the frame). The whole layout is shifted so the leftmost edge is 0, the
+    consensus spans the **union** of all reads, and :func:`_union_consensus` majority-votes the
+    feature at each grid interval. A member that doesn't align to the seed is placed at its own
+    coordinates (offset 0) — a fallback for transitive links.
     """
-    scorer = _weighted_sub_score(sub_score, weight)
+    scorer = _memoized(_weighted_sub_score(sub_score, weight))
     seed_segments = reads[cluster.seed]
     seed_cum = _cumulative_bp(seed_segments)
 
-    placements: list[MemberPlacement] = []
+    raw: list[tuple[str, bool, bool, list[Interval]]] = []
     for member in cluster.members:
         reversed_ = cluster.reversed_relative_to_seed[member]
         segments = reverse_segments(reads[member]) if reversed_ else list(reads[member])
-        length = sum(length for _, length in segments)
+        cum = _cumulative_bp(segments)
         if member == cluster.seed:
-            offset = 0
+            placed_segs = [(cum[i], cum[i + 1], segments[i][0]) for i in range(len(segments))]
         else:
             aln = align_local(segments, seed_segments, sub_score=scorer, gap_factor=gap_factor)
             if aln.columns:
-                member_idx, seed_idx = aln.columns[0]
-                offset = seed_cum[seed_idx] - _cumulative_bp(segments)[member_idx]
+                mp = _anchor_map([(cum[mi], seed_cum[sj]) for mi, sj in aln.columns])
+                placed_segs = [
+                    (round(mp(cum[i])), round(mp(cum[i + 1])), segments[i][0])
+                    for i in range(len(segments))
+                ]
             else:
-                offset = 0
-        placements.append(
-            MemberPlacement(member, member == cluster.seed, reversed_, offset, length)
-        )
-    return placements
+                placed_segs = [(cum[i], cum[i + 1], segments[i][0]) for i in range(len(segments))]
+        raw.append((member, member == cluster.seed, reversed_, placed_segs))
+
+    starts = [s for *_, segs in raw for s, _e, _f in segs]
+    ends = [e for *_, segs in raw for _s, e, _f in segs]
+    lo = min(starts) if starts else 0
+    width = (max(ends) if ends else 0) - lo
+    placed = tuple(
+        LaidOutRead(rid, is_seed, rev, tuple((s - lo, e - lo, f) for s, e, f in segs))
+        for rid, is_seed, rev, segs in raw
+    )
+    return ClusterLayout(
+        seed=cluster.seed, width=width, placed=placed, consensus=_union_consensus(placed, width)
+    )
 
 
 def assemble(

@@ -261,8 +261,8 @@ def cmd(
         communities=communities,
         weight=weight,
     )
-    consensuses = [
-        asm.cluster_consensus(reads, c, sub_score=sub_score, gap_factor=gap_factor, weight=weight)
+    layouts = [
+        asm.consensus_layout(reads, c, sub_score=sub_score, gap_factor=gap_factor, weight=weight)
         for c in clusters
     ]
 
@@ -271,34 +271,31 @@ def cmd(
     layout_tsv = _sidecar(output, "layout.tsv")
 
     with clusters_tsv.open("w", newline="") as fh:
-        fh.write("cluster_id\tsize\tseed\tconsensus_segments\torientation_conflict\n")
-        for idx, (cluster, cons) in enumerate(zip(clusters, consensuses, strict=True)):
+        fh.write("cluster_id\tsize\tseed\tconsensus_segments\twidth\torientation_conflict\n")
+        for idx, (cluster, lo) in enumerate(zip(clusters, layouts, strict=True)):
             fh.write(
                 f"cluster_{idx}\t{cluster.size}\t{cluster.seed}\t"
-                f"{len(cons.positions)}\t{int(cluster.orientation_conflict)}\n"
+                f"{len(lo.consensus)}\t{lo.width}\t{int(cluster.orientation_conflict)}\n"
             )
 
     with consensus_bed.open("w", newline="") as fh:
         fh.write("cluster_id\tstart\tend\tfeature\tsupport\tcoverage\n")
-        for idx, cons in enumerate(consensuses):
-            pos = 0
-            for p in cons.positions:
+        for idx, lo in enumerate(layouts):
+            for p in lo.consensus:
                 fh.write(
-                    f"cluster_{idx}\t{pos}\t{pos + p.length}\t{p.feature}\t{p.support}\t{p.coverage}\n"
+                    f"cluster_{idx}\t{p.start}\t{p.end}\t{p.feature}\t{p.support}\t{p.coverage}\n"
                 )
-                pos += p.length
 
+    # per-segment layout in consensus coordinates (one row per read segment)
     with layout_tsv.open("w", newline="") as fh:
-        fh.write("cluster_id\tread_id\tis_seed\treversed\toffset\tlength\n")
-        for idx, cluster in enumerate(clusters):
-            placements = asm.cluster_layout(
-                reads, cluster, sub_score=sub_score, gap_factor=gap_factor, weight=weight
-            )
-            for p in placements:
-                fh.write(
-                    f"cluster_{idx}\t{p.read_id}\t{int(p.is_seed)}\t{int(p.reversed)}\t"
-                    f"{p.offset}\t{p.length}\n"
-                )
+        fh.write("cluster_id\tread_id\tis_seed\treversed\tstart\tend\tfeature\n")
+        for idx, lo in enumerate(layouts):
+            for read in lo.placed:
+                for s, e, feature in read.segments:
+                    fh.write(
+                        f"cluster_{idx}\t{read.read_id}\t{int(read.is_seed)}\t"
+                        f"{int(read.reversed)}\t{s}\t{e}\t{feature}\n"
+                    )
 
     n_multi = sum(1 for c in clusters if c.size > 1)
     click.echo(

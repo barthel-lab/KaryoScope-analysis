@@ -1,16 +1,14 @@
-"""Render Engine B clusters as SVG read tracks.
+"""Render Engine B clusters as SVG read tracks (consensus-coordinate layout).
 
-The single read-renderer for the package (collapsing the legacy ``plot-reads`` /
-``cluster-plot`` / ``telogator-reads-viz``): each read is a horizontal row of
-feature-colored rectangles, oriented and offset into the cluster seed's coordinate frame
-(from `cluster`'s ``layout.tsv``), with the consensus track on top. One cluster
-(:func:`render_cluster_svg`) or many stacked in one figure (:func:`render_clusters_svg`),
-sharing a single feature legend.
+The single read-renderer for the package. Each read is a horizontal row of feature-colored
+rectangles placed in the cluster's **consensus coordinate frame** (computed by
+`feature_assembly.consensus_layout` and serialized to `cluster`'s ``layout.tsv``), so matched
+features **stack vertically** across reads; the union-spanning consensus track sits on top. A
+gap in a row means that read has no feature there (it didn't align / doesn't extend that far) —
+length filtering is the caller's choice, off by default, so gaps are unambiguous.
 
-Self-contained (emits raw SVG; no plotting deps) so it runs anywhere and is easy to test;
-the drawing primitives are the natural thing to push down into ``karyoplot.svg`` later. The
-legacy dendrogram / cluster-enrichment visuals are intentionally not carried over (they
-belonged to the dropped ``cluster_analysis``); their audits remain for future revival.
+Self-contained (emits raw SVG; no plotting deps). One cluster (:func:`render_cluster_svg`) or
+many stacked in one figure (:func:`render_clusters_svg`), sharing a single feature legend.
 """
 
 from __future__ import annotations
@@ -23,37 +21,28 @@ from karyoscope_analysis.core.io.bed import Interval
 
 #: Fallback palette for features absent from the colors file (deterministic by name).
 _AUTO_PALETTE = (
-    "#4E79A7",
-    "#F28E2B",
-    "#E15759",
-    "#76B7B2",
-    "#59A14F",
-    "#EDC948",
-    "#B07AA1",
-    "#FF9DA7",
-    "#9C755F",
-    "#BAB0AC",
-    "#86BCB6",
-    "#D37295",
+    "#4E79A7", "#F28E2B", "#E15759", "#76B7B2", "#59A14F", "#EDC948",
+    "#B07AA1", "#FF9DA7", "#9C755F", "#BAB0AC", "#86BCB6", "#D37295",
 )
 
 
 @dataclass(frozen=True)
 class PlacedRead:
-    """A read placed in the seed frame: ``offset`` (bp) + raw per-read intervals."""
+    """A read placed in the consensus frame: ``segments`` are ``(start, end, feature)`` in
+    consensus coordinates (already oriented + positioned)."""
 
     read_id: str
     is_seed: bool
     reversed: bool
-    offset: int
-    segments: Sequence[Interval]  # (start, end, feature) in the read's own frame
+    segments: Sequence[Interval]
 
 
 @dataclass(frozen=True)
 class ClusterPanel:
-    """One cluster to draw: a title, its placed reads, and its consensus."""
+    """One cluster to draw: a title, its width, placed reads, and its (union) consensus."""
 
     title: str
+    width: int
     placed: Sequence[PlacedRead]
     consensus: Sequence[Interval]
 
@@ -71,19 +60,6 @@ def feature_color(label: str, colors: Mapping[str, str]) -> str:
     return _AUTO_PALETTE[zlib.crc32(feature.encode()) % len(_AUTO_PALETTE)]
 
 
-def _oriented(read: PlacedRead) -> list[Interval]:
-    """The read's segments in the seed-facing orientation, shifted to its offset."""
-    if not read.reversed:
-        local = [(s, e, f) for s, e, f in read.segments]
-    else:
-        local = []
-        pos = 0
-        for s, e, f in reversed(list(read.segments)):
-            local.append((pos, pos + (e - s), f))
-            pos += e - s
-    return [(read.offset + s, read.offset + e, f) for s, e, f in local]
-
-
 def _esc(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -99,14 +75,10 @@ def _draw_panel(
     label_width: int,
     row_height: int,
 ) -> float:
-    """Draw one cluster panel (its own x-scale) starting at ``y``; return the next ``y``."""
-    rows: list[tuple[str, bool, list[Interval]]] = [("consensus", True, list(panel.consensus))]
-    rows += [(r.read_id, r.is_seed, _oriented(r)) for r in panel.placed]
-
-    coords = [c for _, _, segs in rows for s, e, _f in segs for c in (s, e)]
-    x0 = min(coords) if coords else 0
-    span = max(1, (max(coords) if coords else 1) - x0)
-    scale = max(1, width - label_width) / span
+    """Draw one cluster panel (shared consensus x-scale) starting at ``y``; return the next ``y``."""
+    rows: list[tuple[str, bool, Sequence[Interval]]] = [("consensus", True, panel.consensus)]
+    rows += [(r.read_id, r.is_seed, r.segments) for r in panel.placed]
+    scale = max(1, width - label_width) / max(1, panel.width)
 
     if panel.title:
         elements.append(
@@ -125,7 +97,7 @@ def _draw_panel(
         for s, e, f in segs:
             color = feature_color(f, colors)
             present.setdefault(structural_feature(f), color)
-            x = label_width + (s - x0) * scale
+            x = label_width + s * scale
             w = max(0.5, (e - s) * scale)
             elements.append(
                 f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{row_height}" fill="{color}" />'
@@ -162,14 +134,8 @@ def render_clusters_svg(
     y: float = 12
     for panel in panels:
         y = _draw_panel(
-            elements,
-            y,
-            panel,
-            colors,
-            present,
-            width=width,
-            label_width=label_width,
-            row_height=row_height,
+            elements, y, panel, colors, present,
+            width=width, label_width=label_width, row_height=row_height,
         )
     total_h = _draw_legend(elements, y + 4, present, width)
     body = "\n".join(elements)
@@ -182,18 +148,19 @@ def render_clusters_svg(
 def render_cluster_svg(
     placed: Sequence[PlacedRead],
     consensus: Sequence[Interval],
+    width: int,
     colors: Mapping[str, str],
     *,
-    width: int = 1200,
+    svg_width: int = 1200,
     row_height: int = 12,
     label_width: int = 220,
     title: str = "",
 ) -> str:
     """Render a single cluster to an SVG (a one-panel :func:`render_clusters_svg`)."""
     return render_clusters_svg(
-        [ClusterPanel(title or "cluster", placed, consensus)],
+        [ClusterPanel(title or "cluster", width, placed, consensus)],
         colors,
-        width=width,
+        width=svg_width,
         row_height=row_height,
         label_width=label_width,
     )

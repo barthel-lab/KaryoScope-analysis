@@ -398,10 +398,25 @@ dissolves to singletons, and the all-`p_arm` chr5 read (which had no telomere) d
 chr5 cluster, leaving three structurally-justified pairs — chr12+chr9 (translocation), chr20,
 and chr5+`canonical_telomere`. This matches a read-by-read maintainer review of the plots.
 
-Residual limitations: connected-components can still in principle link reads through a *rare*
-shared feature (community detection remains a possible refinement), and — the next workstream —
-the layout is a single seed-relative offset per read (so matching features drift in the plot
-rather than stacking) and the consensus spans only the seed, not the union of all reads.
+Residual limitations: connected-components could still in principle link reads through a *rare*
+shared feature — addressed by **community detection** (§13). The layout/consensus weakness (single
+seed-relative offset → drift; seed-only consensus) is fixed by the **consensus-coordinate layout**
+(§14).
+
+## 14. Consensus-coordinate layout (`consensus_layout`)
+
+The v1 layout placed each read by a single seed-relative offset, so length-mismatched segments
+drifted (a chr20 cluster's shared `HSat3` ended up ~20 kb apart between two reads), and the
+consensus only spanned the seed. `feature_assembly.consensus_layout` replaces both: each member's
+read→seed **alignment columns** become anchors `(member_bp, consensus_bp)`, and every segment is
+mapped through a piecewise-linear function (slope-1 outside the anchors). So aligned features land
+on their seed counterpart's coordinate — **they stack vertically** — and a read's overhang
+extrapolates beyond the seed, **extending the frame to the union** of all reads. The consensus is
+re-derived by majority vote over that union grid. Validated: in the chr20 cluster both reads' `HSat3`
+now sits at identical consensus coordinates (415485–424089), their `p_arm` blocks line up, and a
+member's telomere overhang extends the consensus past the seed. `layout.tsv` is now per-segment
+(consensus coords); `cluster-plot` draws straight from it (no overlay) with length filtering off so
+gaps are unambiguous.
 
 ## 13. Scaling `cluster` to a whole sample (blocking + memoization + parallelism)
 
