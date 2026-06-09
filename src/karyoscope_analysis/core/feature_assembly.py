@@ -670,9 +670,9 @@ def _union_consensus(placed: Sequence[LaidOutRead], width: int) -> tuple[Consens
 #: can't hijack the anchor coordinate.
 MIN_FEATURE_BLOCK_BP = 500
 #: Orientation (which way a read is flipped) only needs the *order* of features, not a stable anchor,
-#: so it uses a lower threshold — enough to see a real but small distinctive feature (an ITS is often
-#: only ~300-400 bp) and orient the read by it, instead of falling back to a coin-flip best-fit.
-ORIENT_MIN_BLOCK_BP = 250
+#: so it uses a lower threshold — enough to see a real but small distinctive feature (an ITS ~300 bp,
+#: a gSat ~230 bp) and orient the read by it, instead of falling back to a coin-flip best-fit.
+ORIENT_MIN_BLOCK_BP = 150
 #: Two backbone landmarks within this many bp are a *contact* (a breakpoint or a feature junction
 #: to anchor on); farther apart they are arm-separated and not a junction.
 ADJACENT_GAP_BP = 2000
@@ -993,8 +993,9 @@ def consensus_layout(
         rank = {t: top - v for t, v in rank.items()}
 
     # Orientation reads off a *finer* backbone than placement: a small but real distinctive feature
-    # (e.g. a ~400 bp ITS next to a TAR1) is enough to tell which way a read runs, even though it is
-    # too small to anchor on. Without it, reads carrying one big landmark (TAR1) flip on a coin-toss.
+    # (a ~400 bp ITS, a ~230 bp gSat next to a TAR1) is enough to tell which way a read runs, even
+    # though it is too small to anchor on. Without it, reads carrying one big landmark flip on a
+    # coin-toss best-fit.
     orient_seqs = {r: _landmark_sequence(reads[r], landmark_of, ORIENT_MIN_BLOCK_BP) for r in members}
     orient_rank = _landmark_order(orient_seqs.values())
     seed_oranks = [orient_rank[t] for t in orient_seqs[seed] if t in orient_rank]
