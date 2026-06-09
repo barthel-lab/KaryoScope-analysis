@@ -14,13 +14,17 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
 ### Added
 
 - Engine B **backbone layout** (`consensus_layout`): orientation and placement use the cluster's
-  *backbone* — the sequence of `chromosome:feature` landmark tokens — as the primary signal, which
-  is what makes clusters read correctly. The token uses **both** the chromosome and the structural
-  feature, so the layout anchors on chromosome breakpoints **and** structural junctions (a
-  `telomere → TAR1` subtelomere boundary, a `bSat → ITS` contact); acrocentric chromosomes
-  (chr13/14/15/21/22, whose short arms recombine) collapse to one `acrocentric` token, and only true
-  *structureless* features (arms/ct/non-*) are dropped — telomeres and satellites are kept as layout
-  landmarks even though telomere is filler for clustering. Each read is flipped so its backbone runs
+  *backbone* — a sequence of landmark features — as the primary signal, which is what makes clusters
+  read correctly. The backbone is **chromosomes** only for a *clean translocation* — ≥2 chromosomes
+  each with a large, obvious block (≥`MAJOR_CHROM_BP`) that **co-occur in most reads** (a recurring
+  breakpoint), via `_translocation_chromosomes`; every other cluster (one chromosome, or a chimera
+  with small signal scattered over many chromosomes, or one chromosome's subtelomeres clustered by a
+  shared TAR1) uses the **structural backbone** — the structural feature with the chromosome
+  *stripped*, so a satellite array split across chromosome labels (a bSat across chr18/chr22/…) is
+  one landmark, not a scramble. Acrocentric chromosomes (chr13/14/15/21/22, whose short arms
+  recombine) collapse to one `acrocentric` token; only true *structureless* features (arms/ct/non-*)
+  are dropped — telomeres and satellites are kept as layout landmarks even though telomere is filler
+  for clustering. Each read is flipped so its backbone runs
   in one consistent order (the path read off the landmark adjacencies, e.g. `chr11 — chr13 — chr19`
   or `bSat — ITS`), then placed by **anchoring on the most cluster-conserved junction it carries**
   (the landmark pair seen adjacent in the most reads, ties broken toward a chromosome change) — so a

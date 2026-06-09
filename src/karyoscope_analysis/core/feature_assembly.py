@@ -676,35 +676,93 @@ ORIENT_MIN_BLOCK_BP = 150
 #: Two backbone landmarks within this many bp are a *contact* (a breakpoint or a feature junction
 #: to anchor on); farther apart they are arm-separated and not a junction.
 ADJACENT_GAP_BP = 2000
+#: A chromosome needs a contiguous block at least this large (in half the reads) to count as a
+#: "large, obvious" signal — ≥2 such chromosomes mark a clean translocation worth a chromosome
+#: backbone; otherwise the cluster lays out on its structural backbone.
+MAJOR_CHROM_BP = 5000
 
 #: A landmark function maps a composite ``chromosome:feature`` label to the backbone token it
 #: contributes, or ``None`` to skip it.
 LandmarkOf = Callable[[str], "str | None"]
 
 
-def _combined_landmark(acrocentrics: frozenset[str], structureless: frozenset[str]) -> LandmarkOf:
-    """Backbone token = the composite ``chromosome:feature`` — using **both** the chromosome and
-    the structural feature, so the layout anchors on chromosome breakpoints *and* structural
-    junctions (e.g. a ``noncanonical_telomere → TAR1`` subtelomere boundary).
+def _chromosome_landmark(acrocentrics: frozenset[str]) -> LandmarkOf:
+    """Backbone token = the chromosome (``chrN``), acrocentrics collapsed to one ``acrocentric``.
 
-    Acrocentric chromosomes collapse to ``acrocentric`` (their short arms recombine, so the specific
-    assignment is unreliable). A feature whose structural layer is ``structureless`` (a chromosome
-    arm, ``ct``, the ``non-``/``novel`` catch-alls) contributes no token — but telomeres and
-    satellites are *kept*, so they can anchor the layout even though they are filler for clustering.
+    Used only for a **clean translocation** — a cluster whose reads carry a large, obvious block from
+    each of several chromosomes (see :func:`_major_chromosomes`). There the chromosomes *are* the
+    structure and their breakpoints are the thing to line up.
     """
 
     def landmark(feature: str) -> str | None:
-        chrom, sep, structural = feature.partition(":")
-        if not sep:
-            structural = feature
-        if structural in structureless:
+        chrom = feature.split(":", 1)[0] if ":" in feature else ""
+        if not chrom.startswith("chr"):
             return None
-        if sep and chrom.startswith("chr"):
-            chrom = "acrocentric" if chrom in acrocentrics else chrom
-            return f"{chrom}:{structural}"
-        return structural
+        return "acrocentric" if chrom in acrocentrics else chrom
 
     return landmark
+
+
+def _structural_landmark(structureless: frozenset[str]) -> LandmarkOf:
+    """Backbone token = the structural feature alone, chromosome **stripped** — the default backbone.
+
+    Stripping the chromosome means a satellite array annotated to several chromosome labels (a bSat
+    split across ``chr18``/``chr22``/``submetacentric``) is one ``bSat`` landmark, not a scramble, so
+    chimeric clusters — lots of small signal from many chromosomes — lay out by their feature
+    skeleton (``telomere → TAR1``, ``bSat → ITS``). ``structureless`` arms/ct contribute nothing;
+    telomeres and satellites are kept (they are filler for *clustering* but real layout landmarks).
+    """
+
+    def landmark(feature: str) -> str | None:
+        structural = feature.split(":", 1)[1] if ":" in feature else feature
+        return None if structural in structureless else structural
+
+    return landmark
+
+
+def _translocation_chromosomes(
+    reads: Mapping[str, Sequence[Segment]],
+    members: Sequence[str],
+    acrocentrics: frozenset[str],
+    min_block_bp: int,
+) -> set[str]:
+    """The chromosomes of a **clean translocation**, or an empty set if the cluster isn't one.
+
+    A clean translocation has (a) ≥2 chromosomes each carrying a *large, obvious* block — a ≥
+    ``min_block_bp`` contiguous run, in ≥2 reads (a satellite sliver mis-assigned across chromosomes
+    never reaches ``min_block_bp``); **and** (b) those big chromosomes co-occur in *most* reads (≥
+    half, and ≥2) — a recurring breakpoint that almost every read spans. (b) is what tells a real
+    chr11-chr13-chr19 fusion from a chimera that merely has a few big chromosomes co-occurring
+    sporadically (or one chromosome's subtelomeres clustered by a shared TAR1 with a couple of stray
+    second-chromosome reads) — both of those lay out on the structural backbone instead. Acrocentrics
+    collapse before counting.
+    """
+    per_read: list[set[str]] = []
+    for r in members:
+        here: set[str] = set()
+        cur: str = ""
+        bp = 0.0
+        for feature, length in reads[r]:
+            chrom = feature.split(":", 1)[0] if ":" in feature else ""
+            if chrom in acrocentrics:
+                chrom = "acrocentric"
+            elif not chrom.startswith("chr"):
+                chrom = ""  # an ambiguous group label / non-composite feature is not a chromosome
+            if chrom and chrom == cur:
+                bp += length
+            else:
+                if cur and bp >= min_block_bp:
+                    here.add(cur)
+                cur, bp = chrom, float(length) if chrom else 0.0
+        if cur and bp >= min_block_bp:
+            here.add(cur)
+        per_read.append(here)
+    counts: Counter = Counter()
+    for here in per_read:
+        counts.update(here)
+    major = {c for c, n in counts.items() if n >= 2}
+    junction_reads = sum(1 for here in per_read if len(here & major) >= 2)
+    return major if junction_reads >= max(2, len(members) / 2) else set()
 
 
 def _landmark_sequence(
@@ -977,9 +1035,20 @@ def consensus_layout(
     if neighbors is None:  # star: every member placed directly against the seed
         neighbors = {seed: [m for m in members if m != seed]}
 
-    # The backbone is the combined chromosome+structural landmark (telomeres/satellites kept,
-    # arms/ct dropped, acrocentrics collapsed). A cluster with < 2 landmarks falls through to MST.
-    landmark_of = _combined_landmark(acrocentric_chromosomes or frozenset(), structureless)
+    # Pick the backbone. A *clean translocation* (≥2 chromosomes each with a large, obvious block)
+    # lays out on its chromosomes — their breakpoints are the structure. Every other cluster (one
+    # chromosome, or a chimera with small signal scattered over many chromosomes) lays out on its
+    # structural features, chromosome stripped — so a satellite array split across chromosome labels
+    # is one landmark, not a scramble. This is the principled version of the chromosome-vs-structural
+    # split: the chromosome backbone is an opt-in for the easy case, structural is the default.
+    acro = acrocentric_chromosomes or frozenset()
+    if len(_translocation_chromosomes(reads, members, acro, MAJOR_CHROM_BP)) >= 2:
+        landmark_of = _chromosome_landmark(acro)
+        orient_min = MIN_FEATURE_BLOCK_BP  # chromosome blocks are large; ignore small slivers
+    else:
+        landmark_of = _structural_landmark(structureless)
+        orient_min = ORIENT_MIN_BLOCK_BP  # a small ITS/gSat is enough to orient a structural read
+
     sequences = {
         r: _landmark_sequence(reads[r], landmark_of, MIN_FEATURE_BLOCK_BP) for r in members
     }
@@ -993,10 +1062,10 @@ def consensus_layout(
         rank = {t: top - v for t, v in rank.items()}
 
     # Orientation reads off a *finer* backbone than placement: a small but real distinctive feature
-    # (a ~400 bp ITS, a ~230 bp gSat next to a TAR1) is enough to tell which way a read runs, even
-    # though it is too small to anchor on. Without it, reads carrying one big landmark flip on a
-    # coin-toss best-fit.
-    orient_seqs = {r: _landmark_sequence(reads[r], landmark_of, ORIENT_MIN_BLOCK_BP) for r in members}
+    # (a ~400 bp ITS, a ~230 bp gSat next to a TAR1) is enough to tell which way a structural read
+    # runs, even though it is too small to anchor on. Without it, reads carrying one big landmark
+    # flip on a coin-toss best-fit.
+    orient_seqs = {r: _landmark_sequence(reads[r], landmark_of, orient_min) for r in members}
     orient_rank = _landmark_order(orient_seqs.values())
     seed_oranks = [orient_rank[t] for t in orient_seqs[seed] if t in orient_rank]
     if len(seed_oranks) >= 2 and seed_oranks[-1] < seed_oranks[0]:

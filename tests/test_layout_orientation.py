@@ -250,6 +250,25 @@ def test_acrocentric_chromosomes_collapse_in_backbone():
     assert max(junctions) - min(junctions) <= 500, junctions
 
 
+def test_translocation_chromosomes_distinguishes_clean_from_chimeric():
+    """The chromosome backbone is opt-in for a *clean* translocation (≥2 big chromosomes co-occurring
+    in most reads); a chimera / shared-subtelomere cluster falls back to the structural backbone."""
+    acro = frozenset()
+    bp = asm.MAJOR_CHROM_BP
+    # clean: every read spans the chr11-chr13 junction, both chromosomes large
+    clean = {f"r{i}": [("chr11:q_arm", 9000), ("chr13:active_hor", 8000)] for i in range(4)}
+    assert asm._translocation_chromosomes(clean, list(clean), acro, bp) == {"chr11", "chr13"}
+    # subtelomere cluster: 6 chr16-only reads + 2 with a stray chr2 — chr2 co-occurs in only 2/8
+    # reads (< half), so it is not a clean translocation -> empty (use the structural backbone)
+    sub = {f"s{i}": [("chr16:q_arm", 9000), ("chr16:TAR1", 1500)] for i in range(6)}
+    sub["t1"] = [("chr16:q_arm", 9000), ("chr2:q_arm", 8000)]
+    sub["t2"] = [("chr16:q_arm", 9000), ("chr2:q_arm", 8000)]
+    assert asm._translocation_chromosomes(sub, list(sub), acro, bp) == set()
+    # satellite slivers (a bSat array mis-assigned across chromosomes) never reach MAJOR_CHROM_BP
+    slivers = {f"x{i}": [("chr18:bSat", 5500), ("chr22:bSat", 400), ("chr4:bSat", 350)] for i in range(3)}
+    assert asm._translocation_chromosomes(slivers, list(slivers), acro, bp) == set()
+
+
 def test_small_distinctive_feature_orients_reads():
     """A distinctive feature too small to *anchor* on (a ~400 bp ITS, below MIN_FEATURE_BLOCK_BP)
     still *orients* its read, so reads carrying one big TAR1 don't flip on a coin-toss (cluster_1).
