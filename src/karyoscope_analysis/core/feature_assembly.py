@@ -947,13 +947,15 @@ def consensus_layout(
         r: (reverse_segments(reads[r]) if orient[r] else list(reads[r])) for r in members
     }
 
-    if len(rank) >= 2:
-        # Anchor on backbone junctions so breakpoints line up.
+    if rank:
+        # Anchor on the backbone: a junction between landmarks (≥2), or — for a single-distinctive-
+        # feature cluster (e.g. TAR1 only) — that one landmark's block, so the distinctive feature
+        # lines up instead of the layout drifting on a big variable telomere/arm (the MST failure).
         placed: dict[str, list[float]] = _junction_placement(
             oriented_segs, members, rank, landmark_of
         )
     else:
-        # < 2 landmarks: Prim's — commit the highest-scoring overlap next, fixed orientation.
+        # No backbone landmark at all: Prim's — commit the highest-scoring overlap next.
         placed = {seed: [float(x) for x in _cumulative_bp(oriented_segs[seed])]}
         tie = count()
         heap: list[tuple[float, int, str, list[float]]] = []
