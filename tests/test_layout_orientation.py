@@ -271,6 +271,12 @@ def test_translocation_chromosomes_distinguishes_clean_from_chimeric():
     # a shared subtelomere (a TAR1 array on chr4 + an acrocentric): adjacent but both sides small
     shared = {f"u{i}": [("chr4:TAR1", 1000), ("chr15:TAR1", 2000)] for i in range(4)}
     assert asm._translocation_chromosomes(shared, list(shared), acro, bp) == set()
+    # chr4 arm, then a telomere (chr2), then an acrocentric centromere: the telomere run sits between
+    # the two big chromosomes, so they're not consecutive -> a chr4-end-then-acrocentric structure,
+    # not a fusion -> structural backbone
+    telo = {f"v{i}": [("chr4:q_arm", 7000), ("chr2:canonical_telomere", 700), ("chr14:cenSat", 6000)]
+            for i in range(3)}
+    assert asm._translocation_chromosomes(telo, list(telo), frozenset({"chr14"}), bp) == set()
     # satellite slivers (a bSat array mis-assigned across chromosomes) never reach JUNCTION_PARTNER_BP
     slivers = {f"x{i}": [("chr18:bSat", 5500), ("chr22:bSat", 400), ("chr4:bSat", 350)] for i in range(3)}
     assert asm._translocation_chromosomes(slivers, list(slivers), acro, bp) == set()

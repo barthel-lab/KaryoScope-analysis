@@ -825,17 +825,19 @@ def _translocation_chromosomes(
 ) -> set[str]:
     """The chromosomes of a **clean translocation**, or an empty set if the cluster isn't one.
 
-    A clean translocation has a **consistent chromosome junction**: two *adjacent* chromosome blocks
-    (gap < ADJACENT_GAP_BP) on different chromosomes — one large (≥ ``min_block_bp``, a clear arm or
+    A clean translocation has a **consistent chromosome junction**: two **directly consecutive**
+    chromosome blocks on different chromosomes — one large (≥ ``min_block_bp``, a clear arm or
     centromere) and the other ≥ ``JUNCTION_PARTNER_BP`` — and the *same chromosome pair* recurs in at
-    least half the reads. That recurring, adjacent, sized junction is what tells a real chr11-chr13
-    fusion (every read spans the same breakpoint) from:
+    least half the reads. "Consecutive" means nothing real lies between them: a ≥ MIN_FEATURE_BLOCK_BP
+    run of a third chromosome (e.g. a subtelomere's ``canonical_telomere``, annotated to chr2/chr20,
+    sitting between a chr4 arm and an acrocentric centromere) **breaks** the adjacency — that is a
+    chr4-end-then-acrocentric structure, not a chr4-acrocentric fusion. That recurring, sized,
+    consecutive junction tells a real chr11-chr13 fusion from:
 
     * a **chimera** whose reads cross many chromosomes but never agree on a pair (no pair reaches half);
-    * a **shared subtelomere** (a TAR1 array annotated chr4 on one read, an acrocentric on the next):
-      adjacent, but both sides are small satellite blocks, so neither reaches ``min_block_bp``;
-    * a **mis-assigned satellite sliver** (a bSat array split across chromosome labels): the sliver
-      never reaches ``JUNCTION_PARTNER_BP``.
+    * a **shared subtelomere** (a TAR1 array annotated chr4 then acrocentric): both sides are small
+      satellite blocks, so neither reaches ``min_block_bp``;
+    * a **mis-assigned satellite sliver** (a bSat split across labels): the sliver < ``JUNCTION_PARTNER_BP``.
 
     All of those fall back to the structural backbone. Acrocentrics collapse to ``acrocentric`` first.
     """
@@ -857,10 +859,18 @@ def _translocation_chromosomes(
             pos += length
         if cur is not None:
             runs.append((cur, cstart, pos))
-        blocks = [(c, s, e) for c, s, e in runs if e - s >= JUNCTION_PARTNER_BP]
+        # a real (≥ MIN_FEATURE_BLOCK_BP) chromosome run counts; a sliver is absorbed into the gap so
+        # it can't break adjacency, but it also can't bridge two chromosomes into a false junction.
+        real = [(c, s, e) for c, s, e in runs if e - s >= MIN_FEATURE_BLOCK_BP]
         seen: set[frozenset] = set()
-        for (ca, sa, ea), (cb, sb, eb) in pairwise(blocks):
-            if ca != cb and sb - ea < ADJACENT_GAP_BP and max(ea - sa, eb - sb) >= min_block_bp:
+        for (ca, sa, ea), (cb, sb, eb) in pairwise(real):
+            la, lb = ea - sa, eb - sb
+            if (
+                ca != cb
+                and min(la, lb) >= JUNCTION_PARTNER_BP
+                and max(la, lb) >= min_block_bp
+                and sb - ea < ADJACENT_GAP_BP
+            ):
                 seen.add(frozenset({ca, cb}))
         pair_reads.update(seen)
     threshold = max(2, len(members) / 2)
