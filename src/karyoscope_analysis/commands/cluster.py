@@ -310,10 +310,11 @@ def cmd(
     for e in edges:
         neighbors.setdefault(e.a, []).append(e.b)
         neighbors.setdefault(e.b, []).append(e.a)
+    acrocentrics = hierarchy.acrocentric_chromosomes
     layouts = [
         asm.consensus_layout(
             reads, c, neighbors=neighbors, sub_score=sub_score, gap_factor=gap_factor,
-            filler=filler, weight=weight,
+            filler=filler, acrocentric_chromosomes=acrocentrics, weight=weight,
         )
         for c in clusters
     ]

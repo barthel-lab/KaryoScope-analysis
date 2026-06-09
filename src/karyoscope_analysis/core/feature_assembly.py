@@ -679,10 +679,21 @@ ADJACENT_GAP_BP = 2000
 LandmarkOf = Callable[[str], "str | None"]
 
 
-def _chromosome_landmark(feature: str) -> str | None:
-    """Backbone token = the specific chromosome (``chrN``); ambiguous/non-composite -> skip."""
-    chrom = feature.split(":", 1)[0] if ":" in feature else ""
-    return chrom if chrom.startswith("chr") else None
+def _chromosome_landmark(acrocentrics: frozenset[str] = frozenset()) -> LandmarkOf:
+    """Backbone token = the specific chromosome (``chrN``); ambiguous/non-composite -> skip.
+
+    Acrocentric chromosomes (``acrocentrics``) collapse to one ``acrocentric`` token: their short
+    arms recombine, so a read's specific acrocentric assignment is unreliable and treating chr15 vs
+    chr21 as distinct backbone landmarks tangles the layout.
+    """
+
+    def landmark(feature: str) -> str | None:
+        chrom = feature.split(":", 1)[0] if ":" in feature else ""
+        if not chrom.startswith("chr"):
+            return None
+        return "acrocentric" if chrom in acrocentrics else chrom
+
+    return landmark
 
 
 def _structural_landmark(filler: frozenset[str]) -> LandmarkOf:
@@ -888,6 +899,7 @@ def consensus_layout(
     sub_score: SubScore,
     gap_factor: float,
     filler: frozenset[str] | None = None,
+    acrocentric_chromosomes: frozenset[str] | None = None,
     weight: Mapping[str, float] | None = None,
 ) -> ClusterLayout:
     """Lay a cluster out in consensus coordinates: place every read so matched features stack.
@@ -921,12 +933,13 @@ def consensus_layout(
     # Pick the backbone: chromosomes if the cluster is a rearrangement, else (only when a filler
     # set distinguishes distinctive features from filler) the distinctive structural features.
     # With no filler set there is no meaningful backbone, so fall through to MST tiling.
+    chrom_landmark = _chromosome_landmark(acrocentric_chromosomes or frozenset())
     landmark_of = _structural_landmark(filler)
     chrom_seqs = {
-        r: _landmark_sequence(reads[r], _chromosome_landmark, MIN_CHROM_BLOCK_BP) for r in members
+        r: _landmark_sequence(reads[r], chrom_landmark, MIN_CHROM_BLOCK_BP) for r in members
     }
     if len({c for seq in chrom_seqs.values() for c in seq}) >= 2:
-        landmark_of, sequences = _chromosome_landmark, chrom_seqs
+        landmark_of, sequences = chrom_landmark, chrom_seqs
     elif filler:
         sequences = {
             r: _landmark_sequence(reads[r], landmark_of, MIN_FEATURE_BLOCK_BP) for r in members

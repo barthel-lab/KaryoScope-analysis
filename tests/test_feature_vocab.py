@@ -139,3 +139,10 @@ def test_filler_features():
     # distinctive structural features are NOT filler
     for f in ("aSat", "bSat", "gSat", "HSat3", "mon", "ITS", "TAR1", "rDNA"):
         assert f not in filler, f
+
+
+def test_acrocentric_chromosomes():
+    h = FeatureHierarchy.from_tsv(HIERARCHY_TSV)
+    acro = h.acrocentric_chromosomes
+    assert acro == frozenset({"chr13", "chr14", "chr15", "chr21", "chr22"})
+    assert "chr4" not in acro and "chr1" not in acro

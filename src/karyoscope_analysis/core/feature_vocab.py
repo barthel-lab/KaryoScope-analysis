@@ -143,6 +143,19 @@ class FeatureHierarchy:
         return frozenset({"ct"})
 
     @property
+    def acrocentric_chromosomes(self) -> frozenset[str]:
+        """The acrocentric chromosomes (chr13/14/15/21/22), from the ``chromosome`` featureset.
+
+        Their short arms undergo homologous recombination, so a read's *specific* acrocentric
+        chromosome assignment is unreliable — Engine B's layout collapses them to a single
+        ``acrocentric`` backbone token rather than treating chr15 vs chr21 as distinct. Empty if the
+        hierarchy has no ``acrocentric`` node.
+        """
+        if "acrocentric" not in self.features("chromosome"):
+            return frozenset()
+        return self.descendants("chromosome", "acrocentric")
+
+    @property
     def canonical_telomere(self) -> frozenset[str]:
         """Canonical-telomere features (subtelomeric featureset)."""
         self._require_node("subtelomeric", "canonical_telomere")

@@ -218,3 +218,32 @@ def test_reads_sorted_by_consensus_start():
     for layout in (_layout_cluster6(), _layout_chr18()):
         starts = [min(s for s, _e, _f in r.segments) for r in layout.placed]
         assert starts == sorted(starts), starts
+
+
+def test_acrocentric_chromosomes_collapse_in_backbone():
+    """Reads sharing chr4 but assigned to *different* acrocentrics (chr15 vs chr21) lay out as one
+    chr4 - acrocentric structure, so the recombining acrocentric short arms don't tangle the backbone."""
+    acro = frozenset({"chr13", "chr14", "chr15", "chr21", "chr22"})
+    reads = {
+        "a": [("chr4:p_arm", 20000), ("chr4:bSat", 6000), ("chr15:TAR1", 2000)],
+        "b": [("chr4:p_arm", 18000), ("chr4:bSat", 6000), ("chr21:TAR1", 2000)],  # chr21, not chr15
+        "c": [("chr4:p_arm", 22000), ("chr4:bSat", 6000), ("chr22:TAR1", 2000)],
+    }
+    members = tuple(sorted(reads, key=lambda r: -sum(length for _f, length in reads[r])))
+    cluster = asm.Cluster(
+        members=members, seed=members[0], reversed_relative_to_seed={}, size=len(members),
+        orientation_conflict=False,
+    )
+    neighbors = {r: [o for o in reads if o != r] for r in reads}
+    layout = asm.consensus_layout(
+        reads, cluster, neighbors=neighbors, sub_score=SUB, gap_factor=0.1,
+        acrocentric_chromosomes=acro,
+    )
+    # the chr4->acrocentric junction (chr4:bSat end / acrocentric:TAR1 start) lands at one coordinate
+    junctions = []
+    for read in layout.placed:
+        for s, _e, feat in sorted(read.segments):
+            if feat.split(":", 1)[1] == "TAR1":
+                junctions.append(s)
+                break
+    assert max(junctions) - min(junctions) <= 500, junctions
