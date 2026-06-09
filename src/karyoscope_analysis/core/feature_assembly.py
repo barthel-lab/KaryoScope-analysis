@@ -684,12 +684,23 @@ def _refine_by_concordance(
     The backbone anchor places most reads right but pins each on a single junction, so a read whose
     junction it misread sits a feature off. Here every read is re-offset to where its features
     actually overlap matching consensus features. Features are compared by their **backbone landmark**
-    (``landmark_of``): filler (arms/ct → ``None``) is ignored, a satellite array split across
-    chromosome labels matches as one structural token, and a translocation keeps its chromosomes
-    distinct. Each matched bp is scored by ``weight`` (genome-frequency) so lining up a distinctive
-    ITS/bSat counts far more than a ubiquitous telomere. Two passes: the consensus is rebuilt from the
-    refined placement and the reads re-offset against it.
+    (``landmark_of``): a satellite array split across chromosome labels matches as one structural
+    token, and a translocation keeps its chromosomes distinct. Each matched bp is scored by ``weight``
+    (genome-frequency) so lining up a distinctive ITS/bSat counts far more than a ubiquitous telomere.
+    The consensus a read is scored against is built **leaving that read out**, so its own lone block
+    can't anchor it where no other read agrees (otherwise it would match its own vote and never move),
+    while a block another read also carries still counts. A read only re-offsets when that strictly
+    beats staying put. Two passes: the consensus is rebuilt from the refined placement.
     """
+
+    def cell_token(ctr: Counter, exclude: str | None = None) -> str | None:
+        best, best_n = None, 0
+        for tok, n in ctr.items():
+            eff = n - (1 if tok == exclude else 0)
+            if eff > best_n or (eff == best_n and best is not None and tok < best):
+                best, best_n = tok, eff
+        return best if best_n > 0 else None
+
     placed = {r: list(b) for r, b in placed.items()}
     for _ in range(iterations):
         per_read: dict[str, list[tuple[float, float, str, float]]] = {}
@@ -705,38 +716,42 @@ def _refine_by_concordance(
         if len(cuts) < 2:
             break
         votes: list[Counter[str]] = [Counter() for _ in range(len(cuts) - 1)]
+        cells_of: dict[str, list[tuple[int, str]]] = {r: [] for r in members}
         for r in members:
             for s, e, t, _w in per_read[r]:
                 for k in range(bisect.bisect_left(cuts, round(s)), bisect.bisect_left(cuts, round(e))):
                     votes[k][t] += 1
-        cons_by_token: dict[str, list[tuple[float, float]]] = defaultdict(list)
-        for k, ctr in enumerate(votes):
-            if ctr:
-                top = max(ctr.values())
-                cons_by_token[min(t for t, n in ctr.items() if n == top)].append((cuts[k], cuts[k + 1]))
-
-        def concordance(
-            segs: list[tuple[float, float, str, float]], off: float, cons=cons_by_token
-        ) -> float:
-            score = 0.0
-            for s, e, t, w in segs:
-                if w <= 0:
-                    continue
-                a0, a1 = s + off, e + off
-                for cs, ce in cons.get(t, ()):
-                    overlap = min(a1, ce) - max(a0, cs)
-                    if overlap > 0:
-                        score += overlap * w
-            return score
+                    cells_of[r].append((k, t))
+        full_token = [cell_token(ctr) for ctr in votes]
 
         changed = False
         for r in members:
-            segs = per_read[r]
+            own = {k: t for k, t in cells_of[r]}  # leave-one-out: r's own vote per cell it covers
+            cons: dict[str, list[tuple[float, float]]] = defaultdict(list)
+            for k in range(len(votes)):
+                tok = cell_token(votes[k], own[k]) if k in own else full_token[k]
+                if tok is not None:
+                    block = cons[tok]
+                    if block and block[-1][1] == cuts[k]:
+                        block[-1] = (block[-1][0], cuts[k + 1])  # coalesce contiguous cells
+                    else:
+                        block.append((cuts[k], cuts[k + 1]))
+
+            def concordance(off: float, cons=cons, segs=per_read[r]) -> float:
+                score = 0.0
+                for s, e, t, w in segs:
+                    a0, a1 = s + off, e + off
+                    for cs, ce in cons.get(t, ()):
+                        overlap = min(a1, ce) - max(a0, cs)
+                        if overlap > 0:
+                            score += overlap * w
+                return score
+
             offsets = {0.0}
-            for s, _e, t, _w in segs:  # candidate shifts align one of this read's blocks to a match
-                offsets.update(cs - s for cs, _ce in cons_by_token.get(t, ()))
-            best_off = max(offsets, key=lambda o: concordance(segs, o))
-            if best_off != 0.0:
+            for s, _e, t, _w in per_read[r]:
+                offsets.update(cs - s for cs, _ce in cons.get(t, ()))
+            best_off = max(offsets, key=concordance)
+            if best_off != 0.0 and concordance(best_off) > concordance(0.0):
                 placed[r] = [b + best_off for b in placed[r]]
                 changed = True
         if not changed:
