@@ -18,11 +18,12 @@ Consensus (seed-anchored majority over the layout) builds on this next.
 from __future__ import annotations
 
 import bisect
+import heapq
 import multiprocessing as mp
-from collections import Counter, defaultdict, deque
-from collections.abc import Callable, Mapping, Sequence
+from collections import Counter, defaultdict
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from itertools import islice
+from itertools import count, islice, pairwise
 
 from karyoscope_analysis.core.feature_align import (
     Segment,
@@ -590,33 +591,167 @@ def _union_consensus(placed: Sequence[LaidOutRead], width: int) -> tuple[Consens
     return tuple(out)
 
 
-def _place_against(
-    stored: Sequence[Segment],
+def _chromosome_blocks(segments: Sequence[Segment]) -> list[str]:
+    """The specific chromosomes a read spans, in read order (consecutive duplicates collapsed).
+
+    Only ``chrN`` layers of composite ``chromosome:feature`` labels count; ambiguous layers
+    (``autosome``/``acrocentric``/…) and non-composite labels are ignored.
+    """
+    seq: list[str] = []
+    for feature, _length in segments:
+        chrom = feature.split(":", 1)[0] if ":" in feature else ""
+        if chrom.startswith("chr") and (not seq or seq[-1] != chrom):
+            seq.append(chrom)
+    return seq
+
+
+def _chromosome_order(sequences: Iterable[Sequence[str]]) -> dict[str, int]:
+    """Rank chromosomes along the cluster's structure from per-read chromosome sequences.
+
+    Reads give *undirected* adjacencies between consecutive chromosomes (orientation-blind); for a
+    rearrangement these form a path (e.g. ``chr11 — chr13 — chr19``). Walk it from an endpoint,
+    following the strongest adjacency, to assign each chromosome a position. Returns ``{chrom:
+    rank}`` (``{}`` if no chromosomes); disconnected extras are appended deterministically.
+    """
+    adjacency: dict[str, Counter] = defaultdict(Counter)
+    nodes: set[str] = set()
+    for seq in sequences:
+        nodes.update(seq)
+        for a, b in pairwise(seq):
+            if a != b:
+                adjacency[a][b] += 1
+                adjacency[b][a] += 1
+    if not nodes:
+        return {}
+    start = min(nodes, key=lambda n: (len(adjacency[n]), n))  # an endpoint (fewest neighbours)
+    order: list[str] = []
+    visited: set[str] = set()
+    current: str | None = start
+    while current is not None and current not in visited:
+        order.append(current)
+        visited.add(current)
+        nxt = [(cnt, n) for n, cnt in adjacency[current].items() if n not in visited]
+        current = max(nxt)[1] if nxt else None
+    order.extend(sorted(n for n in nodes if n not in visited))  # disconnected chromosomes
+    return {chrom: i for i, chrom in enumerate(order)}
+
+
+def _orient_reads(
+    reads: Mapping[str, Sequence[Segment]],
+    members: Sequence[str],
+    seed: str,
+    rank: Mapping[str, int],
+    sequences: Mapping[str, Sequence[str]],
+    scorer: SubScore,
+    gap_factor: float,
+) -> dict[str, bool]:
+    """Orient a cluster's reads relative to the seed (``{read: reversed_vs_seed}``).
+
+    Chromosome identity is the orientation signal: given the chromosome ``rank`` along the
+    cluster's structure (:func:`_chromosome_order`), **flip any read whose chromosomes run in the
+    descending direction** — so every read reads chromosomes in one consistent order. A read that
+    lives in a *single* chromosome has no such signal, so it falls back to whichever orientation
+    aligns better to the seed (the within-chromosome features decide).
+    """
+    orient: dict[str, bool] = {}
+    undetermined: list[str] = []
+    for r in members:
+        ranks = [rank[c] for c in sequences[r] if c in rank]
+        if len({*ranks}) >= 2:  # spans >= 2 chromosomes -> orient by their order
+            orient[r] = ranks[-1] < ranks[0]
+        else:
+            undetermined.append(r)
+    if orient.get(seed):  # keep the seed unflipped as the reference frame
+        orient = {r: not flipped for r, flipped in orient.items()}
+
+    # Single-chromosome reads: orient by best feature alignment to the (now oriented) seed.
+    seed_oriented = reverse_segments(reads[seed]) if orient.get(seed, False) else list(reads[seed])
+    for r in undetermined:
+        if r == seed:
+            orient[r] = False
+            continue
+        fwd = align_local(reads[r], seed_oriented, sub_score=scorer, gap_factor=gap_factor)
+        rev = align_local(
+            reverse_segments(reads[r]), seed_oriented, sub_score=scorer, gap_factor=gap_factor
+        )
+        orient[r] = rev.score > fwd.score
+    return orient
+
+
+def _place_fixed(
+    child_oriented: Sequence[Segment],
     parent_oriented: Sequence[Segment],
     parent_bounds: Sequence[float],
     scorer: SubScore,
     gap_factor: float,
-) -> tuple[list[Segment], list[float], bool]:
-    """Place a read against an already-placed parent: returns ``(oriented, cons_bounds, reversed)``.
-
-    Tries both orientations of the read, keeps the one aligning better to the parent, and maps the
-    read's segment boundaries to consensus coordinates via the parent's (so matched features land
-    on the parent's coordinate). If nothing aligns, the read keeps its own coordinates.
-    """
-    forward = list(stored)
-    reverse = reverse_segments(stored)
-    aln_f = align_local(forward, parent_oriented, sub_score=scorer, gap_factor=gap_factor)
-    aln_r = align_local(reverse, parent_oriented, sub_score=scorer, gap_factor=gap_factor)
-    oriented, aln, reversed_ = (
-        (reverse, aln_r, True) if aln_r.score > aln_f.score else (forward, aln_f, False)
-    )
-    cum = _cumulative_bp(oriented)
+) -> tuple[list[float], float]:
+    """Map an already-oriented read's segment boundaries onto consensus coords via an oriented,
+    already-placed parent; returns ``(cons_bounds, alignment_score)``. Orientation is fixed by
+    :func:`_orient_reads`, so this only aligns forward to find the coordinate offset."""
+    aln = align_local(child_oriented, parent_oriented, sub_score=scorer, gap_factor=gap_factor)
+    cum = _cumulative_bp(child_oriented)
     if aln.columns:
         mp = _anchor_map([(cum[ui], parent_bounds[pj]) for ui, pj in aln.columns])
-        bounds = [mp(x) for x in cum]
-    else:
-        bounds = [float(x) for x in cum]
-    return oriented, bounds, reversed_
+        return [mp(x) for x in cum], aln.score
+    return [float(x) for x in cum], aln.score
+
+
+def _junction_placement(
+    oriented_segs: Mapping[str, Sequence[Segment]],
+    members: Sequence[str],
+    rank: Mapping[str, int],
+) -> dict[str, list[float]]:
+    """Place reads of a multi-chromosome cluster by anchoring on chromosome **junctions**.
+
+    Chromosomes are laid out left to right in ``rank`` order, each chromosome given a slot as wide
+    as its longest observed block. A read's chromosome *junction* (the boundary between two
+    consecutive chromosomes) is pinned to the boundary between their slots, and the read's segments
+    extend outward from there — so every read sharing a breakpoint lines that breakpoint up exactly,
+    regardless of how much of each chromosome it captured. A read confined to one chromosome is
+    pinned at that chromosome's slot start. This is robust where alignment is not: the chromosome
+    identity, not a ~uniform shared satellite, fixes the coordinate.
+    """
+    max_len: dict[str, float] = defaultdict(float)
+    for r in members:
+        per: dict[str, float] = defaultdict(float)
+        for feature, length in oriented_segs[r]:
+            chrom = feature.split(":", 1)[0] if ":" in feature else ""
+            if chrom in rank:
+                per[chrom] += length
+        for chrom, total in per.items():
+            max_len[chrom] = max(max_len[chrom], total)
+    slot_start: dict[str, float] = {}
+    cursor = 0.0
+    for chrom in sorted(rank, key=lambda c: rank[c]):
+        slot_start[chrom] = cursor
+        cursor += max_len[chrom]
+
+    placed: dict[str, list[float]] = {}
+    for r in members:
+        oriented = oriented_segs[r]
+        cum = _cumulative_bp(oriented)
+        anchor_read = anchor_cons = None
+        prev_chrom: str | None = None
+        for i, (feature, _length) in enumerate(oriented):
+            chrom = feature.split(":", 1)[0] if ":" in feature else ""
+            if chrom not in rank:
+                continue
+            if prev_chrom is not None and prev_chrom != chrom:  # a chromosome junction
+                anchor_read, anchor_cons = cum[i], slot_start[chrom]
+                break
+            prev_chrom = chrom
+        if anchor_read is None:  # single ranked chromosome: pin its block start to the slot
+            idx = next(
+                (i for i, (f, _l) in enumerate(oriented) if f.split(":", 1)[0] in rank), None
+            )
+            if idx is not None:
+                anchor_read = cum[idx]
+                anchor_cons = slot_start[oriented[idx][0].split(":", 1)[0]]
+            else:
+                anchor_read = anchor_cons = 0.0
+        offset = anchor_cons - anchor_read
+        placed[r] = [x + offset for x in cum]
+    return placed
 
 
 def consensus_layout(
@@ -630,48 +765,72 @@ def consensus_layout(
 ) -> ClusterLayout:
     """Lay a cluster out in consensus coordinates: place every read so matched features stack.
 
-    **Progressive layout.** Starting from the seed (the frame), reads are placed by breadth-first
-    walk over the overlap graph (``neighbors``): each read is aligned to an already-placed
-    *overlapping* neighbour and its segment boundaries mapped to consensus coordinates via that
-    neighbour's (a piecewise-linear :func:`_anchor_map`, slope-1 outside the anchors). So aligned
-    features stack vertically, orientation propagates correctly even for reads that don't overlap
-    the seed directly, and overhangs extend the frame. The layout is then shifted so the leftmost
-    edge is 0, the consensus spans the **union** of all reads, and :func:`_union_consensus`
-    majority-votes the feature at each grid interval. Without ``neighbors`` this degrades to a
-    star from the seed (every read placed against the seed); reads with no edge path from the seed
-    fall back to their own coordinates.
+    Orientation is decided first (:func:`_orient_reads`), then placement depends on the cluster:
+
+    * **Multi-chromosome clusters** (a rearrangement) are placed by :func:`_junction_placement` —
+      reads are anchored on their chromosome **junctions**, so every shared breakpoint lines up and
+      chromosomes read in one consistent order. Robust where alignment isn't, because chromosome
+      identity (not a ~uniform shared satellite) fixes the coordinate.
+    * **Single-chromosome clusters** are placed by a maximum-spanning-tree walk over the overlap
+      graph (``neighbors``): from the seed, each read is attached via its *strongest* overlap to an
+      already-placed read (Prim's), in its fixed orientation, mapped to consensus coordinates via a
+      piecewise-linear :func:`_anchor_map`. Without ``neighbors`` this is a star from the seed;
+      reads with no edge path from the seed fall back to their own coordinates.
+
+    The layout is then shifted so the leftmost edge is 0, the consensus spans the **union** of all
+    reads, and :func:`_union_consensus` majority-votes the feature at each grid interval.
     """
     scorer = _memoized(_weighted_sub_score(sub_score, weight))
-    members = set(cluster.members)
+    members = list(cluster.members)
+    member_set = set(members)
     seed = cluster.seed
     if neighbors is None:  # star: every member placed directly against the seed
-        neighbors = {seed: [m for m in cluster.members if m != seed]}
+        neighbors = {seed: [m for m in members if m != seed]}
 
-    seed_oriented = list(reads[seed])
-    placed: dict[str, tuple[list[Segment], list[float], bool]] = {
-        seed: (seed_oriented, [float(x) for x in _cumulative_bp(seed_oriented)], False)
+    # Orientation (chromosome order, with a feature fallback for single-chromosome reads), then
+    # materialize each read's oriented segments.
+    sequences = {r: _chromosome_blocks(reads[r]) for r in members}
+    rank = _chromosome_order(sequences.values())
+    orient = _orient_reads(reads, members, seed, rank, sequences, scorer, gap_factor)
+    oriented_segs = {
+        r: (reverse_segments(reads[r]) if orient[r] else list(reads[r])) for r in members
     }
-    queue = deque([seed])
-    while queue:
-        parent = queue.popleft()
-        parent_oriented, parent_bounds, _ = placed[parent]
-        for child in neighbors.get(parent, ()):
-            if child not in members or child in placed:
+
+    if len(rank) >= 2:
+        # Rearrangement: anchor on chromosome junctions so breakpoints line up.
+        placed: dict[str, list[float]] = _junction_placement(oriented_segs, members, rank)
+    else:
+        # Single chromosome: Prim's — commit the highest-scoring overlap next, fixed orientation.
+        placed = {seed: [float(x) for x in _cumulative_bp(oriented_segs[seed])]}
+        tie = count()
+        heap: list[tuple[float, int, str, list[float]]] = []
+
+        def offer(parent: str) -> None:
+            p_oriented, p_bounds = oriented_segs[parent], placed[parent]
+            for child in neighbors.get(parent, ()):
+                if child not in member_set or child in placed:
+                    continue
+                bounds, score = _place_fixed(
+                    oriented_segs[child], p_oriented, p_bounds, scorer, gap_factor
+                )
+                heapq.heappush(heap, (-score, next(tie), child, bounds))
+
+        offer(seed)
+        while heap:
+            _neg, _t, child, bounds = heapq.heappop(heap)
+            if child in placed:  # stale entry (already attached via a stronger overlap)
                 continue
-            placed[child] = _place_against(
-                reads[child], parent_oriented, parent_bounds, scorer, gap_factor
-            )
-            queue.append(child)
-    for member in cluster.members:  # members unreachable via edges: place at their own coordinates
-        if member not in placed:
-            seg = list(reads[member])
-            placed[member] = (seg, [float(x) for x in _cumulative_bp(seg)], False)
+            placed[child] = bounds
+            offer(child)
+        for member in members:  # unreachable via edges: place at their own coordinates
+            if member not in placed:
+                placed[member] = [float(x) for x in _cumulative_bp(oriented_segs[member])]
 
     raw: list[tuple[str, bool, bool, list[Interval]]] = []
     for rid in cluster.members:
-        oriented, bounds, reversed_ = placed[rid]
+        oriented, bounds = oriented_segs[rid], placed[rid]
         segs = [(round(bounds[k]), round(bounds[k + 1]), oriented[k][0]) for k in range(len(oriented))]
-        raw.append((rid, rid == seed, reversed_, segs))
+        raw.append((rid, rid == seed, orient[rid], segs))
 
     starts = [s for *_, segs in raw for s, _e, _f in segs]
     ends = [e for *_, segs in raw for _s, e, _f in segs]

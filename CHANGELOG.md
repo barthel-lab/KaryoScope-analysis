@@ -13,11 +13,16 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
 
 ### Added
 
-- Engine B **progressive layout**: `consensus_layout` now places reads by a breadth-first walk
-  over the overlap graph — each read is aligned to an already-placed *overlapping neighbour* (and
-  oriented by best fit to it), not the seed alone — so reads that don't overlap the seed directly
-  (transitive members of a cluster) land in the right place and orientation, and coordinates/flips
-  propagate along the chain. Membership is unchanged (placement only). `cluster-plot` gains a
+- Engine B **chromosome-aware layout** (`consensus_layout`): orientation and placement now use the
+  chromosome identity as the primary signal, which is what makes rearrangement clusters read
+  correctly. Orientation flips each read so its chromosomes run in one consistent order — the order
+  is the path read off the chromosome adjacencies (e.g. `chr11 — chr13 — chr19`); single-chromosome
+  reads fall back to best-fit alignment. Multi-chromosome (translocation) clusters are then placed
+  by **anchoring on chromosome junctions**: each shared breakpoint is pinned to one coordinate, so
+  it lines up across every read regardless of how much of each chromosome the read captured —
+  robust where feature alignment isn't, because a large ~uniform shared satellite (a hub) no longer
+  flips reads or floats the breakpoint. Single-chromosome clusters keep the maximum-spanning-tree
+  feature alignment. Membership is unchanged (placement only). `cluster-plot` gains a
   `--chromosome-track/--no-chromosome-track` option (default on): a thin chromosome-colored strip
   is drawn directly under each read's structural track (shared DB color palette + a Chromosomes
   legend), so structure and chromosome identity line up and translocations show two chromosome
