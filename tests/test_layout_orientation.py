@@ -269,6 +269,34 @@ def test_translocation_chromosomes_distinguishes_clean_from_chimeric():
     assert asm._translocation_chromosomes(slivers, list(slivers), acro, bp) == set()
 
 
+def test_anchors_on_filler_breakpoint_for_a_variable_length_feature():
+    """A feature whose only neighbor is filler (bSat → arm) anchors on that boundary, so a
+    variable-length feature lines up at its breakpoint instead of drifting on its far edge."""
+    reads = {
+        "a": [("chr4:bSat", 4000), ("chr4:q_arm", 9000)],
+        "b": [("chr4:bSat", 5500), ("chr4:q_arm", 9000)],  # longer bSat
+        "c": [("chr4:bSat", 4500), ("chr4:q_arm", 9000)],
+    }
+    members = tuple(sorted(reads, key=lambda r: -sum(length for _f, length in reads[r])))
+    cluster = asm.Cluster(
+        members=members, seed=members[0], reversed_relative_to_seed={}, size=len(members),
+        orientation_conflict=False,
+    )
+    neighbors = {r: [o for o in reads if o != r] for r in reads}
+    layout = asm.consensus_layout(
+        reads, cluster, neighbors=neighbors, sub_score=SUB, gap_factor=0.1,
+        structureless=frozenset({"arm", "p_arm", "q_arm", "ct"}),
+    )
+    ends = []  # the bSat -> q_arm boundary (bSat end) should land at one coordinate
+    for read in layout.placed:
+        last = None
+        for _s, e, feat in sorted(read.segments):
+            if feat.split(":", 1)[1] == "bSat":
+                last = e
+        ends.append(last)
+    assert max(ends) - min(ends) <= 1, ends
+
+
 def test_small_distinctive_feature_orients_reads():
     """A distinctive feature too small to *anchor* on (a ~400 bp ITS, below MIN_FEATURE_BLOCK_BP)
     still *orients* its read, so reads carrying one big TAR1 don't flip on a coin-toss (cluster_1).

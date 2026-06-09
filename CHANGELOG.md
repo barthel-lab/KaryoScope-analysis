@@ -26,10 +26,12 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   are dropped — telomeres and satellites are kept as layout landmarks even though telomere is filler
   for clustering. Each read is flipped so its backbone runs
   in one consistent order (the path read off the landmark adjacencies, e.g. `chr11 — chr13 — chr19`
-  or `bSat — ITS`), then placed by **anchoring on the most cluster-conserved junction it carries**
-  (the landmark pair seen adjacent in the most reads, ties broken toward a chromosome change) — so a
-  shared breakpoint lines up across every read regardless of how much of each landmark it captured,
-  and a read-specific internal boundary can't pull one read out of register. Robust where feature
+  or `bSat — ITS`), then placed by **anchoring on the most cluster-conserved boundary it carries** —
+  a *junction* (landmark pair seen adjacent in the most reads, ties toward a chromosome change), or
+  failing that a *breakpoint* (a landmark block's edge that abuts filler, e.g. a `bSat → q_arm`
+  boundary, so a variable-length feature lines up at its breakpoint rather than drifting on its far
+  edge) — so a shared boundary lines up across every read regardless of how much of each landmark it
+  captured, and a read-specific internal boundary can't pull one read out of register. Robust where feature
   alignment isn't, because a large ~uniform shared satellite (a hub) no longer flips reads or floats
   the breakpoint. **Orientation** reads off a *finer* backbone (`ORIENT_MIN_BLOCK_BP`, lower than the
   anchor threshold): a small but real distinctive feature (a ~400 bp ITS next to a TAR1) is enough to

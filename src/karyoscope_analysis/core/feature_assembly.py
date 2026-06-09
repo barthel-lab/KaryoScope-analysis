@@ -1020,16 +1020,21 @@ def _junction_placement(
     rank: Mapping[str, int],
     landmark_of: LandmarkOf,
 ) -> dict[str, list[float]]:
-    """Place reads by anchoring on **backbone junctions** (chromosomes, or distinctive features).
+    """Place reads by anchoring on a **conserved backbone boundary** (chromosomes, or features).
 
     Landmarks are laid out left to right in ``rank`` order, each given a slot as wide as its longest
-    observed block. A read is pinned at one of its *junctions* (a contact between two consecutive
-    landmark blocks, gap < ADJACENT_GAP_BP) — specifically the **most cluster-conserved** junction
-    it carries (the landmark pair seen adjacent in the most reads, ties broken toward a chromosome
-    change), so every read sharing that junction lines it up exactly, regardless of how much of each
-    landmark it captured, and a read-specific internal boundary (e.g. an internal ``dhor``) can't
-    pull one read out of register. A read with no junction is pinned at its lowest-rank landmark, so
-    it still lines up on the shared feature rather than drifting via a distal one.
+    observed block. A read is pinned on the **most cluster-conserved boundary** it carries:
+
+    * a *junction* — a contact between two consecutive landmark blocks (gap < ADJACENT_GAP_BP) —
+      preferred, ties broken toward a chromosome change; the right landmark's start pins to its slot;
+    * else a *breakpoint* — a landmark block's edge that abuts filler (≥ ADJACENT_GAP_BP of arm/ct
+      beyond it), e.g. a ``bSat → q_arm`` boundary; the block's filler-facing edge pins to its slot
+      edge, so reads line up on the breakpoint and a variable-length feature extends away from it
+      rather than drifting on its far edge;
+    * else the read's lowest-rank landmark start.
+
+    Anchoring on the *shared* boundary (rather than how much of a landmark a read captured, or a
+    read-specific internal boundary) is what lines every read up.
     """
     max_len: dict[str, float] = defaultdict(float)
     for r in members:
@@ -1045,39 +1050,56 @@ def _junction_placement(
     for token in sorted(rank, key=lambda c: rank[c]):
         slot_start[token] = cursor
         cursor += max_len[token]
+    slot_end = {t: slot_start[t] + max_len[t] for t in slot_start}
 
-    read_blocks = {
-        r: _substantial_blocks(
-            oriented_segs[r], _cumulative_bp(oriented_segs[r]), rank, landmark_of,
-            MIN_FEATURE_BLOCK_BP,
-        )
-        for r in members
-    }
-    junction_freq: Counter = Counter()  # how many reads carry each landmark-pair junction
-    for blocks in read_blocks.values():
+    read_data: dict[str, tuple[list[float], list[tuple[str, float, float]], float]] = {}
+    for r in members:
+        cum = _cumulative_bp(oriented_segs[r])
+        blocks = _substantial_blocks(oriented_segs[r], cum, rank, landmark_of, MIN_FEATURE_BLOCK_BP)
+        read_data[r] = (cum, blocks, cum[-1] if cum else 0.0)
+    junction_freq: Counter = Counter()  # reads carrying each landmark-pair junction
+    breakpoint_freq: Counter = Counter()  # reads carrying each (token, side) landmark->filler edge
+    for _cum, blocks, total in read_data.values():
         for (ta, _sa, ea), (tb, sb, _eb) in pairwise(blocks):
             if ta != tb and sb - ea < ADJACENT_GAP_BP:
                 junction_freq[frozenset({ta, tb})] += 1
+        for k, (token, start, end) in enumerate(blocks):
+            left_end = blocks[k - 1][2] if k > 0 else 0.0
+            right_start = blocks[k + 1][1] if k < len(blocks) - 1 else total
+            if start - left_end >= ADJACENT_GAP_BP:
+                breakpoint_freq[(token, "L")] += 1
+            if right_start - end >= ADJACENT_GAP_BP:
+                breakpoint_freq[(token, "R")] += 1
 
     placed: dict[str, list[float]] = {}
     for r in members:
-        oriented = oriented_segs[r]
-        cum = _cumulative_bp(oriented)
-        blocks = read_blocks[r]
-        # pin the most cluster-conserved junction this read has (freq, then chromosome change)
-        best = None  # (freq, is_chromosome_change, block_start, anchor_token)
+        cum, blocks, total = read_data[r]
+        junction = None  # (freq, is_chromosome_change, block_start, slot)
+        breakpoint_ = None  # (freq, read_coord, slot_coord)
         lowest: tuple[int, float, str] | None = None
-        for k, (token, start, _end) in enumerate(blocks):
+        for k, (token, start, end) in enumerate(blocks):
             if lowest is None or rank[token] < lowest[0]:
                 lowest = (rank[token], start, token)
             if k > 0 and blocks[k - 1][0] != token and start - blocks[k - 1][2] < ADJACENT_GAP_BP:
                 prev = blocks[k - 1][0]
                 ca, cb = _token_chromosome(prev), _token_chromosome(token)
                 key = (junction_freq[frozenset({prev, token})], int(bool(ca and cb and ca != cb)))
-                if best is None or key > best[:2]:
-                    best = (*key, start, token)  # anchor the right (higher-rank) landmark
-        if best is not None:
-            anchor_read, anchor_cons = best[2], slot_start[best[3]]
+                if junction is None or key > junction[:2]:
+                    junction = (*key, start, slot_start[token])
+            left_end = blocks[k - 1][2] if k > 0 else 0.0
+            right_start = blocks[k + 1][1] if k < len(blocks) - 1 else total
+            if start - left_end >= ADJACENT_GAP_BP:
+                f = breakpoint_freq[(token, "L")]
+                if breakpoint_ is None or f > breakpoint_[0]:
+                    breakpoint_ = (f, start, slot_start[token])
+            if right_start - end >= ADJACENT_GAP_BP:
+                f = breakpoint_freq[(token, "R")]
+                if breakpoint_ is None or f > breakpoint_[0]:
+                    breakpoint_ = (f, end, slot_end[token])
+        if junction is not None:
+            anchor_read, anchor_cons = junction[2], junction[3]
+        elif breakpoint_ is not None:
+            anchor_read, anchor_cons = breakpoint_[1], breakpoint_[2]
         elif lowest is not None:
             anchor_read, anchor_cons = lowest[1], slot_start[lowest[2]]
         else:
