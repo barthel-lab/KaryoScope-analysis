@@ -301,7 +301,8 @@ def cmd(
         neighbors.setdefault(e.b, []).append(e.a)
     layouts = [
         asm.consensus_layout(
-            reads, c, neighbors=neighbors, sub_score=sub_score, gap_factor=gap_factor, weight=weight
+            reads, c, neighbors=neighbors, sub_score=sub_score, gap_factor=gap_factor,
+            filler=filler, weight=weight,
         )
         for c in clusters
     ]

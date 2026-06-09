@@ -11,9 +11,13 @@ the chromosomes read in one consistent left-to-right order and the shared juncti
 from __future__ import annotations
 
 from itertools import pairwise
+from pathlib import Path
 
 from karyoscope_analysis.core import feature_assembly as asm
 from karyoscope_analysis.core.feature_align import chromosome_aware_substitution
+from karyoscope_analysis.core.feature_vocab import FeatureHierarchy
+
+HIERARCHY_TSV = Path(__file__).resolve().parent / "data" / "hierarchy.tsv"
 
 # Exact reads from cluster_6 (coalesced (composite_feature, length) segments).
 CLUSTER6: dict[str, list[tuple[str, int]]] = {
@@ -127,3 +131,59 @@ def test_cluster6_shared_junctions_align():
         if len(coords) >= 2:
             spread = max(coords) - min(coords)
             assert spread <= 3000, f"{set(pair)} junction varies by {spread:.0f}bp: {coords}"
+
+
+# Derived from full-sample cluster_2 (a single chromosome, chr18): a bSat - TAR1 distinctive
+# backbone (ITS is a small feature between them, below the landmark threshold), captured in both
+# orientations with varying arm. The backbone here is the *structural* features, not chromosomes.
+CHR18 = {
+    "a_fwd": [
+        ("chr18:p_arm", 30000), ("chr18:bSat", 7000), ("chr18:ITS", 600),
+        ("chr18:p_arm", 5000), ("chr18:TAR1", 2000), ("chr18:p_arm", 20000),
+    ],
+    "b_fwd": [
+        ("chr18:p_arm", 18000), ("chr18:bSat", 7400), ("chr18:ITS", 590),
+        ("chr18:p_arm", 5000), ("chr18:TAR1", 1990), ("chr18:p_arm", 32000),
+    ],
+    "c_rev": [  # same molecule, reversed: TAR1 ... bSat
+        ("chr18:p_arm", 20000), ("chr18:TAR1", 2000), ("chr18:p_arm", 5000),
+        ("chr18:ITS", 588), ("chr18:bSat", 7400),
+    ],
+    "d_rev": [
+        ("chr18:p_arm", 19000), ("chr18:TAR1", 1880), ("chr18:p_arm", 4800),
+        ("chr18:ITS", 593), ("chr18:bSat", 3860),
+    ],
+}
+
+
+def _first_start(read, structural):
+    """Consensus start of a read's first segment whose structural layer is ``structural``."""
+    for s, _e, feat in sorted(read.segments):
+        if feat.split(":", 1)[1] == structural:
+            return s
+    return None
+
+
+def test_single_chromosome_uses_structural_backbone():
+    """A one-chromosome cluster is oriented + ordered by its distinctive features (bSat - TAR1).
+
+    The reversed reads must be flipped so every read reads bSat before TAR1.
+    """
+    filler = FeatureHierarchy.from_tsv(HIERARCHY_TSV).filler_features
+    reads = {rid: list(segs) for rid, segs in CHR18.items()}
+    members = tuple(sorted(reads, key=lambda r: -sum(length for _f, length in reads[r])))
+    cluster = asm.Cluster(
+        members=members, seed=members[0], reversed_relative_to_seed={}, size=len(members),
+        orientation_conflict=False,
+    )
+    neighbors = {r: [o for o in reads if o != r] for r in reads}
+    layout = asm.consensus_layout(
+        reads, cluster, neighbors=neighbors, sub_score=SUB, gap_factor=0.1, filler=filler
+    )
+    # every read must place bSat to the left of TAR1 (consistent backbone order, no inversions)
+    for read in layout.placed:
+        b, t = _first_start(read, "bSat"), _first_start(read, "TAR1")
+        assert b is not None and t is not None and b < t, f"{read.read_id}: bSat={b} TAR1={t}"
+    # the two reverse-orientation reads were flipped
+    flipped = {r.read_id for r in layout.placed if r.reversed}
+    assert flipped == {"c_rev", "d_rev"}, flipped

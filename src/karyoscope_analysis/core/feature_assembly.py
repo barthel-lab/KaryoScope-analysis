@@ -591,27 +591,66 @@ def _union_consensus(placed: Sequence[LaidOutRead], width: int) -> tuple[Consens
     return tuple(out)
 
 
-def _chromosome_blocks(segments: Sequence[Segment]) -> list[str]:
-    """The specific chromosomes a read spans, in read order (consecutive duplicates collapsed).
+#: A landmark run must total at least this many bp to count as a real block (not a noise sliver of
+#: ambiguous annotation) when reading off the backbone. Chromosomes (boundaries are coarse) get the
+#: larger threshold; distinctive structural features get the smaller one (TAR1 can be ~1 kb).
+MIN_CHROM_BLOCK_BP = 2000
+MIN_FEATURE_BLOCK_BP = 1000
 
-    Only ``chrN`` layers of composite ``chromosome:feature`` labels count; ambiguous layers
-    (``autosome``/``acrocentric``/…) and non-composite labels are ignored.
+#: A landmark function maps a composite ``chromosome:feature`` label to the backbone token it
+#: contributes, or ``None`` to skip it.
+LandmarkOf = Callable[[str], "str | None"]
+
+
+def _chromosome_landmark(feature: str) -> str | None:
+    """Backbone token = the specific chromosome (``chrN``); ambiguous/non-composite -> skip."""
+    chrom = feature.split(":", 1)[0] if ":" in feature else ""
+    return chrom if chrom.startswith("chr") else None
+
+
+def _structural_landmark(filler: frozenset[str]) -> LandmarkOf:
+    """Backbone token = the *distinctive* structural feature (not in ``filler``); else skip."""
+
+    def landmark(feature: str) -> str | None:
+        structural = feature.split(":", 1)[1] if ":" in feature else feature
+        return None if structural in filler else structural
+
+    return landmark
+
+
+def _landmark_sequence(
+    segments: Sequence[Segment], landmark_of: LandmarkOf, min_bp: int
+) -> list[str]:
+    """The *substantial* backbone tokens a read spans, in read order (consecutive dups collapsed).
+
+    A contiguous run of one landmark is kept only if it totals ≥ ``min_bp``, so a sliver of
+    mis-assigned chromosome (or a speck of a feature) doesn't read as structure — skipping it
+    re-joins the landmarks on either side.
     """
+    runs: list[list] = []  # [token, bp] contiguous same-token runs
+    for feature, length in segments:
+        token = landmark_of(feature)
+        if token is None:
+            continue
+        if runs and runs[-1][0] == token:
+            runs[-1][1] += length
+        else:
+            runs.append([token, length])
     seq: list[str] = []
-    for feature, _length in segments:
-        chrom = feature.split(":", 1)[0] if ":" in feature else ""
-        if chrom.startswith("chr") and (not seq or seq[-1] != chrom):
-            seq.append(chrom)
+    for token, bp in runs:
+        if bp >= min_bp and (not seq or seq[-1] != token):
+            seq.append(token)
     return seq
 
 
-def _chromosome_order(sequences: Iterable[Sequence[str]]) -> dict[str, int]:
-    """Rank chromosomes along the cluster's structure from per-read chromosome sequences.
+def _landmark_order(sequences: Iterable[Sequence[str]]) -> dict[str, int]:
+    """Rank backbone tokens along the cluster's structure from the per-read landmark sequences.
 
-    Reads give *undirected* adjacencies between consecutive chromosomes (orientation-blind); for a
-    rearrangement these form a path (e.g. ``chr11 — chr13 — chr19``). Walk it from an endpoint,
-    following the strongest adjacency, to assign each chromosome a position. Returns ``{chrom:
-    rank}`` (``{}`` if no chromosomes); disconnected extras are appended deterministically.
+    Reads give *undirected* adjacencies between consecutive tokens (orientation-blind); for a
+    rearrangement (or a structural backbone) these form a path (e.g. ``chr11 - chr13 - chr19``, or
+    ``ITS - TAR1 - bSat``). Walk it from an endpoint, following the strongest adjacency, to assign
+    each token a position. Returns ``{token: rank}`` (``{}`` if none); disconnected extras are
+    appended deterministically.
     """
     adjacency: dict[str, Counter] = defaultdict(Counter)
     nodes: set[str] = set()
@@ -632,8 +671,8 @@ def _chromosome_order(sequences: Iterable[Sequence[str]]) -> dict[str, int]:
         visited.add(current)
         nxt = [(cnt, n) for n, cnt in adjacency[current].items() if n not in visited]
         current = max(nxt)[1] if nxt else None
-    order.extend(sorted(n for n in nodes if n not in visited))  # disconnected chromosomes
-    return {chrom: i for i, chrom in enumerate(order)}
+    order.extend(sorted(n for n in nodes if n not in visited))  # disconnected tokens
+    return {token: i for i, token in enumerate(order)}
 
 
 def _orient_reads(
@@ -647,24 +686,25 @@ def _orient_reads(
 ) -> dict[str, bool]:
     """Orient a cluster's reads relative to the seed (``{read: reversed_vs_seed}``).
 
-    Chromosome identity is the orientation signal: given the chromosome ``rank`` along the
-    cluster's structure (:func:`_chromosome_order`), **flip any read whose chromosomes run in the
-    descending direction** — so every read reads chromosomes in one consistent order. A read that
-    lives in a *single* chromosome has no such signal, so it falls back to whichever orientation
-    aligns better to the seed (the within-chromosome features decide).
+    The backbone is the orientation signal: given the landmark ``rank`` along the cluster's
+    structure (:func:`_landmark_order` — chromosomes for a translocation, distinctive features for a
+    single-chromosome cluster), **flip any read whose landmarks run in the descending direction** —
+    so every read reads the backbone in one consistent order. A read carrying fewer than two
+    landmarks has no such signal, so it falls back to whichever orientation aligns better to the
+    seed.
     """
     orient: dict[str, bool] = {}
     undetermined: list[str] = []
     for r in members:
         ranks = [rank[c] for c in sequences[r] if c in rank]
-        if len({*ranks}) >= 2:  # spans >= 2 chromosomes -> orient by their order
+        if len({*ranks}) >= 2:  # spans >= 2 backbone landmarks -> orient by their order
             orient[r] = ranks[-1] < ranks[0]
         else:
             undetermined.append(r)
     if orient.get(seed):  # keep the seed unflipped as the reference frame
         orient = {r: not flipped for r, flipped in orient.items()}
 
-    # Single-chromosome reads: orient by best feature alignment to the (now oriented) seed.
+    # Reads with < 2 landmarks: orient by best feature alignment to the (now oriented) seed.
     seed_oriented = reverse_segments(reads[seed]) if orient.get(seed, False) else list(reads[seed])
     for r in undetermined:
         if r == seed:
@@ -700,53 +740,54 @@ def _junction_placement(
     oriented_segs: Mapping[str, Sequence[Segment]],
     members: Sequence[str],
     rank: Mapping[str, int],
+    landmark_of: LandmarkOf,
 ) -> dict[str, list[float]]:
-    """Place reads of a multi-chromosome cluster by anchoring on chromosome **junctions**.
+    """Place reads by anchoring on **backbone junctions** (chromosomes, or distinctive features).
 
-    Chromosomes are laid out left to right in ``rank`` order, each chromosome given a slot as wide
-    as its longest observed block. A read's chromosome *junction* (the boundary between two
-    consecutive chromosomes) is pinned to the boundary between their slots, and the read's segments
-    extend outward from there — so every read sharing a breakpoint lines that breakpoint up exactly,
-    regardless of how much of each chromosome it captured. A read confined to one chromosome is
-    pinned at that chromosome's slot start. This is robust where alignment is not: the chromosome
-    identity, not a ~uniform shared satellite, fixes the coordinate.
+    Landmarks are laid out left to right in ``rank`` order, each given a slot as wide as its longest
+    observed block. A read's *junction* (the boundary between two consecutive landmarks) is pinned
+    to the boundary between their slots, and the read's segments extend outward from there — so every
+    read sharing a breakpoint lines that breakpoint up exactly, regardless of how much of each
+    landmark it captured. A read carrying one landmark is pinned at that landmark's slot start. This
+    is robust where alignment is not: the landmark identity, not a ~uniform shared satellite, fixes
+    the coordinate.
     """
     max_len: dict[str, float] = defaultdict(float)
     for r in members:
         per: dict[str, float] = defaultdict(float)
         for feature, length in oriented_segs[r]:
-            chrom = feature.split(":", 1)[0] if ":" in feature else ""
-            if chrom in rank:
-                per[chrom] += length
-        for chrom, total in per.items():
-            max_len[chrom] = max(max_len[chrom], total)
+            token = landmark_of(feature)
+            if token in rank:
+                per[token] += length
+        for token, total in per.items():
+            max_len[token] = max(max_len[token], total)
     slot_start: dict[str, float] = {}
     cursor = 0.0
-    for chrom in sorted(rank, key=lambda c: rank[c]):
-        slot_start[chrom] = cursor
-        cursor += max_len[chrom]
+    for token in sorted(rank, key=lambda c: rank[c]):
+        slot_start[token] = cursor
+        cursor += max_len[token]
 
     placed: dict[str, list[float]] = {}
     for r in members:
         oriented = oriented_segs[r]
         cum = _cumulative_bp(oriented)
         anchor_read = anchor_cons = None
-        prev_chrom: str | None = None
+        prev: str | None = None
         for i, (feature, _length) in enumerate(oriented):
-            chrom = feature.split(":", 1)[0] if ":" in feature else ""
-            if chrom not in rank:
+            token = landmark_of(feature)
+            if token not in rank:
                 continue
-            if prev_chrom is not None and prev_chrom != chrom:  # a chromosome junction
-                anchor_read, anchor_cons = cum[i], slot_start[chrom]
+            if prev is not None and prev != token:  # a backbone junction
+                anchor_read, anchor_cons = cum[i], slot_start[token]
                 break
-            prev_chrom = chrom
-        if anchor_read is None:  # single ranked chromosome: pin its block start to the slot
+            prev = token
+        if anchor_read is None:  # one landmark: pin its block start to the slot
             idx = next(
-                (i for i, (f, _l) in enumerate(oriented) if f.split(":", 1)[0] in rank), None
+                (i for i, (f, _l) in enumerate(oriented) if landmark_of(f) in rank), None
             )
             if idx is not None:
                 anchor_read = cum[idx]
-                anchor_cons = slot_start[oriented[idx][0].split(":", 1)[0]]
+                anchor_cons = slot_start[landmark_of(oriented[idx][0])]
             else:
                 anchor_read = anchor_cons = 0.0
         offset = anchor_cons - anchor_read
@@ -761,46 +802,62 @@ def consensus_layout(
     neighbors: Mapping[str, Sequence[str]] | None = None,
     sub_score: SubScore,
     gap_factor: float,
+    filler: frozenset[str] | None = None,
     weight: Mapping[str, float] | None = None,
 ) -> ClusterLayout:
     """Lay a cluster out in consensus coordinates: place every read so matched features stack.
 
-    Orientation is decided first (:func:`_orient_reads`), then placement depends on the cluster:
+    Orientation is decided first (:func:`_orient_reads`), then placement depends on the cluster's
+    **backbone** — the sequence of landmark features along it:
 
-    * **Multi-chromosome clusters** (a rearrangement) are placed by :func:`_junction_placement` —
-      reads are anchored on their chromosome **junctions**, so every shared breakpoint lines up and
-      chromosomes read in one consistent order. Robust where alignment isn't, because chromosome
-      identity (not a ~uniform shared satellite) fixes the coordinate.
-    * **Single-chromosome clusters** are placed by a maximum-spanning-tree walk over the overlap
-      graph (``neighbors``): from the seed, each read is attached via its *strongest* overlap to an
-      already-placed read (Prim's), in its fixed orientation, mapped to consensus coordinates via a
-      piecewise-linear :func:`_anchor_map`. Without ``neighbors`` this is a star from the seed;
-      reads with no edge path from the seed fall back to their own coordinates.
+    * If the cluster spans ≥ 2 chromosomes (a rearrangement), the backbone is the **chromosomes**.
+    * Otherwise (one chromosome) the backbone is the **distinctive structural features** (satellites
+      / ITS / TAR1 / rDNA — everything not in ``filler``), so a single-chromosome cluster is laid
+      out by its structural skeleton.
 
-    The layout is then shifted so the leftmost edge is 0, the consensus spans the **union** of all
-    reads, and :func:`_union_consensus` majority-votes the feature at each grid interval.
+    With ≥ 2 backbone landmarks the reads are placed by :func:`_junction_placement` — anchored on
+    their backbone **junctions**, so every shared breakpoint lines up and the backbone reads in one
+    consistent order (robust where alignment isn't: landmark identity, not a ~uniform shared
+    satellite, fixes the coordinate). A cluster with < 2 landmarks falls back to a maximum-spanning-
+    tree walk over the overlap graph (``neighbors``): from the seed each read is attached via its
+    *strongest* overlap to an already-placed read (Prim's), in its fixed orientation, mapped via a
+    piecewise-linear :func:`_anchor_map`. The layout is then shifted so the leftmost edge is 0, the
+    consensus spans the **union** of all reads, and :func:`_union_consensus` majority-votes the
+    feature at each grid interval.
     """
     scorer = _memoized(_weighted_sub_score(sub_score, weight))
     members = list(cluster.members)
     member_set = set(members)
     seed = cluster.seed
+    filler = filler if filler is not None else frozenset()
     if neighbors is None:  # star: every member placed directly against the seed
         neighbors = {seed: [m for m in members if m != seed]}
 
-    # Orientation (chromosome order, with a feature fallback for single-chromosome reads), then
-    # materialize each read's oriented segments.
-    sequences = {r: _chromosome_blocks(reads[r]) for r in members}
-    rank = _chromosome_order(sequences.values())
+    # Pick the backbone: chromosomes if the cluster is a rearrangement, else distinctive features.
+    chrom_seqs = {
+        r: _landmark_sequence(reads[r], _chromosome_landmark, MIN_CHROM_BLOCK_BP) for r in members
+    }
+    if len({c for seq in chrom_seqs.values() for c in seq}) >= 2:
+        landmark_of, sequences = _chromosome_landmark, chrom_seqs
+    else:
+        landmark_of = _structural_landmark(filler)
+        sequences = {
+            r: _landmark_sequence(reads[r], landmark_of, MIN_FEATURE_BLOCK_BP) for r in members
+        }
+    rank = _landmark_order(sequences.values())
+
     orient = _orient_reads(reads, members, seed, rank, sequences, scorer, gap_factor)
     oriented_segs = {
         r: (reverse_segments(reads[r]) if orient[r] else list(reads[r])) for r in members
     }
 
     if len(rank) >= 2:
-        # Rearrangement: anchor on chromosome junctions so breakpoints line up.
-        placed: dict[str, list[float]] = _junction_placement(oriented_segs, members, rank)
+        # Anchor on backbone junctions so breakpoints line up.
+        placed: dict[str, list[float]] = _junction_placement(
+            oriented_segs, members, rank, landmark_of
+        )
     else:
-        # Single chromosome: Prim's — commit the highest-scoring overlap next, fixed orientation.
+        # < 2 landmarks: Prim's — commit the highest-scoring overlap next, fixed orientation.
         placed = {seed: [float(x) for x in _cumulative_bp(oriented_segs[seed])]}
         tie = count()
         heap: list[tuple[float, int, str, list[float]]] = []

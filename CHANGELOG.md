@@ -13,15 +13,18 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
 
 ### Added
 
-- Engine B **chromosome-aware layout** (`consensus_layout`): orientation and placement now use the
-  chromosome identity as the primary signal, which is what makes rearrangement clusters read
-  correctly. Orientation flips each read so its chromosomes run in one consistent order — the order
-  is the path read off the chromosome adjacencies (e.g. `chr11 — chr13 — chr19`); single-chromosome
-  reads fall back to best-fit alignment. Multi-chromosome (translocation) clusters are then placed
-  by **anchoring on chromosome junctions**: each shared breakpoint is pinned to one coordinate, so
-  it lines up across every read regardless of how much of each chromosome the read captured —
-  robust where feature alignment isn't, because a large ~uniform shared satellite (a hub) no longer
-  flips reads or floats the breakpoint. Single-chromosome clusters keep the maximum-spanning-tree
+- Engine B **backbone layout** (`consensus_layout`): orientation and placement use the cluster's
+  *backbone* — a sequence of landmark features — as the primary signal, which is what makes clusters
+  read correctly. The backbone is the **chromosomes** when a cluster spans ≥2 of them (a
+  rearrangement), otherwise the **distinctive structural features** (satellites / ITS / TAR1 / rDNA
+  — not filler), so a single-chromosome cluster is laid out by its structural skeleton. Each read is
+  flipped so its backbone runs in one consistent order (the path read off the landmark adjacencies,
+  e.g. `chr11 — chr13 — chr19` or `bSat — TAR1`), then placed by **anchoring on backbone
+  junctions**: each shared breakpoint is pinned to one coordinate, lining up across every read
+  regardless of how much of each landmark it captured — robust where feature alignment isn't,
+  because a large ~uniform shared satellite (a hub) no longer flips reads or floats the breakpoint.
+  A landmark run must be ≥2 kb (chromosomes) / ≥1 kb (features) to count, so a sliver of mis-assigned
+  annotation doesn't read as structure. Clusters with <2 landmarks keep the maximum-spanning-tree
   feature alignment. Membership is unchanged (placement only). `cluster-plot` gains a
   `--chromosome-track/--no-chromosome-track` option (default on): a thin chromosome-colored strip
   is drawn directly under each read's structural track (shared DB color palette + a Chromosomes
