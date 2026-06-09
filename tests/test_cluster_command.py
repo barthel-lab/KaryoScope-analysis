@@ -40,6 +40,7 @@ def test_cluster_cli(cli_runner, tmp_path: Path):
             "0.9",
             "--min-interesting-bp",
             "0",  # keep the tiny synthetic reads (this test is about clustering, not the filter)
+            "--no-require-transition",  # these single-stretch overlaps are the point of this test
             "-o",
             str(out),
         ],
@@ -102,6 +103,7 @@ def test_cluster_cli_repeat_mask_breaks_repeat_only_overlap(cli_runner, tmp_path
         "1000",
         "--min-identity",
         "0.9",
+        "--no-require-transition",  # this test is about repeat-masking the single shared block
     ]
     # default repeat-mask: LINE is masked -> the LINE-only overlap carries no weight -> 2 singletons.
     masked = cli_runner.invoke(main, [*common, "-o", str(tmp_path / "masked.tsv")])

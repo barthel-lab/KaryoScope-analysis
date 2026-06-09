@@ -147,6 +147,15 @@ def _sidecar(output: Path, suffix: str) -> Path:
     "reads that would otherwise chain through shared telomere. 0 = keep all reads.",
 )
 @click.option(
+    "--require-transition/--no-require-transition",
+    default=True,
+    show_default=True,
+    help="Require every overlap to cross at least one transition between stretch types (a shared "
+    "junction — a structural boundary or a chromosome breakpoint), not just a single uniform shared "
+    "stretch. Strong anti-chaining: reads sharing only one repeat block (telomere, a satellite) "
+    "don't cluster.",
+)
+@click.option(
     "--block-min-bp",
     default=0.0,
     show_default=True,
@@ -227,6 +236,7 @@ def cmd(
     min_distinctive_bp: float,
     distinctive_weight: float,
     min_interesting_bp: float,
+    require_transition: bool,
     block_min_bp: float,
     workers: int,
     communities: bool,
@@ -288,6 +298,7 @@ def cmd(
         min_distinctive_bp=min_distinctive_bp,
         distinctive_weight=distinctive_weight,
         filler_features=filler,
+        require_transition=require_transition,
         block_min_bp=block_min_bp,
         workers=workers,
         communities=communities,

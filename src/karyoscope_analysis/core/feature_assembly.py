@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from itertools import count, islice, pairwise
 
 from karyoscope_analysis.core.feature_align import (
+    Alignment,
     Segment,
     SubScore,
     align_best_orientation,
@@ -126,6 +127,42 @@ def _distinctive_overlap(
     return total
 
 
+#: A matched stretch must total at least this many bp to anchor a transition (a junction), so a
+#: sliver can't fabricate the contact between two stretch types that a confident overlap requires.
+MIN_STRETCH_BP = 200
+
+
+def _overlap_transitions(
+    columns: Sequence[tuple[int, int]],
+    a: Sequence[Segment],
+    b: Sequence[Segment],
+    min_stretch_bp: float,
+) -> int:
+    """Number of *transitions* between stretch types within the matched overlap.
+
+    A "stretch type" is a read's composite ``chromosome:feature`` label; a transition is a change
+    from one to another along the matched columns (a shared junction — a structural boundary or a
+    chromosome breakpoint). Consecutive matched columns of one label are pooled into a stretch and
+    counted only if they total ≥ ``min_stretch_bp`` (so a sliver doesn't fabricate a junction). A
+    confident overlap has ≥1 transition: it crosses a real junction, not a single uniform shared
+    stretch (a coincidental shared repeat).
+    """
+    stretches: list[str] = []  # confident matched stretches, in alignment order
+    cur_label: str | None = None
+    cur_bp = 0.0
+    for i, j in columns:
+        label = a[i][0]
+        if label == cur_label:
+            cur_bp += min(a[i][1], b[j][1])
+            continue
+        if cur_label is not None and cur_bp >= min_stretch_bp:
+            stretches.append(cur_label)
+        cur_label, cur_bp = label, min(a[i][1], b[j][1])
+    if cur_label is not None and cur_bp >= min_stretch_bp:
+        stretches.append(cur_label)
+    return sum(1 for x, y in pairwise(stretches) if x != y)
+
+
 @dataclass(frozen=True)
 class OverlapEdge:
     """An accepted proper overlap between two reads."""
@@ -215,6 +252,28 @@ class _EdgeParams:
     min_distinctive_bp: float
     distinctive_weight: float
     filler: frozenset[str] | None
+    require_transition: bool
+
+
+def _flanks_are_filler(
+    aln: Alignment, a: Sequence[Segment], b: Sequence[Segment], filler: frozenset[str] | None
+) -> bool:
+    """Whether every segment *outside* the aligned span (both reads) is filler.
+
+    An overlap that aligns all the distinctive content but leaves only filler (e.g. a chromosome
+    arm) unaligned at the ends is biologically a proper overlap — it just gets classed ``internal``
+    because a down-weighted arm failed to align. Distinctive unaligned flanks (a different satellite
+    on each read) are *not* filler, so genuine internal-repeat matches stay rejected.
+    """
+    if filler is None or aln.is_empty:
+        return False
+    flanks = (
+        [a[k][0] for k in range(aln.a_start)]
+        + [a[k][0] for k in range(aln.a_end + 1, len(a))]
+        + [b[k][0] for k in range(aln.b_start)]
+        + [b[k][0] for k in range(aln.b_end + 1, len(b))]
+    )
+    return all(_structural(f) in filler for f in flanks)
 
 
 def _edge_for_pair(
@@ -233,9 +292,17 @@ def _edge_for_pair(
         return None
     aln = align_best_orientation(a, b, sub_score=scorer, gap_factor=params.gap_factor)
     kind = classify_overlap(aln, len(a), len(b))
-    if kind not in ("dovetail", "containment"):
+    if kind == "none":
         return None
     b_used = reverse_segments(b) if aln.reversed_b else b
+    # Proper overlap = dovetail/containment, OR an "internal" overlap whose only *unaligned* flanks
+    # are filler (a down-weighted arm that didn't align): biologically a containment, just with the
+    # arm clipped. This keeps the anti-chaining gate (distinctive-flanked internal matches — shared
+    # repeats between otherwise-unrelated reads — are still rejected).
+    if kind not in ("dovetail", "containment") and not _flanks_are_filler(
+        aln, a, b_used, params.filler
+    ):
+        return None
     overlap_bp = _weighted_overlap(aln.columns, a, b_used, weight)
     if overlap_bp < params.min_overlap_bp:
         return None
@@ -247,6 +314,8 @@ def _edge_for_pair(
         < params.min_distinctive_bp
     ):
         return None  # overlap rests only on filler (telomere/arm) -> not an edge
+    if params.require_transition and _overlap_transitions(aln.columns, a, b_used, MIN_STRETCH_BP) < 1:
+        return None  # overlap is a single uniform stretch (no shared junction) -> not confident
     return OverlapEdge(ids[ai], ids[bi], aln.score, identity, overlap_bp, kind, aln.reversed_b)
 
 
@@ -284,6 +353,7 @@ def build_overlap_graph(
     min_distinctive_bp: float = 0.0,
     distinctive_weight: float = 0.15,
     filler_features: frozenset[str] | None = None,
+    require_transition: bool = False,
     block_min_bp: float = 0.0,
     workers: int = 1,
     weight: Mapping[str, float] | None = None,
@@ -310,7 +380,7 @@ def build_overlap_graph(
     ids = sorted(reads)
     params = _EdgeParams(
         gap_factor, match_score, min_overlap_bp, min_identity, min_jaccard,
-        min_distinctive_bp, distinctive_weight, filler_features,
+        min_distinctive_bp, distinctive_weight, filler_features, require_transition,
     )
     pair_iter = (
         _candidate_pairs(ids, reads, block_min_bp)
@@ -935,6 +1005,7 @@ def assemble(
     min_distinctive_bp: float = 0.0,
     distinctive_weight: float = 0.15,
     filler_features: frozenset[str] | None = None,
+    require_transition: bool = False,
     block_min_bp: float = 0.0,
     workers: int = 1,
     communities: bool = False,
@@ -952,6 +1023,7 @@ def assemble(
         min_distinctive_bp=min_distinctive_bp,
         distinctive_weight=distinctive_weight,
         filler_features=filler_features,
+        require_transition=require_transition,
         block_min_bp=block_min_bp,
         workers=workers,
         weight=weight,

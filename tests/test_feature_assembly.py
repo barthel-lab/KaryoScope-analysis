@@ -362,3 +362,24 @@ def test_consensus_layout_orients_reversed_members():
     assert list(placed["rev"].segments) == [(0, 300, "A"), (300, 400, "B")]
     # consensus: A,B agreed (support 2), C seed-only (support 1)
     assert [p.support for p in lo.consensus] == [2, 2, 1]
+
+
+def test_require_transition_rejects_single_stretch_overlap():
+    # two reads sharing only ONE uniform stretch (a long shared satellite) -> no junction -> no edge
+    one_stretch = {
+        "a": [("chr1:p_arm", 5000), ("chr1:bSat", 8000)],
+        "b": [("chr1:bSat", 8000), ("chr2:p_arm", 5000)],
+    }
+    # their overlap is just bSat (a single stretch type); without require_transition it's an edge...
+    assert asm.build_overlap_graph(one_stretch, **PARAMS)
+    # ...but with require_transition it is rejected (overlap crosses no junction)
+    assert not asm.build_overlap_graph(one_stretch, require_transition=True, **PARAMS)
+
+
+def test_require_transition_keeps_overlap_spanning_a_junction():
+    # reads sharing a junction (bSat -> ITS, a transition between stretch types) -> edge survives
+    spanning = {
+        "a": [("chr1:p_arm", 5000), ("chr1:bSat", 8000), ("chr1:ITS", 2000)],
+        "b": [("chr1:bSat", 8000), ("chr1:ITS", 2000), ("chr1:q_arm", 5000)],
+    }
+    assert asm.build_overlap_graph(spanning, require_transition=True, **PARAMS)
