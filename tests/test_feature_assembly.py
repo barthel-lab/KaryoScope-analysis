@@ -383,3 +383,12 @@ def test_require_transition_keeps_overlap_spanning_a_junction():
         "b": [("chr1:bSat", 8000), ("chr1:ITS", 2000), ("chr1:q_arm", 5000)],
     }
     assert asm.build_overlap_graph(spanning, require_transition=True, **PARAMS)
+
+
+def test_landmark_order_keeps_the_middle_in_the_middle():
+    # backbone bSat - ITS - TAR1, but a few reads skip ITS (a bSat-TAR1 shortcut edge). ITS must
+    # still rank in the middle, not get pushed to an end by the spurious shortcut.
+    seqs = [["bSat", "ITS", "TAR1"]] * 5 + [["bSat", "TAR1"]] * 2
+    rank = asm._landmark_order(seqs)
+    assert rank["ITS"] == 1
+    assert {rank["bSat"], rank["TAR1"]} == {0, 2}

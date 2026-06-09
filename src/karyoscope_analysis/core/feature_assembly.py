@@ -719,11 +719,14 @@ def _landmark_sequence(
 def _landmark_order(sequences: Iterable[Sequence[str]]) -> dict[str, int]:
     """Rank backbone tokens along the cluster's structure from the per-read landmark sequences.
 
-    Reads give *undirected* adjacencies between consecutive tokens (orientation-blind); for a
-    rearrangement (or a structural backbone) these form a path (e.g. ``chr11 - chr13 - chr19``, or
-    ``ITS - TAR1 - bSat``). Walk it from an endpoint, following the strongest adjacency, to assign
-    each token a position. Returns ``{token: rank}`` (``{}`` if none); disconnected extras are
-    appended deterministically.
+    Reads give *undirected* adjacencies (weighted by count) between consecutive tokens
+    (orientation-blind); for a rearrangement (or a structural backbone) these form a path (e.g.
+    ``chr11 - chr13 - chr19``, or ``bSat - ITS - TAR1``). Walk it from a loose endpoint, following
+    the strongest adjacency, to assign each token a position. The endpoint is the node with the
+    least *total* adjacency weight — a middle token (two strong neighbours) has more, so this keeps
+    it in the middle even when a few reads skip it and create a spurious shortcut edge (which would
+    fool a fewest-neighbours start). Returns ``{token: rank}`` (``{}`` if none); disconnected extras
+    are appended deterministically.
     """
     adjacency: dict[str, Counter] = defaultdict(Counter)
     nodes: set[str] = set()
@@ -735,7 +738,7 @@ def _landmark_order(sequences: Iterable[Sequence[str]]) -> dict[str, int]:
                 adjacency[b][a] += 1
     if not nodes:
         return {}
-    start = min(nodes, key=lambda n: (len(adjacency[n]), n))  # an endpoint (fewest neighbours)
+    start = min(nodes, key=lambda n: (sum(adjacency[n].values()), n))  # the loosest endpoint
     order: list[str] = []
     visited: set[str] = set()
     current: str | None = start
