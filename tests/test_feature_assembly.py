@@ -34,20 +34,23 @@ def test_idf_weights_keyed_by_structural_layer():
 
 
 # ----------------------------------------------------------------- distinctive overlap
-def test_min_distinctive_bp_rejects_filler_only_overlap():
-    # x's suffix == y's prefix == a big down-weighted "arm" block (a filler dovetail).
-    reads = {
+def test_overlap_gate_is_on_distinctive_content():
+    # x's suffix == y's prefix == a big down-weighted "arm" block (a filler dovetail); the only
+    # shared content is filler, so it scores 0 distinctive bp and is rejected by the size gate
+    # (which is on distinctive bp), even at min_overlap_bp=1.
+    filler_only = {
         "x": [("aSat", 400), ("arm", 5000)],
         "y": [("arm", 5000), ("bSat", 400)],
     }
-    weight = {"arm": 0.03, "aSat": 0.5, "bSat": 0.5}  # arm = filler
-    common = dict(
-        sub_score=EXACT, gap_factor=0.01, min_overlap_bp=1, min_identity=0.5, weight=weight
-    )
-    # without the distinctive criterion the shared arm alone makes an edge
-    assert asm.build_overlap_graph(reads, **common)
-    # requiring 100 bp of matched distinctive content (weight >= 0.15) -> arm doesn't count -> no edge
-    assert not asm.build_overlap_graph(reads, min_distinctive_bp=100, **common)
+    weight = {"arm": 0.03, "aSat": 0.5, "bSat": 0.5}  # arm below distinctive_weight = filler
+    common = dict(sub_score=EXACT, gap_factor=0.01, min_identity=0.5, weight=weight)
+    assert not asm.build_overlap_graph(filler_only, min_overlap_bp=1, **common)
+    # a shared *distinctive* block (aSat) clears the gate
+    distinctive = {
+        "x": [("arm", 400), ("aSat", 5000)],
+        "y": [("aSat", 5000), ("arm", 400)],
+    }
+    assert asm.build_overlap_graph(distinctive, min_overlap_bp=1000, **common)
 
 
 def test_min_distinctive_bp_with_filler_set():

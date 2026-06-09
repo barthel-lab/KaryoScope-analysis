@@ -35,6 +35,17 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   is drawn directly under each read's structural track (shared DB color palette + a Chromosomes
   legend), so structure and chromosome identity line up and translocations show two chromosome
   colors at a glance.
+- Engine B **confident-overlap criteria** (anti-chaining). Three refinements to what counts as an
+  edge: (1) `cluster --require-transition` (default on) — an overlap must cross at least one
+  *transition* between stretch types (a shared junction where the structural feature and/or
+  chromosome changes), not a single uniform shared stretch (a long telomere or one satellite block
+  is a coincidental repeat, not homology); single-stretch reads no longer drag into clusters.
+  (2) An "internal" overlap counts as proper when its only *unaligned* flanks are filler (a
+  down-weighted arm that didn't align) — recovering real junction overlaps (a chr11→chr13 contact)
+  without reopening distinctive-flanked internal-repeat chaining. (3) The overlap-size gate is on
+  matched *distinctive* (non-filler) bp rather than the weighted total, so a small but real shared
+  structure (e.g. chr20 ITS+TAR1+gSat) isn't rejected just because genome-frequency weighting
+  shrinks it, while filler-only overlaps still score 0.
 - Package skeleton: `src/karyoscope_analysis/` (src layout), hatchling build,
   `karyoscope-analysis` console entry point, `version` subcommand.
 - Tooling: `pyproject.toml` (ruff, pytest, coverage), `.pre-commit-config.yaml`,

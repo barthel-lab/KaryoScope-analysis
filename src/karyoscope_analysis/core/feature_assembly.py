@@ -303,20 +303,24 @@ def _edge_for_pair(
         aln, a, b_used, params.filler
     ):
         return None
-    overlap_bp = _weighted_overlap(aln.columns, a, b_used, weight)
-    if overlap_bp < params.min_overlap_bp:
+    weighted_bp = _weighted_overlap(aln.columns, a, b_used, weight)
+    distinctive_bp = _distinctive_overlap(
+        aln.columns, a, b_used, weight, params.distinctive_weight, params.filler
+    )
+    # The overlap-size gate is on *distinctive* (non-filler) matched bp, not the weighted total:
+    # a small but real shared structure (e.g. chr20 ITS+TAR1+gSat) shouldn't be rejected just
+    # because genome-frequency weighting shrinks its weighted size, and a filler-only overlap
+    # (telomere/arm) still scores 0 distinctive (anti-chaining).
+    if distinctive_bp < params.min_overlap_bp:
         return None
-    identity = aln.score / (params.match_score * overlap_bp) if overlap_bp else 0.0
+    identity = aln.score / (params.match_score * weighted_bp) if weighted_bp else 0.0
     if identity < params.min_identity:
         return None
-    if params.min_distinctive_bp > 0.0 and (
-        _distinctive_overlap(aln.columns, a, b_used, weight, params.distinctive_weight, params.filler)
-        < params.min_distinctive_bp
-    ):
+    if params.min_distinctive_bp > 0.0 and distinctive_bp < params.min_distinctive_bp:
         return None  # overlap rests only on filler (telomere/arm) -> not an edge
     if params.require_transition and _overlap_transitions(aln.columns, a, b_used, MIN_STRETCH_BP) < 1:
         return None  # overlap is a single uniform stretch (no shared junction) -> not confident
-    return OverlapEdge(ids[ai], ids[bi], aln.score, identity, overlap_bp, kind, aln.reversed_b)
+    return OverlapEdge(ids[ai], ids[bi], aln.score, identity, weighted_bp, kind, aln.reversed_b)
 
 
 #: Per-worker state, populated by fork inheritance (copy-on-write — never pickled).
