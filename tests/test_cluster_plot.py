@@ -67,6 +67,15 @@ def test_chromosome_track_renders_dual_tracks_and_legend():
     assert "#aaaaaa" not in off and "Chromosomes" not in off  # no chromosome track when off
 
 
+def test_consensus_track_can_be_hidden():
+    placed = [render.PlacedRead("rd", False, False, [(0, 100, "aSat")])]
+    panel = render.ClusterPanel("c", 100, placed, [(0, 100, "bSat")])
+    on = render.render_clusters_svg([panel], {})
+    off = render.render_clusters_svg([panel], {}, consensus_track=False)
+    assert "consensus" in on and "consensus" not in off  # the consensus row is dropped
+    assert "rd" in off  # the read track is still drawn
+
+
 def test_render_clusters_svg_stacks_panels():
     panels = [
         render.ClusterPanel(

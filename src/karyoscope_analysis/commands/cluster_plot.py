@@ -92,6 +92,13 @@ def _major_chromosomes(consensus: list[render.Interval], min_frac: float = 0.10)
     help="Draw a chromosome-colored track directly under each read's structural track, so "
     "structure and chromosome identity line up (translocations show two chromosome colors).",
 )
+@click.option(
+    "--consensus-track/--no-consensus-track",
+    default=True,
+    show_default=True,
+    help="Draw the union consensus as the top row of each cluster. --no-consensus-track shows "
+    "only the read tracks (clearer when judging how the reads align to each other).",
+)
 @click.option("--width", default=1200, show_default=True, type=int)
 @click.option("--row-height", default=12, show_default=True, type=int)
 @click.option(
@@ -109,6 +116,7 @@ def cmd(
     min_cluster_size: int,
     min_segment_bp: int,
     chromosome_track: bool,
+    consensus_track: bool,
     width: int,
     row_height: int,
     output: Path,
@@ -159,7 +167,8 @@ def cmd(
         panels.append(render.ClusterPanel(title=title, width=span, placed=placed, consensus=consensus))
 
     svg = render.render_clusters_svg(
-        panels, colors, width=width, row_height=row_height, chromosome_track=chromosome_track
+        panels, colors, width=width, row_height=row_height, chromosome_track=chromosome_track,
+        consensus_track=consensus_track,
     )
     output.write_text(svg)
     n_reads = sum(len(p.placed) for p in panels)

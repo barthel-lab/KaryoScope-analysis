@@ -89,14 +89,18 @@ def _draw_panel(
     label_width: int,
     row_height: int,
     chromosome_track: bool,
+    consensus_track: bool,
 ) -> float:
     """Draw one cluster panel (shared consensus x-scale) starting at ``y``; return the next ``y``.
 
     Each row is the structural-feature track and, directly below it (no gap), a thinner
     chromosome-colored track (when ``chromosome_track``) — so a read's structure and its
-    chromosome identity line up.
+    chromosome identity line up. The union consensus is drawn as the top row unless
+    ``consensus_track`` is off (then only the reads are shown).
     """
-    rows: list[tuple[str, bool, Sequence[Interval]]] = [("consensus", True, panel.consensus)]
+    rows: list[tuple[str, bool, Sequence[Interval]]] = (
+        [("consensus", True, panel.consensus)] if consensus_track else []
+    )
     rows += [(r.read_id, r.is_seed, r.segments) for r in panel.placed]
     scale = max(1, width - label_width) / max(1, panel.width)
     chrom_h = max(4, round(row_height * 0.55)) if chromosome_track else 0
@@ -156,6 +160,7 @@ def render_clusters_svg(
     row_height: int = 11,
     label_width: int = 220,
     chromosome_track: bool = True,
+    consensus_track: bool = True,
 ) -> str:
     """Render one or more cluster panels, stacked, into a single SVG with shared legends."""
     elements: list[str] = []
@@ -166,7 +171,7 @@ def render_clusters_svg(
         y = _draw_panel(
             elements, y, panel, colors, present, present_chrom,
             width=width, label_width=label_width, row_height=row_height,
-            chromosome_track=chromosome_track,
+            chromosome_track=chromosome_track, consensus_track=consensus_track,
         )
     y = _legend_section(elements, y + 4, "Features", present, width)
     total_h = _legend_section(elements, y + 6, "Chromosomes", present_chrom, width) if present_chrom else y
