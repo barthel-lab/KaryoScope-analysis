@@ -248,3 +248,36 @@ def test_acrocentric_chromosomes_collapse_in_backbone():
                 junctions.append(s)
                 break
     assert max(junctions) - min(junctions) <= 500, junctions
+
+
+def test_small_distinctive_feature_orients_reads():
+    """A distinctive feature too small to *anchor* on (a ~400 bp ITS, below MIN_FEATURE_BLOCK_BP)
+    still *orients* its read, so reads carrying one big TAR1 don't flip on a coin-toss (cluster_1).
+
+    The arm is near-zero-weighted (as in the real run), so a best-fit-to-seed flip can't use it; only
+    the small ITS, seen at the finer ORIENT_MIN_BLOCK_BP, disambiguates orientation.
+    """
+    assert asm.ORIENT_MIN_BLOCK_BP < 400 < asm.MIN_FEATURE_BLOCK_BP  # the ITS sits in this band
+    weights = {**WEIGHTS, "ITS": 0.40}
+    reads = {
+        "a": [("chr19:q_arm", 9000), ("chr19:TAR1", 1700), ("chr19:ITS", 400)],
+        "b": [("chr19:ITS", 400), ("chr19:TAR1", 1700), ("chr19:q_arm", 9000)],  # exact reverse
+        "c": [("chr19:q_arm", 8000), ("chr19:TAR1", 1700), ("chr19:ITS", 400)],
+        "d": [("chr19:ITS", 400), ("chr19:TAR1", 1700), ("chr19:q_arm", 7000)],  # exact reverse
+    }
+    members = tuple(sorted(reads, key=lambda r: -sum(length for _f, length in reads[r])))
+    cluster = asm.Cluster(
+        members=members, seed=members[0], reversed_relative_to_seed={}, size=len(members),
+        orientation_conflict=False,
+    )
+    neighbors = {r: [o for o in reads if o != r] for r in reads}
+    layout = asm.consensus_layout(
+        reads, cluster, neighbors=neighbors, sub_score=SUB, gap_factor=0.1,
+        structureless=frozenset({"q_arm", "ct"}), weight=weights,
+    )
+    sides = set()
+    for read in layout.placed:
+        its, tar1 = _first_start(read, "ITS"), _first_start(read, "TAR1")
+        assert its is not None and tar1 is not None
+        sides.add(its < tar1)
+    assert len(sides) == 1, "ITS lands on inconsistent sides of TAR1 -> orientation not driven by it"

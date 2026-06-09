@@ -27,7 +27,10 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   shared breakpoint lines up across every read regardless of how much of each landmark it captured,
   and a read-specific internal boundary can't pull one read out of register. Robust where feature
   alignment isn't, because a large ~uniform shared satellite (a hub) no longer flips reads or floats
-  the breakpoint.
+  the breakpoint. **Orientation** reads off a *finer* backbone (`ORIENT_MIN_BLOCK_BP`, lower than the
+  anchor threshold): a small but real distinctive feature (a ~400 bp ITS next to a TAR1) is enough to
+  tell which way a read runs, even though it is too small to anchor on — so reads carrying one big
+  landmark stop flipping on a coin-toss best-fit.
   A read anchors on its first landmark *contact* (two landmarks within `ADJACENT_GAP_BP` — a
   breakpoint or a feature junction, not arm-separated landmarks); a read missing the proximal
   landmark falls back to pinning its lowest-rank landmark, so it still lines up on the shared
