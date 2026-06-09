@@ -907,6 +907,8 @@ def consensus_layout(
         oriented, bounds = oriented_segs[rid], placed[rid]
         segs = [(round(bounds[k]), round(bounds[k + 1]), oriented[k][0]) for k in range(len(oriented))]
         raw.append((rid, rid == seed, orient[rid], segs))
+    # order reads top-to-bottom by where they start in the consensus (leftmost first), id-tiebroken
+    raw.sort(key=lambda row: (min((s for s, _e, _f in row[3]), default=0), row[0]))
 
     starts = [s for *_, segs in raw for s, _e, _f in segs]
     ends = [e for *_, segs in raw for _s, e, _f in segs]

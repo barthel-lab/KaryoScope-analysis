@@ -211,3 +211,10 @@ def test_single_chromosome_its_aligns_without_the_distal_feature():
     its_starts = [s for r in layout.placed if (s := _first_start(r, "ITS")) is not None]
     assert len(its_starts) == len(CHR18)  # every read has ITS placed
     assert max(its_starts) - min(its_starts) <= 1500, its_starts
+
+
+def test_reads_sorted_by_consensus_start():
+    """Placed reads are ordered top-to-bottom by where they start in the consensus."""
+    for layout in (_layout_cluster6(), _layout_chr18()):
+        starts = [min(s for s, _e, _f in r.segments) for r in layout.placed]
+        assert starts == sorted(starts), starts

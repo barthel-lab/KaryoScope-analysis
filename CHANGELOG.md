@@ -29,7 +29,8 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   feature instead of drifting via a distal one. A landmark run must be ≥2 kb (chromosomes) /
   ≥500 bp (features) to count, with the backbone ranked in the seed's reading direction. Clusters
   with no filler set or <2 landmarks keep the maximum-spanning-tree feature alignment. Membership is
-  unchanged (placement only). `cluster-plot` gains a
+  unchanged (placement only). Reads in a cluster are ordered top-to-bottom by their consensus start
+  position (leftmost first). `cluster-plot` gains a
   `--chromosome-track/--no-chromosome-track` option (default on): a thin chromosome-colored strip
   is drawn directly under each read's structural track (shared DB color palette + a Chromosomes
   legend), so structure and chromosome identity line up and translocations show two chromosome
