@@ -666,9 +666,7 @@ def _union_consensus(placed: Sequence[LaidOutRead], width: int) -> tuple[Consens
 
 
 #: A landmark run must total at least this many bp to count as a real block (not a noise sliver of
-#: ambiguous annotation) when reading off the backbone. Chromosomes (boundaries are coarse) get the
-#: larger threshold; distinctive structural features get the smaller one (TAR1 can be ~1 kb).
-MIN_CHROM_BLOCK_BP = 2000
+#: ambiguous annotation) when reading off the backbone.
 MIN_FEATURE_BLOCK_BP = 500
 #: Two backbone landmarks within this many bp are a *contact* (a breakpoint or a feature junction
 #: to anchor on); farther apart they are arm-separated and not a junction.
@@ -679,29 +677,27 @@ ADJACENT_GAP_BP = 2000
 LandmarkOf = Callable[[str], "str | None"]
 
 
-def _chromosome_landmark(acrocentrics: frozenset[str] = frozenset()) -> LandmarkOf:
-    """Backbone token = the specific chromosome (``chrN``); ambiguous/non-composite -> skip.
+def _combined_landmark(acrocentrics: frozenset[str], structureless: frozenset[str]) -> LandmarkOf:
+    """Backbone token = the composite ``chromosome:feature`` — using **both** the chromosome and
+    the structural feature, so the layout anchors on chromosome breakpoints *and* structural
+    junctions (e.g. a ``noncanonical_telomere → TAR1`` subtelomere boundary).
 
-    Acrocentric chromosomes (``acrocentrics``) collapse to one ``acrocentric`` token: their short
-    arms recombine, so a read's specific acrocentric assignment is unreliable and treating chr15 vs
-    chr21 as distinct backbone landmarks tangles the layout.
+    Acrocentric chromosomes collapse to ``acrocentric`` (their short arms recombine, so the specific
+    assignment is unreliable). A feature whose structural layer is ``structureless`` (a chromosome
+    arm, ``ct``, the ``non-``/``novel`` catch-alls) contributes no token — but telomeres and
+    satellites are *kept*, so they can anchor the layout even though they are filler for clustering.
     """
 
     def landmark(feature: str) -> str | None:
-        chrom = feature.split(":", 1)[0] if ":" in feature else ""
-        if not chrom.startswith("chr"):
+        chrom, sep, structural = feature.partition(":")
+        if not sep:
+            structural = feature
+        if structural in structureless:
             return None
-        return "acrocentric" if chrom in acrocentrics else chrom
-
-    return landmark
-
-
-def _structural_landmark(filler: frozenset[str]) -> LandmarkOf:
-    """Backbone token = the *distinctive* structural feature (not in ``filler``); else skip."""
-
-    def landmark(feature: str) -> str | None:
-        structural = feature.split(":", 1)[1] if ":" in feature else feature
-        return None if structural in filler else structural
+        if sep and chrom.startswith("chr"):
+            chrom = "acrocentric" if chrom in acrocentrics else chrom
+            return f"{chrom}:{structural}"
+        return structural
 
     return landmark
 
@@ -827,6 +823,40 @@ def _place_fixed(
     return [float(x) for x in cum], aln.score
 
 
+def _token_chromosome(token: str) -> str | None:
+    """The chromosome part of a combined ``chromosome:feature`` backbone token (``None`` if none)."""
+    return token.split(":", 1)[0] if ":" in token else None
+
+
+def _substantial_blocks(
+    oriented: Sequence[Segment],
+    cum: Sequence[float],
+    rank: Mapping[str, int],
+    landmark_of: LandmarkOf,
+    min_bp: int,
+) -> list[tuple[str, float, float]]:
+    """Contiguous landmark blocks ``(token, start_cum, end_cum)`` totalling ≥ ``min_bp``.
+
+    Same filter as :func:`_landmark_sequence`, so a speck of a landmark (a 36 bp ``dhor`` that is a
+    real block in *another* read, hence in ``rank``) can't act as an anchor here.
+    """
+    blocks: list[tuple[str, float, float]] = []
+    i, n = 0, len(oriented)
+    while i < n:
+        token = landmark_of(oriented[i][0])
+        if token not in rank:
+            i += 1
+            continue
+        bp, j = 0.0, i
+        while j < n and landmark_of(oriented[j][0]) == token:
+            bp += oriented[j][1]
+            j += 1
+        if bp >= min_bp:
+            blocks.append((token, cum[i], cum[j]))
+        i = j
+    return blocks
+
+
 def _junction_placement(
     oriented_segs: Mapping[str, Sequence[Segment]],
     members: Sequence[str],
@@ -836,12 +866,13 @@ def _junction_placement(
     """Place reads by anchoring on **backbone junctions** (chromosomes, or distinctive features).
 
     Landmarks are laid out left to right in ``rank`` order, each given a slot as wide as its longest
-    observed block. A read's *junction* (the boundary between two consecutive landmarks) is pinned
-    to the boundary between their slots, and the read's segments extend outward from there — so every
-    read sharing a breakpoint lines that breakpoint up exactly, regardless of how much of each
-    landmark it captured. A read carrying one landmark is pinned at that landmark's slot start. This
-    is robust where alignment is not: the landmark identity, not a ~uniform shared satellite, fixes
-    the coordinate.
+    observed block. A read is pinned at one of its *junctions* (a contact between two consecutive
+    landmark blocks, gap < ADJACENT_GAP_BP) — specifically the **most cluster-conserved** junction
+    it carries (the landmark pair seen adjacent in the most reads, ties broken toward a chromosome
+    change), so every read sharing that junction lines it up exactly, regardless of how much of each
+    landmark it captured, and a read-specific internal boundary (e.g. an internal ``dhor``) can't
+    pull one read out of register. A read with no junction is pinned at its lowest-rank landmark, so
+    it still lines up on the shared feature rather than drifting via a distal one.
     """
     max_len: dict[str, float] = defaultdict(float)
     for r in members:
@@ -858,33 +889,41 @@ def _junction_placement(
         slot_start[token] = cursor
         cursor += max_len[token]
 
+    read_blocks = {
+        r: _substantial_blocks(
+            oriented_segs[r], _cumulative_bp(oriented_segs[r]), rank, landmark_of,
+            MIN_FEATURE_BLOCK_BP,
+        )
+        for r in members
+    }
+    junction_freq: Counter = Counter()  # how many reads carry each landmark-pair junction
+    for blocks in read_blocks.values():
+        for (ta, _sa, ea), (tb, sb, _eb) in pairwise(blocks):
+            if ta != tb and sb - ea < ADJACENT_GAP_BP:
+                junction_freq[frozenset({ta, tb})] += 1
+
     placed: dict[str, list[float]] = {}
     for r in members:
         oriented = oriented_segs[r]
         cum = _cumulative_bp(oriented)
-        # Prefer the first *adjacent* landmark junction (a real conserved boundary, e.g. a
-        # breakpoint or a bSat->ITS contact): pin the right landmark's start to its slot. Fall back
-        # to the read's lowest-rank landmark — so a read missing the proximal landmark still pins
-        # the shared one (its ITS) to the ITS slot instead of drifting via a distal feature.
-        anchor_read = anchor_cons = None
-        prev_token: str | None = None
-        prev_end = 0.0  # consensus-coord end of the previous landmark block
-        lowest: tuple[int, float, str] | None = None  # (rank, block_start, token)
-        for i, (feature, _length) in enumerate(oriented):
-            token = landmark_of(feature)
-            if token not in rank:
-                continue
+        blocks = read_blocks[r]
+        # pin the most cluster-conserved junction this read has (freq, then chromosome change)
+        best = None  # (freq, is_chromosome_change, block_start, anchor_token)
+        lowest: tuple[int, float, str] | None = None
+        for k, (token, start, _end) in enumerate(blocks):
             if lowest is None or rank[token] < lowest[0]:
-                lowest = (rank[token], cum[i], token)
-            # an adjacent junction = two landmarks in *contact* (gap below ADJACENT_GAP_BP): a real
-            # breakpoint or a bSat->ITS contact, not two landmarks separated by an arm.
-            if prev_token is not None and prev_token != token and cum[i] - prev_end < ADJACENT_GAP_BP:
-                anchor_read, anchor_cons = cum[i], slot_start[token]
-                break
-            prev_token, prev_end = token, cum[i + 1]
-        if anchor_read is None and lowest is not None:
+                lowest = (rank[token], start, token)
+            if k > 0 and blocks[k - 1][0] != token and start - blocks[k - 1][2] < ADJACENT_GAP_BP:
+                prev = blocks[k - 1][0]
+                ca, cb = _token_chromosome(prev), _token_chromosome(token)
+                key = (junction_freq[frozenset({prev, token})], int(bool(ca and cb and ca != cb)))
+                if best is None or key > best[:2]:
+                    best = (*key, start, token)  # anchor the right (higher-rank) landmark
+        if best is not None:
+            anchor_read, anchor_cons = best[2], slot_start[best[3]]
+        elif lowest is not None:
             anchor_read, anchor_cons = lowest[1], slot_start[lowest[2]]
-        if anchor_read is None:
+        else:
             anchor_read = anchor_cons = 0.0
         offset = anchor_cons - anchor_read
         placed[r] = [x + offset for x in cum]
@@ -899,27 +938,27 @@ def consensus_layout(
     sub_score: SubScore,
     gap_factor: float,
     filler: frozenset[str] | None = None,
+    structureless: frozenset[str] | None = None,
     acrocentric_chromosomes: frozenset[str] | None = None,
     weight: Mapping[str, float] | None = None,
 ) -> ClusterLayout:
     """Lay a cluster out in consensus coordinates: place every read so matched features stack.
 
-    Orientation is decided first (:func:`_orient_reads`), then placement depends on the cluster's
-    **backbone** — the sequence of landmark features along it:
-
-    * If the cluster spans ≥ 2 chromosomes (a rearrangement), the backbone is the **chromosomes**.
-    * Otherwise (one chromosome) the backbone is the **distinctive structural features** (satellites
-      / ITS / TAR1 / rDNA — everything not in ``filler``), so a single-chromosome cluster is laid
-      out by its structural skeleton.
+    Orientation is decided first (:func:`_orient_reads`), then reads are placed along the cluster's
+    **backbone** — the sequence of :func:`_combined_landmark` tokens, the composite
+    ``chromosome:feature`` using *both* the chromosome and the structural feature (acrocentrics
+    collapsed; ``structureless`` arms/ct dropped; telomeres + satellites kept). So the layout
+    anchors on chromosome breakpoints **and** structural junctions (a ``telomere → TAR1`` subtelomere
+    boundary, a ``bSat → ITS`` contact).
 
     With ≥ 2 backbone landmarks the reads are placed by :func:`_junction_placement` — anchored on
-    their backbone **junctions**, so every shared breakpoint lines up and the backbone reads in one
-    consistent order (robust where alignment isn't: landmark identity, not a ~uniform shared
-    satellite, fixes the coordinate). A cluster with < 2 landmarks falls back to a maximum-spanning-
-    tree walk over the overlap graph (``neighbors``): from the seed each read is attached via its
-    *strongest* overlap to an already-placed read (Prim's), in its fixed orientation, mapped via a
-    piecewise-linear :func:`_anchor_map`. The layout is then shifted so the leftmost edge is 0, the
-    consensus spans the **union** of all reads, and :func:`_union_consensus` majority-votes the
+    their backbone **junctions**, so every shared breakpoint/junction lines up and the backbone
+    reads in one consistent order (robust where alignment isn't: landmark identity, not a ~uniform
+    shared satellite, fixes the coordinate). A cluster with < 2 landmarks falls back to a maximum-
+    spanning-tree walk over the overlap graph (``neighbors``): from the seed each read is attached
+    via its *strongest* overlap to an already-placed read (Prim's), in its fixed orientation, mapped
+    via a piecewise-linear :func:`_anchor_map`. The layout is then shifted so the leftmost edge is 0,
+    the consensus spans the **union** of all reads, and :func:`_union_consensus` majority-votes the
     feature at each grid interval.
     """
     scorer = _memoized(_weighted_sub_score(sub_score, weight))
@@ -927,25 +966,18 @@ def consensus_layout(
     member_set = set(members)
     seed = cluster.seed
     filler = filler if filler is not None else frozenset()
+    # The layout backbone excludes only structureless features (arms/ct/...); unlike the clustering
+    # filler it *keeps* telomeres + satellites as landmarks. Defaults to filler when not given.
+    structureless = structureless if structureless is not None else filler
     if neighbors is None:  # star: every member placed directly against the seed
         neighbors = {seed: [m for m in members if m != seed]}
 
-    # Pick the backbone: chromosomes if the cluster is a rearrangement, else (only when a filler
-    # set distinguishes distinctive features from filler) the distinctive structural features.
-    # With no filler set there is no meaningful backbone, so fall through to MST tiling.
-    chrom_landmark = _chromosome_landmark(acrocentric_chromosomes or frozenset())
-    landmark_of = _structural_landmark(filler)
-    chrom_seqs = {
-        r: _landmark_sequence(reads[r], chrom_landmark, MIN_CHROM_BLOCK_BP) for r in members
+    # The backbone is the combined chromosome+structural landmark (telomeres/satellites kept,
+    # arms/ct dropped, acrocentrics collapsed). A cluster with < 2 landmarks falls through to MST.
+    landmark_of = _combined_landmark(acrocentric_chromosomes or frozenset(), structureless)
+    sequences = {
+        r: _landmark_sequence(reads[r], landmark_of, MIN_FEATURE_BLOCK_BP) for r in members
     }
-    if len({c for seq in chrom_seqs.values() for c in seq}) >= 2:
-        landmark_of, sequences = chrom_landmark, chrom_seqs
-    elif filler:
-        sequences = {
-            r: _landmark_sequence(reads[r], landmark_of, MIN_FEATURE_BLOCK_BP) for r in members
-        }
-    else:
-        sequences = {r: [] for r in members}  # no backbone -> MST
     rank = _landmark_order(sequences.values())
     # Orient the rank in the seed's reading direction (the seed is the unflipped reference), so the
     # rank increases left-to-right exactly as reads are placed — otherwise "lowest-rank landmark"

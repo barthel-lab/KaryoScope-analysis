@@ -94,7 +94,8 @@ def _layout_cluster6() -> asm.ClusterLayout:
     )
     neighbors = {r: [o for o in reads if o != r] for r in reads}  # all-vs-all within the cluster
     return asm.consensus_layout(
-        reads, cluster, neighbors=neighbors, sub_score=SUB, gap_factor=0.1, weight=WEIGHTS
+        reads, cluster, neighbors=neighbors, sub_score=SUB, gap_factor=0.1,
+        structureless=frozenset({"arm", "p_arm", "q_arm", "ct"}), weight=WEIGHTS,  # arms/ct not landmarks
     )
 
 

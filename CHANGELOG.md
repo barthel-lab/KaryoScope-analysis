@@ -14,15 +14,20 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
 ### Added
 
 - Engine B **backbone layout** (`consensus_layout`): orientation and placement use the cluster's
-  *backbone* — a sequence of landmark features — as the primary signal, which is what makes clusters
-  read correctly. The backbone is the **chromosomes** when a cluster spans ≥2 of them (a
-  rearrangement), otherwise the **distinctive structural features** (satellites / ITS / TAR1 / rDNA
-  — not filler), so a single-chromosome cluster is laid out by its structural skeleton. Each read is
-  flipped so its backbone runs in one consistent order (the path read off the landmark adjacencies,
-  e.g. `chr11 — chr13 — chr19` or `bSat — TAR1`), then placed by **anchoring on backbone
-  junctions**: each shared breakpoint is pinned to one coordinate, lining up across every read
-  regardless of how much of each landmark it captured — robust where feature alignment isn't,
-  because a large ~uniform shared satellite (a hub) no longer flips reads or floats the breakpoint.
+  *backbone* — the sequence of `chromosome:feature` landmark tokens — as the primary signal, which
+  is what makes clusters read correctly. The token uses **both** the chromosome and the structural
+  feature, so the layout anchors on chromosome breakpoints **and** structural junctions (a
+  `telomere → TAR1` subtelomere boundary, a `bSat → ITS` contact); acrocentric chromosomes
+  (chr13/14/15/21/22, whose short arms recombine) collapse to one `acrocentric` token, and only true
+  *structureless* features (arms/ct/non-*) are dropped — telomeres and satellites are kept as layout
+  landmarks even though telomere is filler for clustering. Each read is flipped so its backbone runs
+  in one consistent order (the path read off the landmark adjacencies, e.g. `chr11 — chr13 — chr19`
+  or `bSat — ITS`), then placed by **anchoring on the most cluster-conserved junction it carries**
+  (the landmark pair seen adjacent in the most reads, ties broken toward a chromosome change) — so a
+  shared breakpoint lines up across every read regardless of how much of each landmark it captured,
+  and a read-specific internal boundary can't pull one read out of register. Robust where feature
+  alignment isn't, because a large ~uniform shared satellite (a hub) no longer flips reads or floats
+  the breakpoint.
   A read anchors on its first landmark *contact* (two landmarks within `ADJACENT_GAP_BP` — a
   breakpoint or a feature junction, not arm-separated landmarks); a read missing the proximal
   landmark falls back to pinning its lowest-rank landmark, so it still lines up on the shared
