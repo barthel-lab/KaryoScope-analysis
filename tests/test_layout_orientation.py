@@ -251,20 +251,27 @@ def test_acrocentric_chromosomes_collapse_in_backbone():
 
 
 def test_translocation_chromosomes_distinguishes_clean_from_chimeric():
-    """The chromosome backbone is opt-in for a *clean* translocation (≥2 big chromosomes co-occurring
-    in most reads); a chimera / shared-subtelomere cluster falls back to the structural backbone."""
+    """The chromosome backbone is opt-in for a *clean* translocation — a consistent chromosome
+    junction (one big chromosome + one ≥1 kb partner, the same pair in most reads). A chimera, a
+    shared subtelomere, or a sliver array falls back to the structural backbone."""
     acro = frozenset()
     bp = asm.MAJOR_CHROM_BP
     # clean: every read spans the chr11-chr13 junction, both chromosomes large
     clean = {f"r{i}": [("chr11:q_arm", 9000), ("chr13:active_hor", 8000)] for i in range(4)}
     assert asm._translocation_chromosomes(clean, list(clean), acro, bp) == {"chr11", "chr13"}
-    # subtelomere cluster: 6 chr16-only reads + 2 with a stray chr2 — chr2 co-occurs in only 2/8
-    # reads (< half), so it is not a clean translocation -> empty (use the structural backbone)
+    # a real junction with a SMALL partner (one big + one >=1kb) is still a translocation
+    small = {f"p{i}": [("chr13:active_hor", 11000), ("chr19:active_hor", 2000)] for i in range(3)}
+    assert asm._translocation_chromosomes(small, list(small), acro, bp) == {"chr13", "chr19"}
+    # subtelomere cluster: 6 chr16-only reads + 2 with a stray chr2 — the chr16-chr2 junction is in
+    # only 2/8 reads (< half), so it is not a translocation -> structural backbone
     sub = {f"s{i}": [("chr16:q_arm", 9000), ("chr16:TAR1", 1500)] for i in range(6)}
     sub["t1"] = [("chr16:q_arm", 9000), ("chr2:q_arm", 8000)]
     sub["t2"] = [("chr16:q_arm", 9000), ("chr2:q_arm", 8000)]
     assert asm._translocation_chromosomes(sub, list(sub), acro, bp) == set()
-    # satellite slivers (a bSat array mis-assigned across chromosomes) never reach MAJOR_CHROM_BP
+    # a shared subtelomere (a TAR1 array on chr4 + an acrocentric): adjacent but both sides small
+    shared = {f"u{i}": [("chr4:TAR1", 1000), ("chr15:TAR1", 2000)] for i in range(4)}
+    assert asm._translocation_chromosomes(shared, list(shared), acro, bp) == set()
+    # satellite slivers (a bSat array mis-assigned across chromosomes) never reach JUNCTION_PARTNER_BP
     slivers = {f"x{i}": [("chr18:bSat", 5500), ("chr22:bSat", 400), ("chr4:bSat", 350)] for i in range(3)}
     assert asm._translocation_chromosomes(slivers, list(slivers), acro, bp) == set()
 

@@ -770,10 +770,13 @@ ORIENT_MIN_BLOCK_BP = 150
 #: Two backbone landmarks within this many bp are a *contact* (a breakpoint or a feature junction
 #: to anchor on); farther apart they are arm-separated and not a junction.
 ADJACENT_GAP_BP = 2000
-#: A chromosome needs a contiguous block at least this large (in half the reads) to count as a
-#: "large, obvious" signal — ≥2 such chromosomes mark a clean translocation worth a chromosome
-#: backbone; otherwise the cluster lays out on its structural backbone.
+#: One side of a chromosome junction must be a contiguous block at least this large — a clear
+#: chromosome arm/centromere — for the junction to mark a translocation (vs a shared subtelomere,
+#: where both sides are small satellite blocks).
 MAJOR_CHROM_BP = 5000
+#: The *other* side of a chromosome junction must reach at least this — enough that a real (if short)
+#: translocation partner counts, but a satellite sliver mis-assigned across chromosomes does not.
+JUNCTION_PARTNER_BP = 1000
 
 #: A landmark function maps a composite ``chromosome:feature`` label to the backbone token it
 #: contributes, or ``None`` to skip it.
@@ -784,7 +787,7 @@ def _chromosome_landmark(acrocentrics: frozenset[str]) -> LandmarkOf:
     """Backbone token = the chromosome (``chrN``), acrocentrics collapsed to one ``acrocentric``.
 
     Used only for a **clean translocation** — a cluster whose reads carry a large, obvious block from
-    each of several chromosomes (see :func:`_major_chromosomes`). There the chromosomes *are* the
+    each of several chromosomes (see :func:`_translocation_chromosomes`). There the chromosomes *are* the
     structure and their breakpoints are the thing to line up.
     """
 
@@ -822,41 +825,47 @@ def _translocation_chromosomes(
 ) -> set[str]:
     """The chromosomes of a **clean translocation**, or an empty set if the cluster isn't one.
 
-    A clean translocation has (a) ≥2 chromosomes each carrying a *large, obvious* block — a ≥
-    ``min_block_bp`` contiguous run, in ≥2 reads (a satellite sliver mis-assigned across chromosomes
-    never reaches ``min_block_bp``); **and** (b) those big chromosomes co-occur in *most* reads (≥
-    half, and ≥2) — a recurring breakpoint that almost every read spans. (b) is what tells a real
-    chr11-chr13-chr19 fusion from a chimera that merely has a few big chromosomes co-occurring
-    sporadically (or one chromosome's subtelomeres clustered by a shared TAR1 with a couple of stray
-    second-chromosome reads) — both of those lay out on the structural backbone instead. Acrocentrics
-    collapse before counting.
+    A clean translocation has a **consistent chromosome junction**: two *adjacent* chromosome blocks
+    (gap < ADJACENT_GAP_BP) on different chromosomes — one large (≥ ``min_block_bp``, a clear arm or
+    centromere) and the other ≥ ``JUNCTION_PARTNER_BP`` — and the *same chromosome pair* recurs in at
+    least half the reads. That recurring, adjacent, sized junction is what tells a real chr11-chr13
+    fusion (every read spans the same breakpoint) from:
+
+    * a **chimera** whose reads cross many chromosomes but never agree on a pair (no pair reaches half);
+    * a **shared subtelomere** (a TAR1 array annotated chr4 on one read, an acrocentric on the next):
+      adjacent, but both sides are small satellite blocks, so neither reaches ``min_block_bp``;
+    * a **mis-assigned satellite sliver** (a bSat array split across chromosome labels): the sliver
+      never reaches ``JUNCTION_PARTNER_BP``.
+
+    All of those fall back to the structural backbone. Acrocentrics collapse to ``acrocentric`` first.
     """
-    per_read: list[set[str]] = []
+    pair_reads: Counter = Counter()
     for r in members:
-        here: set[str] = set()
-        cur: str = ""
-        bp = 0.0
+        runs: list[tuple[str, float, float]] = []  # (chromosome, start, end), filler/ambiguous skipped
+        cur: str | None = None
+        cstart = pos = 0.0
         for feature, length in reads[r]:
-            chrom = feature.split(":", 1)[0] if ":" in feature else ""
+            chrom: str | None = feature.split(":", 1)[0] if ":" in feature else ""
             if chrom in acrocentrics:
                 chrom = "acrocentric"
             elif not chrom.startswith("chr"):
-                chrom = ""  # an ambiguous group label / non-composite feature is not a chromosome
-            if chrom and chrom == cur:
-                bp += length
-            else:
-                if cur and bp >= min_block_bp:
-                    here.add(cur)
-                cur, bp = chrom, float(length) if chrom else 0.0
-        if cur and bp >= min_block_bp:
-            here.add(cur)
-        per_read.append(here)
-    counts: Counter = Counter()
-    for here in per_read:
-        counts.update(here)
-    major = {c for c, n in counts.items() if n >= 2}
-    junction_reads = sum(1 for here in per_read if len(here & major) >= 2)
-    return major if junction_reads >= max(2, len(members) / 2) else set()
+                chrom = None  # an ambiguous group label / non-composite feature is not a chromosome
+            if chrom != cur:
+                if cur is not None:
+                    runs.append((cur, cstart, pos))
+                cur, cstart = chrom, pos
+            pos += length
+        if cur is not None:
+            runs.append((cur, cstart, pos))
+        blocks = [(c, s, e) for c, s, e in runs if e - s >= JUNCTION_PARTNER_BP]
+        seen: set[frozenset] = set()
+        for (ca, sa, ea), (cb, sb, eb) in pairwise(blocks):
+            if ca != cb and sb - ea < ADJACENT_GAP_BP and max(ea - sa, eb - sb) >= min_block_bp:
+                seen.add(frozenset({ca, cb}))
+        pair_reads.update(seen)
+    threshold = max(2, len(members) / 2)
+    pairs = [p for p, n in pair_reads.items() if n >= threshold]
+    return set().union(*pairs) if pairs else set()
 
 
 def _landmark_sequence(
