@@ -108,7 +108,7 @@ def _distinctive_overlap(
     """Raw bp of matched columns whose feature is *distinctive* (not filler).
 
     The anti-chaining criterion: an overlap built only of filler contributes 0 here, so it fails
-    ``min_distinctive_bp`` even if its weighted overlap is large. When ``filler`` is given, a
+    the ``min_overlap_bp`` size gate even if its weighted overlap is large. When ``filler`` is given, a
     feature is distinctive iff its structural layer is **not** in that set (used to exclude the
     read-set-ubiquitous telomere + arm/ct, which a genome-frequency *weight* can't catch because
     telomere is genome-rare). Otherwise distinctiveness falls back to ``weight ≥ distinctive_weight``
@@ -249,7 +249,6 @@ class _EdgeParams:
     min_overlap_bp: float
     min_identity: float
     min_jaccard: float
-    min_distinctive_bp: float
     distinctive_weight: float
     filler: frozenset[str] | None
     require_transition: bool
@@ -307,17 +306,15 @@ def _edge_for_pair(
     distinctive_bp = _distinctive_overlap(
         aln.columns, a, b_used, weight, params.distinctive_weight, params.filler
     )
-    # The overlap-size gate is on *distinctive* (non-filler) matched bp, not the weighted total:
-    # a small but real shared structure (e.g. chr20 ITS+TAR1+gSat) shouldn't be rejected just
-    # because genome-frequency weighting shrinks its weighted size, and a filler-only overlap
-    # (telomere/arm) still scores 0 distinctive (anti-chaining).
+    # The size gate is on *distinctive* (non-filler) matched bp, not the weighted total: a small but
+    # real shared structure (e.g. chr20 ITS+TAR1+gSat) shouldn't be rejected just because genome-
+    # frequency weighting shrinks its weighted size, and — the anti-chaining half — a filler-only
+    # overlap (a shared telomere/arm) scores 0 distinctive bp here, so it never clears the gate.
     if distinctive_bp < params.min_overlap_bp:
         return None
     identity = aln.score / (params.match_score * weighted_bp) if weighted_bp else 0.0
     if identity < params.min_identity:
         return None
-    if params.min_distinctive_bp > 0.0 and distinctive_bp < params.min_distinctive_bp:
-        return None  # overlap rests only on filler (telomere/arm) -> not an edge
     if params.require_transition and _overlap_transitions(aln.columns, a, b_used, MIN_STRETCH_BP) < 1:
         return None  # overlap is a single uniform stretch (no shared junction) -> not confident
     return OverlapEdge(ids[ai], ids[bi], aln.score, identity, weighted_bp, kind, aln.reversed_b)
@@ -354,7 +351,6 @@ def build_overlap_graph(
     min_overlap_bp: float = 1,
     min_identity: float = 0.8,
     min_jaccard: float = 0.0,
-    min_distinctive_bp: float = 0.0,
     distinctive_weight: float = 0.15,
     filler_features: frozenset[str] | None = None,
     require_transition: bool = False,
@@ -365,13 +361,13 @@ def build_overlap_graph(
     """Compute the proper-overlap edges among ``reads`` (``{read_id: segments}``).
 
     A pair becomes an edge iff its best-orientation alignment is a dovetail or containment,
-    has at least ``min_overlap_bp`` of (weighted) overlap, normalized identity ≥
-    ``min_identity``, and at least ``min_distinctive_bp`` bp of matched *distinctive* features
-    (weight ≥ ``distinctive_weight``). With ``weight`` (e.g. genome-frequency), match rewards
-    and the overlap length are scaled per feature, so the overlap rests on *distinctive* shared
-    content; ``min_distinctive_bp`` additionally rejects overlaps explained only by filler
-    (e.g. a shared chromosome arm) — the fix for arm-chaining. The ``min_jaccard`` feature-set
-    prefilter prunes obviously-disjoint pairs cheaply (0 = off).
+    normalized identity ≥ ``min_identity``, and at least ``min_overlap_bp`` bp of matched
+    **distinctive** content (not filler — distinctiveness is "not in ``filler_features``", else
+    weight ≥ ``distinctive_weight``). Measuring the size gate on distinctive bp is the anti-chaining
+    rule: an overlap explained only by a shared chromosome arm/telomere scores 0 here and is
+    rejected. With ``weight`` (e.g. genome-frequency) the match rewards are scaled per feature so the
+    overlap *identity* rests on distinctive content. The ``min_jaccard`` feature-set prefilter prunes
+    obviously-disjoint pairs cheaply (0 = off).
 
     ``block_min_bp`` (0 = off) enables a **blocking index** so the alignment is not run on all
     O(N²) pairs: reads are bucketed by the features they carry at least ``block_min_bp`` of, and
@@ -384,7 +380,7 @@ def build_overlap_graph(
     ids = sorted(reads)
     params = _EdgeParams(
         gap_factor, match_score, min_overlap_bp, min_identity, min_jaccard,
-        min_distinctive_bp, distinctive_weight, filler_features, require_transition,
+        distinctive_weight, filler_features, require_transition,
     )
     pair_iter = (
         _candidate_pairs(ids, reads, block_min_bp)
@@ -466,11 +462,12 @@ class _ParityDSU:
 
 @dataclass(frozen=True)
 class Cluster:
-    """A connected-component cluster of reads, oriented to a seed (longest read)."""
+    """A cluster of reads with a seed (the longest read). Per-read orientation is decided later by
+    the layout (:func:`consensus_layout`, off the backbone); here we only flag whether the overlap
+    graph's relative orientations were *inconsistent* within the cluster (``orientation_conflict``)."""
 
     members: tuple[str, ...]  # sorted by descending length, then id
     seed: str
-    reversed_relative_to_seed: dict[str, bool]
     size: int
     orientation_conflict: bool
 
@@ -552,18 +549,12 @@ def cluster_reads(
     clusters: list[Cluster] = []
     for members in groups.values():
         seed = max(members, key=lambda r: (total_bp(r), r))
-        _, seed_parity = dsu.find(seed)
-        seed_root, _ = dsu.find(seed)
-        oriented = {}
-        for member in members:
-            _, parity = dsu.find(member)
-            oriented[member] = bool(parity ^ seed_parity)
+        seed_root, _ = dsu.find(seed)  # the parity DSU still flags inconsistent-orientation components
         ordered = tuple(sorted(members, key=lambda r: (-total_bp(r), r)))
         clusters.append(
             Cluster(
                 members=ordered,
                 seed=seed,
-                reversed_relative_to_seed=oriented,
                 size=len(members),
                 orientation_conflict=seed_root in dsu.conflicts,
             )
@@ -1283,7 +1274,6 @@ def assemble(
     min_overlap_bp: float = 1,
     min_identity: float = 0.8,
     min_jaccard: float = 0.0,
-    min_distinctive_bp: float = 0.0,
     distinctive_weight: float = 0.15,
     filler_features: frozenset[str] | None = None,
     require_transition: bool = False,
@@ -1301,7 +1291,6 @@ def assemble(
         min_overlap_bp=min_overlap_bp,
         min_identity=min_identity,
         min_jaccard=min_jaccard,
-        min_distinctive_bp=min_distinctive_bp,
         distinctive_weight=distinctive_weight,
         filler_features=filler_features,
         require_transition=require_transition,

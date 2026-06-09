@@ -104,7 +104,9 @@ def _sidecar(output: Path, suffix: str) -> Path:
     default=1000,
     show_default=True,
     type=int,
-    help="Minimum overlap length (bp) for an edge.",
+    help="Minimum bp of matched DISTINCTIVE content (not filler) for an edge. This is the overlap "
+    "size gate AND the anti-chaining gate: an overlap explained only by a shared chromosome "
+    "arm/telomere has 0 distinctive bp and is rejected.",
 )
 @click.option(
     "--min-identity",
@@ -119,15 +121,6 @@ def _sidecar(output: Path, suffix: str) -> Path:
     show_default=True,
     type=float,
     help="Feature-set Jaccard prefilter (0 = off).",
-)
-@click.option(
-    "--min-distinctive-bp",
-    default=0.0,
-    show_default=True,
-    type=float,
-    help="Minimum bp of matched DISTINCTIVE features (weight >= --distinctive-weight) for an "
-    "edge (0 = off). Rejects overlaps explained only by filler like a shared chromosome arm "
-    "(anti-chaining); use with a weighting method.",
 )
 @click.option(
     "--distinctive-weight",
@@ -233,7 +226,6 @@ def cmd(
     min_overlap_bp: int,
     min_identity: float,
     min_jaccard: float,
-    min_distinctive_bp: float,
     distinctive_weight: float,
     min_interesting_bp: float,
     require_transition: bool,
@@ -295,7 +287,6 @@ def cmd(
         min_overlap_bp=min_overlap_bp,
         min_identity=min_identity,
         min_jaccard=min_jaccard,
-        min_distinctive_bp=min_distinctive_bp,
         distinctive_weight=distinctive_weight,
         filler_features=filler,
         require_transition=require_transition,

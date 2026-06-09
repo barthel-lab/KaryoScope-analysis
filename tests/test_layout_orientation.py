@@ -89,7 +89,7 @@ def _layout_cluster6() -> asm.ClusterLayout:
     members = tuple(sorted(reads, key=lambda r: -sum(length for _f, length in reads[r])))
     seed = members[0]  # longest read (chr13-chr19)
     cluster = asm.Cluster(
-        members=members, seed=seed, reversed_relative_to_seed={}, size=len(members),
+        members=members, seed=seed, size=len(members),
         orientation_conflict=False,
     )
     neighbors = {r: [o for o in reads if o != r] for r in reads}  # all-vs-all within the cluster
@@ -169,7 +169,7 @@ def _layout_chr18() -> asm.ClusterLayout:
     reads = {rid: list(segs) for rid, segs in CHR18.items()}
     members = tuple(sorted(reads, key=lambda r: -sum(length for _f, length in reads[r])))
     cluster = asm.Cluster(
-        members=members, seed=members[0], reversed_relative_to_seed={}, size=len(members),
+        members=members, seed=members[0], size=len(members),
         orientation_conflict=False,
     )
     neighbors = {r: [o for o in reads if o != r] for r in reads}
@@ -232,7 +232,7 @@ def test_acrocentric_chromosomes_collapse_in_backbone():
     }
     members = tuple(sorted(reads, key=lambda r: -sum(length for _f, length in reads[r])))
     cluster = asm.Cluster(
-        members=members, seed=members[0], reversed_relative_to_seed={}, size=len(members),
+        members=members, seed=members[0], size=len(members),
         orientation_conflict=False,
     )
     neighbors = {r: [o for o in reads if o != r] for r in reads}
@@ -292,7 +292,7 @@ def test_anchors_on_filler_breakpoint_for_a_variable_length_feature():
     }
     members = tuple(sorted(reads, key=lambda r: -sum(length for _f, length in reads[r])))
     cluster = asm.Cluster(
-        members=members, seed=members[0], reversed_relative_to_seed={}, size=len(members),
+        members=members, seed=members[0], size=len(members),
         orientation_conflict=False,
     )
     neighbors = {r: [o for o in reads if o != r] for r in reads}
@@ -327,7 +327,7 @@ def test_small_distinctive_feature_orients_reads():
     }
     members = tuple(sorted(reads, key=lambda r: -sum(length for _f, length in reads[r])))
     cluster = asm.Cluster(
-        members=members, seed=members[0], reversed_relative_to_seed={}, size=len(members),
+        members=members, seed=members[0], size=len(members),
         orientation_conflict=False,
     )
     neighbors = {r: [o for o in reads if o != r] for r in reads}

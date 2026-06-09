@@ -53,21 +53,21 @@ def test_overlap_gate_is_on_distinctive_content():
     assert asm.build_overlap_graph(distinctive, min_overlap_bp=1000, **common)
 
 
-def test_min_distinctive_bp_with_filler_set():
+def test_overlap_gate_with_filler_set():
     # filler-based distinctiveness: a shared telomere (genome-rare, so high weight) is filler and
-    # can't make an edge, but a shared satellite can.
+    # scores 0 distinctive bp, so it can't clear the size gate; a shared satellite can.
     telo = {
         "x": [("aSat", 400), ("canonical_telomere", 5000)],
         "y": [("canonical_telomere", 5000), ("bSat", 400)],
     }
     filler = frozenset({"canonical_telomere"})
-    common = dict(sub_score=EXACT, gap_factor=0.01, min_overlap_bp=1, min_identity=0.5)
-    assert not asm.build_overlap_graph(telo, min_distinctive_bp=100, filler_features=filler, **common)
+    common = dict(sub_score=EXACT, gap_factor=0.01, min_overlap_bp=100, min_identity=0.5)
+    assert not asm.build_overlap_graph(telo, filler_features=filler, **common)
     sat = {  # now the shared block is a satellite (not filler) -> edge
         "x": [("ct", 400), ("aSat", 5000)],
         "y": [("aSat", 5000), ("ct", 400)],
     }
-    assert asm.build_overlap_graph(sat, min_distinctive_bp=100, filler_features=filler, **common)
+    assert asm.build_overlap_graph(sat, filler_features=filler, **common)
 
 
 # ----------------------------------------------------------------- blocking index
@@ -242,15 +242,16 @@ def test_unrelated_read_is_its_own_singleton():
     assert singleton.seed == "lone"
 
 
-def test_reversed_member_marked_relative_to_seed():
+def test_clean_reverse_has_no_orientation_conflict():
+    # A single consistent flip (seed + its reverse) clusters with no orientation conflict; the
+    # per-read orientation itself is decided later by the layout, not carried on the cluster.
     base = [("A", 200), ("B", 100), ("C", 100)]  # longest -> seed
     reads = {"seed": base, "rev": reverse_segments(base)}
     clusters, _ = asm.assemble(reads, **PARAMS)
     assert len(clusters) == 1
     c = clusters[0]
     assert c.seed == "seed"
-    assert c.reversed_relative_to_seed["seed"] is False
-    assert c.reversed_relative_to_seed["rev"] is True
+    assert c.orientation_conflict is False
 
 
 # ----------------------------------------------------------------- feature weighting (v2)
