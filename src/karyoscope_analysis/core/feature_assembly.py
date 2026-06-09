@@ -595,7 +595,10 @@ def _union_consensus(placed: Sequence[LaidOutRead], width: int) -> tuple[Consens
 #: ambiguous annotation) when reading off the backbone. Chromosomes (boundaries are coarse) get the
 #: larger threshold; distinctive structural features get the smaller one (TAR1 can be ~1 kb).
 MIN_CHROM_BLOCK_BP = 2000
-MIN_FEATURE_BLOCK_BP = 1000
+MIN_FEATURE_BLOCK_BP = 500
+#: Two backbone landmarks within this many bp are a *contact* (a breakpoint or a feature junction
+#: to anchor on); farther apart they are arm-separated and not a junction.
+ADJACENT_GAP_BP = 2000
 
 #: A landmark function maps a composite ``chromosome:feature`` label to the backbone token it
 #: contributes, or ``None`` to skip it.
@@ -771,25 +774,30 @@ def _junction_placement(
     for r in members:
         oriented = oriented_segs[r]
         cum = _cumulative_bp(oriented)
+        # Prefer the first *adjacent* landmark junction (a real conserved boundary, e.g. a
+        # breakpoint or a bSat->ITS contact): pin the right landmark's start to its slot. Fall back
+        # to the read's lowest-rank landmark — so a read missing the proximal landmark still pins
+        # the shared one (its ITS) to the ITS slot instead of drifting via a distal feature.
         anchor_read = anchor_cons = None
-        prev: str | None = None
+        prev_token: str | None = None
+        prev_end = 0.0  # consensus-coord end of the previous landmark block
+        lowest: tuple[int, float, str] | None = None  # (rank, block_start, token)
         for i, (feature, _length) in enumerate(oriented):
             token = landmark_of(feature)
             if token not in rank:
                 continue
-            if prev is not None and prev != token:  # a backbone junction
+            if lowest is None or rank[token] < lowest[0]:
+                lowest = (rank[token], cum[i], token)
+            # an adjacent junction = two landmarks in *contact* (gap below ADJACENT_GAP_BP): a real
+            # breakpoint or a bSat->ITS contact, not two landmarks separated by an arm.
+            if prev_token is not None and prev_token != token and cum[i] - prev_end < ADJACENT_GAP_BP:
                 anchor_read, anchor_cons = cum[i], slot_start[token]
                 break
-            prev = token
-        if anchor_read is None:  # one landmark: pin its block start to the slot
-            idx = next(
-                (i for i, (f, _l) in enumerate(oriented) if landmark_of(f) in rank), None
-            )
-            if idx is not None:
-                anchor_read = cum[idx]
-                anchor_cons = slot_start[landmark_of(oriented[idx][0])]
-            else:
-                anchor_read = anchor_cons = 0.0
+            prev_token, prev_end = token, cum[i + 1]
+        if anchor_read is None and lowest is not None:
+            anchor_read, anchor_cons = lowest[1], slot_start[lowest[2]]
+        if anchor_read is None:
+            anchor_read = anchor_cons = 0.0
         offset = anchor_cons - anchor_read
         placed[r] = [x + offset for x in cum]
     return placed
@@ -833,18 +841,29 @@ def consensus_layout(
     if neighbors is None:  # star: every member placed directly against the seed
         neighbors = {seed: [m for m in members if m != seed]}
 
-    # Pick the backbone: chromosomes if the cluster is a rearrangement, else distinctive features.
+    # Pick the backbone: chromosomes if the cluster is a rearrangement, else (only when a filler
+    # set distinguishes distinctive features from filler) the distinctive structural features.
+    # With no filler set there is no meaningful backbone, so fall through to MST tiling.
+    landmark_of = _structural_landmark(filler)
     chrom_seqs = {
         r: _landmark_sequence(reads[r], _chromosome_landmark, MIN_CHROM_BLOCK_BP) for r in members
     }
     if len({c for seq in chrom_seqs.values() for c in seq}) >= 2:
         landmark_of, sequences = _chromosome_landmark, chrom_seqs
-    else:
-        landmark_of = _structural_landmark(filler)
+    elif filler:
         sequences = {
             r: _landmark_sequence(reads[r], landmark_of, MIN_FEATURE_BLOCK_BP) for r in members
         }
+    else:
+        sequences = {r: [] for r in members}  # no backbone -> MST
     rank = _landmark_order(sequences.values())
+    # Orient the rank in the seed's reading direction (the seed is the unflipped reference), so the
+    # rank increases left-to-right exactly as reads are placed — otherwise "lowest-rank landmark"
+    # would point the wrong way for a read missing the proximal landmark.
+    seed_ranks = [rank[t] for t in sequences[seed] if t in rank]
+    if len(seed_ranks) >= 2 and seed_ranks[-1] < seed_ranks[0]:
+        top = max(rank.values())
+        rank = {t: top - v for t, v in rank.items()}
 
     orient = _orient_reads(reads, members, seed, rank, sequences, scorer, gap_factor)
     oriented_segs = {

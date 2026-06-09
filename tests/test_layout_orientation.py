@@ -153,7 +153,28 @@ CHR18 = {
         ("chr18:p_arm", 19000), ("chr18:TAR1", 1880), ("chr18:p_arm", 4800),
         ("chr18:ITS", 593), ("chr18:bSat", 3860),
     ],
+    # reads lacking TAR1 (the user's misaligned ones): only bSat + ITS. They share the bSat->ITS
+    # junction with the others and must align there, not drift because they have no TAR1.
+    "e_noTAR1": [("chr18:p_arm", 25000), ("chr18:bSat", 7200), ("chr18:ITS", 595), ("chr18:p_arm", 3000)],
+    "f_noTAR1": [("chr18:p_arm", 22000), ("chr18:bSat", 3000), ("chr18:ITS", 590), ("chr18:p_arm", 8000)],
+    # a read lacking the *proximal* bSat (only ITS + TAR1): no adjacent bSat->ITS junction, so it
+    # must still pin its ITS to the ITS slot rather than drifting via the distal TAR1.
+    "g_noBSAT": [("chr18:p_arm", 24000), ("chr18:ITS", 588), ("chr18:p_arm", 5000), ("chr18:TAR1", 1990)],
 }
+
+
+def _layout_chr18() -> asm.ClusterLayout:
+    filler = FeatureHierarchy.from_tsv(HIERARCHY_TSV).filler_features
+    reads = {rid: list(segs) for rid, segs in CHR18.items()}
+    members = tuple(sorted(reads, key=lambda r: -sum(length for _f, length in reads[r])))
+    cluster = asm.Cluster(
+        members=members, seed=members[0], reversed_relative_to_seed={}, size=len(members),
+        orientation_conflict=False,
+    )
+    neighbors = {r: [o for o in reads if o != r] for r in reads}
+    return asm.consensus_layout(
+        reads, cluster, neighbors=neighbors, sub_score=SUB, gap_factor=0.1, filler=filler
+    )
 
 
 def _first_start(read, structural):
@@ -167,23 +188,26 @@ def _first_start(read, structural):
 def test_single_chromosome_uses_structural_backbone():
     """A one-chromosome cluster is oriented + ordered by its distinctive features (bSat - TAR1).
 
-    The reversed reads must be flipped so every read reads bSat before TAR1.
+    The reverse-orientation reads must be flipped so every read reads bSat before TAR1.
     """
-    filler = FeatureHierarchy.from_tsv(HIERARCHY_TSV).filler_features
-    reads = {rid: list(segs) for rid, segs in CHR18.items()}
-    members = tuple(sorted(reads, key=lambda r: -sum(length for _f, length in reads[r])))
-    cluster = asm.Cluster(
-        members=members, seed=members[0], reversed_relative_to_seed={}, size=len(members),
-        orientation_conflict=False,
-    )
-    neighbors = {r: [o for o in reads if o != r] for r in reads}
-    layout = asm.consensus_layout(
-        reads, cluster, neighbors=neighbors, sub_score=SUB, gap_factor=0.1, filler=filler
-    )
-    # every read must place bSat to the left of TAR1 (consistent backbone order, no inversions)
+    layout = _layout_chr18()
+    # every read carrying both must place bSat to the left of TAR1 (consistent order, no inversions)
     for read in layout.placed:
         b, t = _first_start(read, "bSat"), _first_start(read, "TAR1")
-        assert b is not None and t is not None and b < t, f"{read.read_id}: bSat={b} TAR1={t}"
+        if b is not None and t is not None:
+            assert b < t, f"{read.read_id}: bSat={b} TAR1={t}"
     # the two reverse-orientation reads were flipped
     flipped = {r.read_id for r in layout.placed if r.reversed}
     assert flipped == {"c_rev", "d_rev"}, flipped
+
+
+def test_single_chromosome_its_aligns_without_the_distal_feature():
+    """ITS lines up across reads even when some lack the distal TAR1 feature.
+
+    The reads sharing only bSat + ITS (no TAR1) must anchor on the bSat->ITS junction like the
+    rest, not drift to a different landmark — the bug the maintainer spotted on cluster_2.
+    """
+    layout = _layout_chr18()
+    its_starts = [s for r in layout.placed if (s := _first_start(r, "ITS")) is not None]
+    assert len(its_starts) == len(CHR18)  # every read has ITS placed
+    assert max(its_starts) - min(its_starts) <= 1500, its_starts

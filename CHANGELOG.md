@@ -23,9 +23,13 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   junctions**: each shared breakpoint is pinned to one coordinate, lining up across every read
   regardless of how much of each landmark it captured — robust where feature alignment isn't,
   because a large ~uniform shared satellite (a hub) no longer flips reads or floats the breakpoint.
-  A landmark run must be ≥2 kb (chromosomes) / ≥1 kb (features) to count, so a sliver of mis-assigned
-  annotation doesn't read as structure. Clusters with <2 landmarks keep the maximum-spanning-tree
-  feature alignment. Membership is unchanged (placement only). `cluster-plot` gains a
+  A read anchors on its first landmark *contact* (two landmarks within `ADJACENT_GAP_BP` — a
+  breakpoint or a feature junction, not arm-separated landmarks); a read missing the proximal
+  landmark falls back to pinning its lowest-rank landmark, so it still lines up on the shared
+  feature instead of drifting via a distal one. A landmark run must be ≥2 kb (chromosomes) /
+  ≥500 bp (features) to count, with the backbone ranked in the seed's reading direction. Clusters
+  with no filler set or <2 landmarks keep the maximum-spanning-tree feature alignment. Membership is
+  unchanged (placement only). `cluster-plot` gains a
   `--chromosome-track/--no-chromosome-track` option (default on): a thin chromosome-colored strip
   is drawn directly under each read's structural track (shared DB color palette + a Chromosomes
   legend), so structure and chromosome identity line up and translocations show two chromosome
