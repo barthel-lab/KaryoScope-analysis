@@ -665,6 +665,85 @@ def _union_consensus(placed: Sequence[LaidOutRead], width: int) -> tuple[Consens
     return tuple(out)
 
 
+def _structural(feature: str) -> str:
+    """The structural layer of a ``chromosome:feature`` label (or the whole label if non-composite)."""
+    return feature.split(":", 1)[1] if ":" in feature else feature
+
+
+def _refine_by_concordance(
+    placed: dict[str, list[float]],
+    oriented_segs: Mapping[str, Sequence[Segment]],
+    members: Sequence[str],
+    landmark_of: LandmarkOf,
+    weight: Mapping[str, float],
+    iterations: int = 2,
+) -> dict[str, list[float]]:
+    """Slide each read to the offset that maximizes feature **concordance** with the cluster
+    consensus — the direct "do the features line up?" criterion.
+
+    The backbone anchor places most reads right but pins each on a single junction, so a read whose
+    junction it misread sits a feature off. Here every read is re-offset to where its features
+    actually overlap matching consensus features. Features are compared by their **backbone landmark**
+    (``landmark_of``): filler (arms/ct → ``None``) is ignored, a satellite array split across
+    chromosome labels matches as one structural token, and a translocation keeps its chromosomes
+    distinct. Each matched bp is scored by ``weight`` (genome-frequency) so lining up a distinctive
+    ITS/bSat counts far more than a ubiquitous telomere. Two passes: the consensus is rebuilt from the
+    refined placement and the reads re-offset against it.
+    """
+    placed = {r: list(b) for r, b in placed.items()}
+    for _ in range(iterations):
+        per_read: dict[str, list[tuple[float, float, str, float]]] = {}
+        for r in members:
+            bounds, oriented = placed[r], oriented_segs[r]
+            segs = []
+            for k, (feature, _length) in enumerate(oriented):
+                token = landmark_of(feature)
+                if token is not None:
+                    segs.append((bounds[k], bounds[k + 1], token, weight.get(_structural(feature), 1.0)))
+            per_read[r] = segs
+        cuts = sorted({round(c) for r in members for s, e, *_ in per_read[r] for c in (s, e)})
+        if len(cuts) < 2:
+            break
+        votes: list[Counter[str]] = [Counter() for _ in range(len(cuts) - 1)]
+        for r in members:
+            for s, e, t, _w in per_read[r]:
+                for k in range(bisect.bisect_left(cuts, round(s)), bisect.bisect_left(cuts, round(e))):
+                    votes[k][t] += 1
+        cons_by_token: dict[str, list[tuple[float, float]]] = defaultdict(list)
+        for k, ctr in enumerate(votes):
+            if ctr:
+                top = max(ctr.values())
+                cons_by_token[min(t for t, n in ctr.items() if n == top)].append((cuts[k], cuts[k + 1]))
+
+        def concordance(
+            segs: list[tuple[float, float, str, float]], off: float, cons=cons_by_token
+        ) -> float:
+            score = 0.0
+            for s, e, t, w in segs:
+                if w <= 0:
+                    continue
+                a0, a1 = s + off, e + off
+                for cs, ce in cons.get(t, ()):
+                    overlap = min(a1, ce) - max(a0, cs)
+                    if overlap > 0:
+                        score += overlap * w
+            return score
+
+        changed = False
+        for r in members:
+            segs = per_read[r]
+            offsets = {0.0}
+            for s, _e, t, _w in segs:  # candidate shifts align one of this read's blocks to a match
+                offsets.update(cs - s for cs, _ce in cons_by_token.get(t, ()))
+            best_off = max(offsets, key=lambda o: concordance(segs, o))
+            if best_off != 0.0:
+                placed[r] = [b + best_off for b in placed[r]]
+                changed = True
+        if not changed:
+            break
+    return placed
+
+
 #: A landmark run must total at least this many bp to count as a real block (not a noise sliver of
 #: ambiguous annotation) when **anchoring** a read on the backbone — kept high so a small feature
 #: can't hijack the anchor coordinate.
@@ -1110,6 +1189,13 @@ def consensus_layout(
         for member in members:  # unreachable via edges: place at their own coordinates
             if member not in placed:
                 placed[member] = [float(x) for x in _cumulative_bp(oriented_segs[member])]
+
+    # Refine: slide each read to maximize feature concordance with the consensus, fixing reads the
+    # backbone anchor pinned on the wrong junction (the alignment, done directly rather than by proxy).
+    if len(members) >= 2:
+        placed = _refine_by_concordance(
+            placed, oriented_segs, members, landmark_of, weight or {}
+        )
 
     raw: list[tuple[str, bool, bool, list[Interval]]] = []
     for rid in cluster.members:

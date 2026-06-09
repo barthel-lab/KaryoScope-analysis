@@ -34,7 +34,11 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   the breakpoint. **Orientation** reads off a *finer* backbone (`ORIENT_MIN_BLOCK_BP`, lower than the
   anchor threshold): a small but real distinctive feature (a ~400 bp ITS next to a TAR1) is enough to
   tell which way a read runs, even though it is too small to anchor on — so reads carrying one big
-  landmark stop flipping on a coin-toss best-fit.
+  landmark stop flipping on a coin-toss best-fit. Finally a **concordance refinement** slides each
+  read to the offset that maximizes weighted feature overlap with the cluster consensus (matched by
+  backbone landmark, scored by genome-frequency weight) — the alignment done directly rather than via
+  the single-junction proxy, so a read the anchor put a feature out of register snaps back to where
+  its features actually line up.
   A read anchors on its first landmark *contact* (two landmarks within `ADJACENT_GAP_BP` — a
   breakpoint or a feature junction, not arm-separated landmarks); a read missing the proximal
   landmark falls back to pinning its lowest-rank landmark, so it still lines up on the shared

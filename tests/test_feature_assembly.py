@@ -343,14 +343,26 @@ def test_progressive_layout_places_transitive_members():
         seg = {r.read_id: r for r in layout.placed}[rid]
         return next(s for s, _e, f in seg.segments if f == "S")
 
-    # progressive: m2 is placed via m1, so its S stacks on m1's S
+    # The concordance refinement lays m2's shared S onto m1's S directly, so it no longer matters
+    # whether m2 reached the seed progressively (via neighbors) or only through the consensus (star).
     prog = asm.consensus_layout(
         reads, clusters[0], neighbors=neighbors, sub_score=EXACT, gap_factor=0.01
     )
     assert sstart(prog, "m1") == sstart(prog, "m2")
-    # star (no neighbors): m2 can't align to the seed -> own coords -> NOT stacked
     star = asm.consensus_layout(reads, clusters[0], sub_score=EXACT, gap_factor=0.01)
-    assert sstart(star, "m1") != sstart(star, "m2")
+    assert sstart(star, "m1") == sstart(star, "m2")
+
+
+def test_refine_by_concordance_realigns_a_shifted_read():
+    """A read the anchor put a feature off slides back to where its features overlap matching ones."""
+    landmark = asm._structural_landmark(frozenset())
+    feats = [("chr1:bSat", 2000), ("chr1:ITS", 500), ("chr1:TAR1", 2000)]
+    oriented = {r: list(feats) for r in ("a", "b", "c", "d")}
+    aligned = [0.0, 2000.0, 2500.0, 4500.0]
+    placed = {r: list(aligned) for r in ("a", "b", "c")}
+    placed["d"] = [x + 2000 for x in aligned]  # d is a whole feature out of register
+    refined = asm._refine_by_concordance(placed, oriented, ["a", "b", "c", "d"], landmark, {})
+    assert abs(refined["d"][0] - refined["a"][0]) < 1  # slid back into register with the majority
 
 
 def test_consensus_layout_orients_reversed_members():
