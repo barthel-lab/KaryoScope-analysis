@@ -498,8 +498,14 @@ karyoscope-analysis cluster --input $S.overlay.bed --hierarchy $DB/hierarchy.tsv
   --weight-method genome-freq --genome-weights data/chm13v2_feature_weights.tsv \
   --min-overlap-bp 1000 --block-min-bp 2000 --workers <NCORES> -o $S.clusters.tsv
 
-# 4. plot the multi-read clusters
+# 4. plot the multi-read clusters (cluster-plot draws straight from the layout/consensus;
+#    --no-consensus-track omits the union-consensus top row, as in the published figures)
 karyoscope-analysis cluster-plot --layout $S.clusters.layout.tsv \
-  --consensus $S.clusters.consensus.bed --overlay $S.overlay.bed \
-  --colors $DB/colors.tsv --min-cluster-size 2 -o $S.clusters.svg
+  --consensus $S.clusters.consensus.bed --colors $DB/colors.tsv \
+  --min-cluster-size 2 --min-segment-bp 0 --chromosome-track --no-consensus-track \
+  -o $S.clusters.svg
 ```
+
+The whole runbook is wrapped as `scripts/run_cluster_pipeline.sh` (validates inputs, derives
+sidecar names, falls back to an auto-palette without `colors.tsv`); pass `--sample`/`--prefix`/
+`--db`. Verified to reproduce `plots_preview/U2OS.final.all_clusters.svg` byte-for-byte.
