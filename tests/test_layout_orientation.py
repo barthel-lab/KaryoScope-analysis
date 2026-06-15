@@ -280,6 +280,18 @@ def test_translocation_chromosomes_distinguishes_clean_from_chimeric():
     # satellite slivers (a bSat array mis-assigned across chromosomes) never reach JUNCTION_PARTNER_BP
     slivers = {f"x{i}": [("chr18:bSat", 5500), ("chr22:bSat", 400), ("chr4:bSat", 350)] for i in range(3)}
     assert asm._translocation_chromosomes(slivers, list(slivers), acro, bp) == set()
+    # a "hub" chimera: every read carries the chr19->chr8 junction (a recurring pair) BUT also threads
+    # many other substantial chromosomes (a noisy centromeric-satellite read) -> not a *simple*
+    # translocation, so it falls back to the structural backbone (HeLa cluster_12).
+    hub = {f"h{i}": [("chr5:bSat", 2000), ("chr6:bSat", 2000), ("chr12:bSat", 2000),
+                     ("chr19:active_hor", 4000), ("chr8:q_arm", 20000)] for i in range(4)}
+    assert asm._translocation_chromosomes(hub, list(hub), acro, bp) == set()
+    # but one off-target recurring chromosome is allowed (a real 3-way fusion whose third junction
+    # falls just under the half-of-reads bar): chr11-chr13 in all reads, chr13-chr19 in fewer
+    threeway = {f"a{i}": [("chr11:q_arm", 9000), ("chr13:active_hor", 8000), ("chr19:active_hor", 6000)]
+                for i in range(3)}
+    threeway["a0"] = [("chr11:q_arm", 9000), ("chr13:active_hor", 8000)]  # this one lacks chr19
+    assert asm._translocation_chromosomes(threeway, list(threeway), acro, bp) >= {"chr11", "chr13"}
 
 
 def test_anchors_on_filler_breakpoint_for_a_variable_length_feature():
@@ -308,6 +320,46 @@ def test_anchors_on_filler_breakpoint_for_a_variable_length_feature():
                 last = e
         ends.append(last)
     assert max(ends) - min(ends) <= 1, ends
+
+
+def test_telomere_subtypes_collapse_to_one_backbone_landmark():
+    """A subtelomeric ``TAR1 → telomere`` array aligns even when reads abut different telomere
+    *subtypes* (canonical vs noncanonical). Keeping the subtypes as separate backbone landmarks
+    split the one ``TAR1 → telomere`` junction into competing ``TAR1 → canonical`` / ``TAR1 →
+    noncanonical`` junctions that anchored reads ~5.7 kb apart (HeLa cluster_1); collapsing telomere
+    subtypes to one ``telomere`` token lines them up."""
+    hier = FeatureHierarchy.from_tsv(HIERARCHY_TSV)
+    filler = hier.filler_features
+    structureless = filler - hier.canonical_telomere - hier.noncanonical_telomere  # keep telomeres
+    # arm → TAR1 → telomere; reads vary in which telomere subtype directly abuts TAR1 and how much
+    # telomere they captured. The TAR1 → telomere boundary must land at one coordinate.
+    reads = {
+        "a": [("chr1:p_arm", 20000), ("chr1:TAR1", 2200), ("chr1:noncanonical_telomere", 500),
+              ("chr1:canonical_telomere", 900)],
+        "b": [("chr1:p_arm", 17000), ("chr1:TAR1", 2100), ("chr1:canonical_telomere", 1200)],
+        "c": [("chr1:p_arm", 24000), ("chr1:TAR1", 2300), ("chr1:noncanonical_telomere", 1100)],
+        "d": [("chr1:p_arm", 15000), ("chr1:TAR1", 2150), ("chr1:noncanonical_telomere", 400),
+              ("chr1:canonical_telomere", 700)],
+    }
+    members = tuple(sorted(reads, key=lambda r: -sum(length for _f, length in reads[r])))
+    cluster = asm.Cluster(
+        members=members, seed=members[0], size=len(members), orientation_conflict=False
+    )
+    neighbors = {r: [o for o in reads if o != r] for r in reads}
+    layout = asm.consensus_layout(
+        reads, cluster, neighbors=neighbors, sub_score=SUB, gap_factor=0.1,
+        filler=filler, structureless=structureless,
+    )
+    ends = []  # the TAR1 -> telomere boundary (TAR1 end) should land at one coordinate
+    for read in layout.placed:
+        last = None
+        for _s, e, feat in sorted(read.segments):
+            if feat.split(":", 1)[1] == "TAR1":
+                last = e
+        if last is not None:
+            ends.append(last)
+    assert len(ends) == len(reads)
+    assert max(ends) - min(ends) <= 1000, ends
 
 
 def test_small_distinctive_feature_orients_reads():

@@ -768,6 +768,11 @@ MAJOR_CHROM_BP = 5000
 #: The *other* side of a chromosome junction must reach at least this — enough that a real (if short)
 #: translocation partner counts, but a satellite sliver mis-assigned across chromosomes does not.
 JUNCTION_PARTNER_BP = 1000
+#: A clean translocation may carry at most this many chromosomes *beyond* the junction pair as
+#: substantial recurring blocks (one extra = a real 3-way fusion). More than this means the reads
+#: thread many chromosomes (a noisy centromeric-satellite "hub" cluster) — not a simple
+#: translocation, so it lays out on the structural backbone instead.
+MAX_OFF_TARGET_CHROMS = 1
 
 #: A landmark function maps a composite ``chromosome:feature`` label to the backbone token it
 #: contributes, or ``None`` to skip it.
@@ -791,7 +796,9 @@ def _chromosome_landmark(acrocentrics: frozenset[str]) -> LandmarkOf:
     return landmark
 
 
-def _structural_landmark(structureless: frozenset[str]) -> LandmarkOf:
+def _structural_landmark(
+    structureless: frozenset[str], telomeres: frozenset[str] = frozenset()
+) -> LandmarkOf:
     """Backbone token = the structural feature alone, chromosome **stripped** — the default backbone.
 
     Stripping the chromosome means a satellite array annotated to several chromosome labels (a bSat
@@ -799,11 +806,18 @@ def _structural_landmark(structureless: frozenset[str]) -> LandmarkOf:
     chimeric clusters — lots of small signal from many chromosomes — lay out by their feature
     skeleton (``telomere → TAR1``, ``bSat → ITS``). ``structureless`` arms/ct contribute nothing;
     telomeres and satellites are kept (they are filler for *clustering* but real layout landmarks).
+
+    Telomere subtypes collapse to one ``telomere`` token (like the acrocentric and split-satellite
+    collapses): canonical and noncanonical telomere are one contiguous chromosome-terminal region, so
+    keeping them distinct splits one ``TAR1 → telomere`` junction into competing ``TAR1 → canonical``
+    / ``TAR1 → noncanonical`` junctions that anchor reads to different slots.
     """
 
     def landmark(feature: str) -> str | None:
         structural = feature.split(":", 1)[1] if ":" in feature else feature
-        return None if structural in structureless else structural
+        if structural in structureless:
+            return None
+        return "telomere" if structural in telomeres else structural
 
     return landmark
 
@@ -830,9 +844,18 @@ def _translocation_chromosomes(
       satellite blocks, so neither reaches ``min_block_bp``;
     * a **mis-assigned satellite sliver** (a bSat split across labels): the sliver < ``JUNCTION_PARTNER_BP``.
 
+    A pair can recur and still be a chimera: cluster reads also threading many *other* substantial
+    chromosomes (a centromeric-satellite read whose chromosome layer is scattered slivers, the noisy
+    "hub" reads) is not an *obvious, simple* translocation. So if more than
+    ``MAX_OFF_TARGET_CHROMS`` chromosomes **beyond** the junction pair have a substantial block in ≥2
+    reads, this isn't a clean translocation either — it lays out far better on the structural
+    backbone (its distinctive features, e.g. ``TAR1 → ITS``). One extra is allowed: a real 3-way
+    fusion (chr11-chr13-chr19) whose third junction falls just under the half-of-reads bar.
+
     All of those fall back to the structural backbone. Acrocentrics collapse to ``acrocentric`` first.
     """
     pair_reads: Counter = Counter()
+    chrom_reads: Counter = Counter()  # reads in which each chromosome has a substantial block
     for r in members:
         runs: list[tuple[str, float, float]] = []  # (chromosome, start, end), filler/ambiguous skipped
         cur: str | None = None
@@ -853,6 +876,7 @@ def _translocation_chromosomes(
         # a real (≥ MIN_FEATURE_BLOCK_BP) chromosome run counts; a sliver is absorbed into the gap so
         # it can't break adjacency, but it also can't bridge two chromosomes into a false junction.
         real = [(c, s, e) for c, s, e in runs if e - s >= MIN_FEATURE_BLOCK_BP]
+        chrom_reads.update({c for c, _s, _e in real})
         seen: set[frozenset] = set()
         for (ca, sa, ea), (cb, sb, eb) in pairwise(real):
             la, lb = ea - sa, eb - sb
@@ -866,7 +890,13 @@ def _translocation_chromosomes(
         pair_reads.update(seen)
     threshold = max(2, len(members) / 2)
     pairs = [p for p, n in pair_reads.items() if n >= threshold]
-    return set().union(*pairs) if pairs else set()
+    trans = set().union(*pairs) if pairs else set()
+    # Reject chimeras: too many off-target chromosomes recurring substantially => not a simple
+    # translocation, lay out on the structural backbone instead.
+    recurring = {c for c, n in chrom_reads.items() if n >= 2}
+    if len(recurring - trans) > MAX_OFF_TARGET_CHROMS:
+        return set()
+    return trans
 
 
 def _landmark_sequence(
@@ -1158,6 +1188,9 @@ def consensus_layout(
     # The layout backbone excludes only structureless features (arms/ct/...); unlike the clustering
     # filler it *keeps* telomeres + satellites as landmarks. Defaults to filler when not given.
     structureless = structureless if structureless is not None else filler
+    # Telomeres are the filler features kept as landmarks (filler minus the structureless arms/ct);
+    # collapse their subtypes (canonical/noncanonical) to one ``telomere`` backbone token.
+    telomeres = filler - structureless
     if neighbors is None:  # star: every member placed directly against the seed
         neighbors = {seed: [m for m in members if m != seed]}
 
@@ -1172,7 +1205,7 @@ def consensus_layout(
         landmark_of = _chromosome_landmark(acro)
         orient_min = MIN_FEATURE_BLOCK_BP  # chromosome blocks are large; ignore small slivers
     else:
-        landmark_of = _structural_landmark(structureless)
+        landmark_of = _structural_landmark(structureless, telomeres)
         orient_min = ORIENT_MIN_BLOCK_BP  # a small ITS/gSat is enough to orient a structural read
 
     sequences = {
