@@ -319,6 +319,12 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
 
 ### Added
 
+- **`compare-clusterings`** — concordance of two clusterings of the same reads. Takes two `cluster`
+  `layout.tsv` files, computes the Adjusted Rand Index and Normalized Mutual Information over their
+  shared reads (both label-invariant), and writes a report + a long-format cluster-to-cluster
+  read-overlap table. **Fixes the legacy B1 bug** (it imported `adjusted_rand_index` — not a real
+  sklearn name — and swallowed the `ImportError`, so ARI was never computed); the study-specific
+  Pre/Post plots and fragile sidecar discovery are dropped. See `core/clustering_comparison.py`.
 - **`select-representatives`** — catalog each cluster's representative structure. The cluster
   **consensus is the representative** (Engine B computes it), so the legacy best-read selection (a
   length/feature heuristic with a declared-but-unused `centroid_distance`) is obsolete: this reads

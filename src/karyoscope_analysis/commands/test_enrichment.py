@@ -14,27 +14,8 @@ from pathlib import Path
 import click
 
 from karyoscope_analysis.core import enrichment as enrich
+from karyoscope_analysis.core.io.clusters import read_layout_assignments
 from karyoscope_analysis.core.plot_reads import load_read_list
-
-
-def _read_to_cluster(layout_path: Path) -> dict[str, str]:
-    """Map ``read_id -> cluster_id`` from a ``layout.tsv`` (all of a read's segments share it)."""
-    lines = layout_path.read_text().splitlines()
-    if not lines:
-        raise click.ClickException(f"empty layout file: {layout_path}")
-    header = lines[0].split("\t")
-    try:
-        ci, ri = header.index("cluster_id"), header.index("read_id")
-    except ValueError as e:
-        raise click.ClickException(
-            f"{layout_path}: expected 'cluster_id' and 'read_id' columns, got {header}"
-        ) from e
-    out: dict[str, str] = {}
-    for line in lines[1:]:
-        f = line.split("\t")
-        if len(f) > max(ci, ri):
-            out[f[ri]] = f[ci]
-    return out
 
 
 @click.command(name="test-enrichment", help="Per-cluster enrichment across samples/groups.")
@@ -89,7 +70,10 @@ def cmd(
     output: Path,
 ) -> None:
     """Write a per-cluster enrichment table across samples/groups."""
-    read_to_cluster = _read_to_cluster(layout_path)
+    try:
+        read_to_cluster = read_layout_assignments(layout_path)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
 
     _ids, columns, read_data, _rows = load_read_list(read_list_path)
     if group_col not in columns:
