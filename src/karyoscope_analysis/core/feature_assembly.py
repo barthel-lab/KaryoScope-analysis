@@ -1063,20 +1063,25 @@ def _orient_reads(
             orient[r] = ranks[-1] < ranks[0]
         else:
             undetermined.append(r)
-    if orient.get(seed):  # keep the seed unflipped as the reference frame
-        orient = {r: not flipped for r, flipped in orient.items()}
 
-    # Reads with < 2 landmarks: orient by best feature alignment to the (now oriented) seed.
-    seed_oriented = reverse_segments(reads[seed]) if orient.get(seed, False) else list(reads[seed])
+    # Reads with no order signal of their own: orient by best feature alignment to a *determined*
+    # read (one the backbone oriented), preferring the one with the most landmarks. Aligning to a
+    # well-oriented reference — not a weak seed that is itself a lone symmetric TAR1 — lets the
+    # flanking arm break the tie (which end of the TAR1 the arm/telomere sits on). Falls back to the
+    # seed when no read was determined.
+    ref = max((r for r in members if r in orient), key=lambda r: len(blocks[r]), default=seed)
+    ref_oriented = reverse_segments(reads[ref]) if orient.get(ref, False) else list(reads[ref])
     for r in undetermined:
-        if r == seed:
+        if r == ref:
             orient[r] = False
             continue
-        fwd = align_local(reads[r], seed_oriented, sub_score=scorer, gap_factor=gap_factor)
+        fwd = align_local(reads[r], ref_oriented, sub_score=scorer, gap_factor=gap_factor)
         rev = align_local(
-            reverse_segments(reads[r]), seed_oriented, sub_score=scorer, gap_factor=gap_factor
+            reverse_segments(reads[r]), ref_oriented, sub_score=scorer, gap_factor=gap_factor
         )
         orient[r] = rev.score > fwd.score
+    if orient.get(seed):  # frame the cluster so the seed is unflipped (a global, relative-preserving flip)
+        orient = {r: not flipped for r, flipped in orient.items()}
     return orient
 
 

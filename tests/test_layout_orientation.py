@@ -379,6 +379,58 @@ def test_orientation_by_conserved_junction_ignores_isolated_repeat():
     assert orient["bulk3"] != orient["bulk1"], orient
 
 
+def _orient61(strong, weak, seed):
+    """Run _orient_reads for a q_arm/TAR1(/telomere) cluster; return q_arm-before-TAR1 per read."""
+    reads = {"strong": strong, "weak": weak}
+
+    def landmark_of(f):
+        s = f.split(":", 1)[1]
+        if s == "q_arm":
+            return None
+        return "telomere" if s == "noncanonical_telomere" else s
+
+    seqs = {r: asm._landmark_sequence(reads[r], landmark_of, 150) for r in reads}
+    rank = asm._landmark_order(seqs.values())
+    sr = [rank[t] for t in seqs[seed] if t in rank]
+    if len(sr) >= 2 and sr[-1] < sr[0]:
+        rank = {t: max(rank.values()) - v for t, v in rank.items()}
+    orient = asm._orient_reads(reads, list(reads), seed, rank, landmark_of, 150, SUB, 0.1)
+    out = {}
+    for r in reads:
+        segs = asm.reverse_segments(reads[r]) if orient[r] else list(reads[r])
+        labels = [f.split(":", 1)[1] for f, _ in segs]
+        out[r] = labels.index("q_arm") < labels.index("TAR1")
+    return out
+
+
+def test_weak_seed_orients_to_determined_read():
+    """A cluster seeded on a weak read (a lone, symmetric TAR1 with no telomere) still orients
+    consistently: the undetermined seed is aligned to the *determined* read (q_arm-TAR1-telomere),
+    not left in an arbitrary frame (U2OS cluster_61). Robust to each read's input orientation — the
+    best-fit alignment tries both — so it is not a lucky no-op: every starting orientation agrees."""
+    strong = [("chr13:q_arm", 19323), ("chr13:TAR1", 2006), ("chr13:noncanonical_telomere", 374)]
+    weak = [("chr13:TAR1", 2051), ("chr13:q_arm", 19731)]  # the seed: TAR1 then q_arm, no telomere
+    for fs in (False, True):
+        for fw in (False, True):
+            s = asm.reverse_segments(strong) if fs else strong
+            w = asm.reverse_segments(weak) if fw else weak
+            out = _orient61(s, w, "weak")
+            assert out["strong"] == out["weak"], (fs, fw, out)
+
+
+def test_orientation_consistent_without_a_telomere_anchor():
+    """Two uninformative reads (q_arm-TAR1, no telomere) still orient consistently with each other
+    from any starting orientation — the q_arm flank breaks the symmetric-TAR1 tie."""
+    a = [("chr13:q_arm", 19000), ("chr13:TAR1", 2000)]
+    b = [("chr13:TAR1", 2000), ("chr13:q_arm", 18000)]
+    for fa in (False, True):
+        for fb in (False, True):
+            av = asm.reverse_segments(a) if fa else a
+            bv = asm.reverse_segments(b) if fb else b
+            out = _orient61(av, bv, "weak")  # name reuse; "strong"/"weak" are just two reads here
+            assert out["strong"] == out["weak"], (fa, fb, out)
+
+
 def test_refine_snaps_minority_register_to_majority():
     """A few reads mis-anchored into a second register snap to the better-supported register in
     concordance refinement (IMR90 cluster_6).
