@@ -36,6 +36,7 @@ from karyoscope_analysis.commands import (
     draw_legend,
     genome_weights,
     overlay_annotations,
+    plot_reads,
     version,
 )
 
@@ -118,6 +119,7 @@ main.add_command(genome_weights.cmd, name="genome-weights")
 main.add_command(cluster.cmd, name="cluster")
 main.add_command(cluster_plot.cmd, name="cluster-plot")
 main.add_command(draw_legend.cmd, name="draw-legend")
+main.add_command(plot_reads.cmd, name="plot-reads")
 main.add_command(version.cmd, name="version")
 
 # --- Roadmap (Phase 4 migration; see docs/audit/DECISIONS.md) ---
@@ -127,9 +129,10 @@ main.add_command(version.cmd, name="version")
 # Clustering:        cluster ✓ (Engine B; OLC clustering + consensus),
 #                    genome-weights ✓ (reference-genome information-content feature weights)
 # Plotting:          cluster-plot ✓ (read-renderer; SVG via karyoplot.svg drawsvg primitives),
-#                    draw-legend ✓ (standalone DB-palette legend; karyoplot.svg.legend).
-#                    Deferred: animation/video (D7), Engine A bubble/matrix.
-#                    Next: plot-reads (+ telogator-reads-viz preset) onto karyoplot (Phase 3).
+#                    draw-legend ✓ (standalone DB-palette legend; karyoplot.svg.legend),
+#                    plot-reads ◐ (3a SVG core ✓: vertical/horizontal bars, orientation, scale
+#                    bar, legend; 3b heatmap/grouping/markers + 3c PNG/animation + telogator
+#                    preset pending). Deferred: animation/video (D7), Engine A bubble/matrix.
 # Translocations:    find-/cluster-/visualize-translocation-reads
 
 

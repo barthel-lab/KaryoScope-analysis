@@ -319,6 +319,14 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
 
 ### Added
 
+- **`plot-reads`** (Phase 3a, SVG core) — render per-read feature BEDs (`read_id  start  end
+  feature`) as stacked feature-colored bars: vertical columns (default) or `--horizontal` rows,
+  with `--orient {telomere,chromosome,satellite}` reorientation, a scale bar, an optional
+  auto-filtered legend, `--background {black,white}`, and `--feature-mode {smooth,transition,raw}`.
+  Rasterization is delegated to `karyoplot.svg.reads.rasterize_features`; feature colors come from
+  the DB `colors.tsv` (features absent from it render white, the `novel` sentinel). Migrated from
+  the SVG core of the legacy `KaryoScope_plot_reads.py`; heatmap/metadata tracks + read-list
+  grouping + markers (3b) and PNG/animation + the `telogator-reads-viz` preset (3c) follow.
 - **`draw-legend`** — render a standalone SVG legend straight from the database `colors.tsv`,
   grouped by feature set (the `feature_set` column drives the sections, replacing the legacy
   `KaryoScope_draw_legend.py` manual `Header:feat1,feat2` string). Colors come entirely from the DB;
