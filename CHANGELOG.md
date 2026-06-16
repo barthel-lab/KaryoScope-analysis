@@ -319,6 +319,18 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
 
 ### Added
 
+- **`cluster-annotate`** — label each cluster from its **consensus** structure, re-modeled for
+  Engine B. The legacy decision tree keyed on per-read telomere-density columns (the gone Ward-era
+  `sequence_annotate` format); this reads the label off the consensus using **hierarchy-derived
+  feature classes** (`FeatureHierarchy.telomere_features` / `satellite_features` / `its_tar1` /
+  `chromosomes` — no hardcoded feature names): ECTR (telomere both ends) / subtelomere (one end;
+  Type II ALT subtelomere with a long canonical block) / interstitial telomere / interstitial
+  ITS-TAR1 / satellite-dominant. Numeric thresholds default to a documented human/CHM13 preset and
+  are overridable (`--end-fraction`/`--satellite-fraction`/`--alt-block-bp`). Output also carries
+  the specific chromosomes the consensus spans (flags potential translocations) and the consensus
+  signature. **Not ported:** the per-read density aggregation (subsumed by the consensus), the SVD
+  feature-importance (legacy feature matrix), and the sample-specific Type I ALT relabel (sample
+  composition is `test-enrichment`'s job). See `core/cluster_annotate.py`.
 - **`compare-clusterings`** — concordance of two clusterings of the same reads. Takes two `cluster`
   `layout.tsv` files, computes the Adjusted Rand Index and Normalized Mutual Information over their
   shared reads (both label-invariant), and writes a report + a long-format cluster-to-cluster
