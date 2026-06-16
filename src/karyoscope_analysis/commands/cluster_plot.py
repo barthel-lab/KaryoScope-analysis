@@ -2,8 +2,8 @@
 
 Reads `cluster`'s ``layout.tsv`` (per-segment placements in consensus coordinates) and
 ``consensus.bed`` (the union-spanning consensus) and draws each cluster as feature-colored read
-tracks that stack on the consensus frame (see ``core/cluster_plot.py``). Self-contained SVG; the
-single read-renderer for the package.
+tracks that stack on the consensus frame (see ``core/cluster_plot.py``). Renders through
+``karyoplot`` (drawsvg); the single read-renderer for the package.
 """
 
 from __future__ import annotations

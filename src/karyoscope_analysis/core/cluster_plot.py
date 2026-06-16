@@ -7,8 +7,13 @@ features **stack vertically** across reads; the union-spanning consensus track s
 gap in a row means that read has no feature there (it didn't align / doesn't extend that far) —
 length filtering is the caller's choice, off by default, so gaps are unambiguous.
 
-Self-contained (emits raw SVG; no plotting deps). One cluster (:func:`render_cluster_svg`) or
-many stacked in one figure (:func:`render_clusters_svg`), sharing a single feature legend.
+Rendering goes through ``karyoplot`` (the shared plotting library): segment rows are drawn with
+:func:`karyoplot.svg.drawing.draw_annotation_track`, the feature/chromosome legend with
+:func:`karyoplot.svg.legend.draw_grouped_legend`, onto a ``drawsvg`` Drawing — the same stack the
+KaryoScope engine renders with. Engine-B specifics (composite ``chr:feature`` labels, seed
+marking, the consensus row, and the deterministic auto-color for features absent from the DB
+palette) stay here. One cluster (:func:`render_cluster_svg`) or many stacked in one figure
+(:func:`render_clusters_svg`), sharing a single feature legend.
 """
 
 from __future__ import annotations
@@ -17,13 +22,24 @@ import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+import drawsvg as draw
+from karyoplot.core.colors import TAB20
+from karyoplot.core.fonts import DEFAULT_FONT_FAMILY
+from karyoplot.svg.drawing import draw_annotation_track
+from karyoplot.svg.legend import draw_grouped_legend
+
 from karyoscope_analysis.core.io.bed import Interval
 
 #: Fallback palette for features absent from the colors file (deterministic by name).
-_AUTO_PALETTE = (
-    "#4E79A7", "#F28E2B", "#E15759", "#76B7B2", "#59A14F", "#EDC948",
-    "#B07AA1", "#FF9DA7", "#9C755F", "#BAB0AC", "#86BCB6", "#D37295",
-)
+#: Sourced from karyoplot's single categorical palette rather than a hardcoded list, so
+#: cluster-ID / unknown-feature coloring stays consistent across the ecosystem (the rule:
+#: feature colors come from the DB; categorical colors from one shared library palette).
+_AUTO_PALETTE = TAB20
+
+#: Chrome (non-data) text colors. Not feature colors, so not DB-sourced.
+_TEXT = "#000000"
+_MUTED = "#555555"
+_LEGEND_ROW_H = 14  # matches draw_grouped_legend's internal row height
 
 
 @dataclass(frozen=True)
@@ -73,17 +89,44 @@ def chromosome_color(label: str, colors: Mapping[str, str]) -> str:
     return _AUTO_PALETTE[zlib.crc32(chrom.encode()) % len(_AUTO_PALETTE)]
 
 
-def _esc(text: str) -> str:
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+def _panel_rows(
+    panel: ClusterPanel, *, consensus_track: bool
+) -> list[tuple[str, bool, Sequence[Interval]]]:
+    rows: list[tuple[str, bool, Sequence[Interval]]] = (
+        [("consensus", True, panel.consensus)] if consensus_track else []
+    )
+    rows += [(r.read_id, r.is_seed, r.segments) for r in panel.placed]
+    return rows
+
+
+def _collect_present(
+    panels: Sequence[ClusterPanel],
+    colors: Mapping[str, str],
+    *,
+    chromosome_track: bool,
+    consensus_track: bool,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Feature -> color and chromosome -> color maps for the legend (across all panels)."""
+    present: dict[str, str] = {}
+    present_chrom: dict[str, str] = {}
+    for panel in panels:
+        for _label, _seed, segs in _panel_rows(panel, consensus_track=consensus_track):
+            for _s, _e, f in segs:
+                present.setdefault(structural_feature(f), feature_color(f, colors))
+                if chromosome_track and chromosome_layer(f):
+                    present_chrom.setdefault(chromosome_layer(f), chromosome_color(f, colors))
+    return present, present_chrom
+
+
+def _chrom_height(row_height: int, chromosome_track: bool) -> int:
+    return max(4, round(row_height * 0.55)) if chromosome_track else 0
 
 
 def _draw_panel(
-    elements: list[str],
+    d: draw.Drawing,
     y: float,
     panel: ClusterPanel,
     colors: Mapping[str, str],
-    present: dict[str, str],
-    present_chrom: dict[str, str],
     *,
     width: int,
     label_width: int,
@@ -95,61 +138,70 @@ def _draw_panel(
 
     Each row is the structural-feature track and, directly below it (no gap), a thinner
     chromosome-colored track (when ``chromosome_track``) — so a read's structure and its
-    chromosome identity line up. The union consensus is drawn as the top row unless
-    ``consensus_track`` is off (then only the reads are shown).
+    chromosome identity line up. The union consensus is the top row unless ``consensus_track``
+    is off (then only the reads are shown).
     """
-    rows: list[tuple[str, bool, Sequence[Interval]]] = (
-        [("consensus", True, panel.consensus)] if consensus_track else []
-    )
-    rows += [(r.read_id, r.is_seed, r.segments) for r in panel.placed]
-    scale = max(1, width - label_width) / max(1, panel.width)
-    chrom_h = max(4, round(row_height * 0.55)) if chromosome_track else 0
+    plot_width = max(1, width - label_width)
+    scale = plot_width / max(1, panel.width)
+    chrom_h = _chrom_height(row_height, chromosome_track)
 
     if panel.title:
-        elements.append(
-            f'<text x="6" y="{y + 11:.0f}" font-size="11" font-weight="bold">'
-            f"{_esc(panel.title)}</text>"
-        )
+        d.append(draw.Text(
+            panel.title, 11, 6, y + 11, fill=_TEXT, font_weight="bold",
+            font_family=DEFAULT_FONT_FAMILY,
+        ))
         y += 17
 
-    for label, is_seed, segs in rows:
+    for label, is_seed, segs in _panel_rows(panel, consensus_track=consensus_track):
         tag = f"{label}{' (seed)' if is_seed and label != 'consensus' else ''}"
         emphasis = is_seed or label == "consensus"
-        elements.append(
-            f'<text x="10" y="{y + row_height - 2:.0f}" font-size="9" '
-            f'fill="{"#000" if emphasis else "#555"}">{_esc(tag[:36])}</text>'
+        d.append(draw.Text(
+            tag[:36], 9, 10, y + row_height - 2, fill=_TEXT if emphasis else _MUTED,
+            font_family=DEFAULT_FONT_FAMILY,
+        ))
+        feat_segs = [(s, e, structural_feature(f)) for s, e, f in segs]
+        feat_colors = {structural_feature(f): feature_color(f, colors) for _s, _e, f in segs}
+        draw_annotation_track(
+            d, feat_segs, y, row_height, scale, label_width, "features", "", _TEXT,
+            label_width, feat_colors, {}, plot_width, 0, panel.width,
         )
-        for s, e, f in segs:
-            x = label_width + s * scale
-            w = max(0.5, (e - s) * scale)
-            color = feature_color(f, colors)
-            present.setdefault(structural_feature(f), color)
-            elements.append(
-                f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{row_height}" fill="{color}" />'
+        if chromosome_track:
+            chrom_segs = [
+                (s, e, chromosome_layer(f)) for s, e, f in segs if chromosome_layer(f)
+            ]
+            chrom_colors = {
+                chromosome_layer(f): chromosome_color(f, colors)
+                for _s, _e, f in segs
+                if chromosome_layer(f)
+            }
+            draw_annotation_track(
+                d, chrom_segs, y + row_height, chrom_h, scale, label_width, "chromosomes", "",
+                _TEXT, label_width, chrom_colors, {}, plot_width, 0, panel.width,
             )
-            if chromosome_track and chromosome_layer(f):
-                cc = chromosome_color(f, colors)
-                present_chrom.setdefault(chromosome_layer(f), cc)
-                elements.append(
-                    f'<rect x="{x:.1f}" y="{y + row_height:.1f}" width="{w:.1f}" '
-                    f'height="{chrom_h}" fill="{cc}" />'
-                )
         y += row_height + chrom_h + 2
     return y + 10  # gap after the panel
 
 
-def _legend_section(
-    elements: list[str], y: float, title: str, items: Mapping[str, str], width: int
+def _figure_height(
+    panels: Sequence[ClusterPanel],
+    n_features: int,
+    n_chrom: int,
+    *,
+    row_height: int,
+    chromosome_track: bool,
+    consensus_track: bool,
 ) -> float:
-    elements.append(f'<text x="6" y="{y:.0f}" font-size="10" font-weight="bold">{title}</text>')
-    lx, ly = 6, y + 10
-    for name, color in sorted(items.items()):
-        if lx + 150 > width:
-            lx, ly = 6, ly + 16
-        elements.append(f'<rect x="{lx}" y="{ly:.0f}" width="11" height="11" fill="{color}" />')
-        elements.append(f'<text x="{lx + 15}" y="{ly + 10:.0f}" font-size="9">{_esc(name)}</text>')
-        lx += 150
-    return ly + 24
+    """Total SVG height — computed up front (drawsvg fixes the viewBox at creation time)."""
+    chrom_h = _chrom_height(row_height, chromosome_track)
+    y: float = 12
+    for panel in panels:
+        if panel.title:
+            y += 17
+        n_rows = (1 if consensus_track else 0) + len(panel.placed)
+        y += n_rows * (row_height + chrom_h + 2) + 10
+    # Legend: a header row + one row per item, per draw_grouped_legend's column layout.
+    legend_rows = max(n_features, n_chrom)
+    return y + 14 + _LEGEND_ROW_H + legend_rows * _LEGEND_ROW_H + 14
 
 
 def render_clusters_svg(
@@ -163,23 +215,32 @@ def render_clusters_svg(
     consensus_track: bool = True,
 ) -> str:
     """Render one or more cluster panels, stacked, into a single SVG with shared legends."""
-    elements: list[str] = []
-    present: dict[str, str] = {}
-    present_chrom: dict[str, str] = {}
+    present, present_chrom = _collect_present(
+        panels, colors, chromosome_track=chromosome_track, consensus_track=consensus_track
+    )
+    total_h = _figure_height(
+        panels, len(present), len(present_chrom),
+        row_height=row_height, chromosome_track=chromosome_track, consensus_track=consensus_track,
+    )
+    d = draw.Drawing(width, total_h, id_prefix="cluster")
+
     y: float = 12
     for panel in panels:
         y = _draw_panel(
-            elements, y, panel, colors, present, present_chrom,
-            width=width, label_width=label_width, row_height=row_height,
+            d, y, panel, colors, width=width, label_width=label_width, row_height=row_height,
             chromosome_track=chromosome_track, consensus_track=consensus_track,
         )
-    y = _legend_section(elements, y + 4, "Features", present, width)
-    total_h = _legend_section(elements, y + 6, "Chromosomes", present_chrom, width) if present_chrom else y
-    body = "\n".join(elements)
-    return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{int(total_h)}" '
-        f'font-family="sans-serif">\n{body}\n</svg>\n'
+
+    tracks = ["features"] + (["chromosomes"] if present_chrom else [])
+    draw_grouped_legend(
+        d, 6, y + 14, _TEXT,
+        used_colors={"features": present, "chromosomes": present_chrom},
+        track_labels={"features": "Features", "chromosomes": "Chromosomes"},
+        tracks=tracks, layout="column", column_width=180,
     )
+
+    svg = d.as_svg()
+    return svg[svg.index("<svg"):]  # drop the <?xml?> prolog (keep the string API stable)
 
 
 def render_cluster_svg(

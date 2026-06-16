@@ -330,6 +330,13 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
 
 ### Changed
 
+- **`cluster-plot` now renders through `karyoplot`** instead of emitting raw SVG strings: the
+  consensus read-track figure is built on a `drawsvg` Drawing using
+  `karyoplot.svg.drawing.draw_annotation_track` (segment + chromosome sub-tracks) and
+  `karyoplot.svg.legend.draw_grouped_legend` (feature/chromosome legend) — the same stack the
+  KaryoScope engine renders with. The hardcoded fallback palette is gone: unknown-feature /
+  cluster colors now come from `karyoplot.core.colors.TAB20` (the one shared categorical palette),
+  while feature colors still come from the DB. The `render_cluster(s)_svg` string API is unchanged.
 - DB color parsing is now delegated to the canonical `karyoscope.core.io.colors.parse_colors`
   (and `parse_hierarchy`) rather than reimplemented: `core/io/colors.py` is a thin layer over the
   engine's parser, exposing `load_colors` (collapsed `{feature: color}`) and the new

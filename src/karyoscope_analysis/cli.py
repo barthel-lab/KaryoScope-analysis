@@ -126,10 +126,10 @@ main.add_command(version.cmd, name="version")
 # Rearrangements:    detect-rearrangements ✓ (Engine A; differential colocalization)
 # Clustering:        cluster ✓ (Engine B; OLC clustering + consensus),
 #                    genome-weights ✓ (reference-genome information-content feature weights)
-# Plotting:          cluster-plot ✓ (read-renderer; SVG),
+# Plotting:          cluster-plot ✓ (read-renderer; SVG via karyoplot.svg drawsvg primitives),
 #                    draw-legend ✓ (standalone DB-palette legend; karyoplot.svg.legend).
-#                    Deferred: animation/video (D7), Engine A bubble/matrix; the cluster-plot
-#                    karyoplot.svg push-down is Phase 2 of the plotting migration.
+#                    Deferred: animation/video (D7), Engine A bubble/matrix.
+#                    Next: plot-reads (+ telogator-reads-viz preset) onto karyoplot (Phase 3).
 # Translocations:    find-/cluster-/visualize-translocation-reads
 
 
