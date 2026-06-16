@@ -292,6 +292,16 @@ def test_translocation_chromosomes_distinguishes_clean_from_chimeric():
                 for i in range(3)}
     threeway["a0"] = [("chr11:q_arm", 9000), ("chr13:active_hor", 8000)]  # this one lacks chr19
     assert asm._translocation_chromosomes(threeway, list(threeway), acro, bp) >= {"chr11", "chr13"}
+    # a fuzzy junction: chr7 is a big arm but meets chr4 only through a thin telomere->TAR1
+    # subtelomere. chr4's *run* clears JUNCTION_PARTNER_BP (TAR1 900 + ct 400 = 1300), but its
+    # largest single feature block is a 900 bp TAR1 (a satellite, not an arm). The size test is on the
+    # largest block, so chr4 isn't a translocation partner -> structural backbone (U2OS cluster_34).
+    fuzzy = {f"f{i}": [("chr7:p_arm", 30000), ("chr7:ct", 16000), ("chr7:noncanonical_telomere", 1300),
+                       ("chr4:TAR1", 900), ("chr4:ct", 400)] for i in range(3)}
+    assert asm._translocation_chromosomes(fuzzy, list(fuzzy), acro, bp) == set()
+    # but the same chr7 meeting a real chr4 *arm* is a translocation (largest blocks are both arms)
+    armfusion = {f"k{i}": [("chr7:p_arm", 30000), ("chr4:q_arm", 9000)] for i in range(3)}
+    assert asm._translocation_chromosomes(armfusion, list(armfusion), acro, bp) == {"chr4", "chr7"}
 
 
 def test_anchors_on_filler_breakpoint_for_a_variable_length_feature():

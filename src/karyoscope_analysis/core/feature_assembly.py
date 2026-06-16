@@ -851,7 +851,13 @@ def _translocation_chromosomes(
     * a **chimera** whose reads cross many chromosomes but never agree on a pair (no pair reaches half);
     * a **shared subtelomere** (a TAR1 array annotated chr4 then acrocentric): both sides are small
       satellite blocks, so neither reaches ``min_block_bp``;
-    * a **mis-assigned satellite sliver** (a bSat split across labels): the sliver < ``JUNCTION_PARTNER_BP``.
+    * a **mis-assigned satellite sliver** (a bSat split across labels): the sliver < ``JUNCTION_PARTNER_BP``;
+    * a **fuzzy junction**: a chromosome's *run* is large only by accumulating small satellite blocks
+      (a ``chr4`` that is just a ~900 bp ``TAR1`` in a ``telomere → TAR1`` subtelomere). The size test
+      is on each chromosome's **largest single feature block** — a real arm/centromere chunk — not the
+      run total, so a satellite-only partner doesn't qualify as a translocation arm and the cluster
+      lays out on its structural features (``TAR1``/``cenSat``), whose landmarks are sharp where the
+      chromosome boundary is smeared.
 
     A pair can recur and still be a chimera: cluster reads also threading many *other* substantial
     chromosomes (a centromeric-satellite read whose chromosome layer is scattered slivers, the noisy
@@ -866,33 +872,41 @@ def _translocation_chromosomes(
     pair_reads: Counter = Counter()
     chrom_reads: Counter = Counter()  # reads in which each chromosome has a substantial block
     for r in members:
-        runs: list[tuple[str, float, float]] = []  # (chromosome, start, end), filler/ambiguous skipped
-        cur: str | None = None
-        cstart = pos = 0.0
+        # Coalesce into chromosome runs, tracking each run's largest single feature block, so the
+        # junction test can require a real arm/centromere chunk (not an accumulated satellite run).
+        runs: list[list] = []  # [chromosome, start, end, largest_feature_block_bp]
+        cur_c: str | None = None
+        cur_f: str | None = None
+        cstart = bstart = pos = 0.0
+        cur_max = 0.0  # largest feature block seen so far in the current chromosome run
         for feature, length in reads[r]:
             chrom: str | None = feature.split(":", 1)[0] if ":" in feature else ""
             if chrom in acrocentrics:
                 chrom = "acrocentric"
             elif not chrom.startswith("chr"):
                 chrom = None  # an ambiguous group label / non-composite feature is not a chromosome
-            if chrom != cur:
-                if cur is not None:
-                    runs.append((cur, cstart, pos))
-                cur, cstart = chrom, pos
+            feat = feature.split(":", 1)[1] if ":" in feature else feature
+            if chrom != cur_c:
+                if cur_c is not None:
+                    runs.append([cur_c, cstart, pos, max(cur_max, pos - bstart)])
+                cur_c, cstart, bstart, cur_max = chrom, pos, pos, 0.0
+            elif feat != cur_f:  # same chromosome, a new feature block begins
+                cur_max = max(cur_max, pos - bstart)
+                bstart = pos
+            cur_f = feat
             pos += length
-        if cur is not None:
-            runs.append((cur, cstart, pos))
+        if cur_c is not None:
+            runs.append([cur_c, cstart, pos, max(cur_max, pos - bstart)])
         # a real (≥ MIN_FEATURE_BLOCK_BP) chromosome run counts; a sliver is absorbed into the gap so
         # it can't break adjacency, but it also can't bridge two chromosomes into a false junction.
-        real = [(c, s, e) for c, s, e in runs if e - s >= MIN_FEATURE_BLOCK_BP]
-        chrom_reads.update({c for c, _s, _e in real})
+        real = [run for run in runs if run[2] - run[1] >= MIN_FEATURE_BLOCK_BP]
+        chrom_reads.update({run[0] for run in real})
         seen: set[frozenset] = set()
-        for (ca, sa, ea), (cb, sb, eb) in pairwise(real):
-            la, lb = ea - sa, eb - sb
+        for (ca, _sa, ea, big_a), (cb, sb, _eb, big_b) in pairwise(real):
             if (
                 ca != cb
-                and min(la, lb) >= JUNCTION_PARTNER_BP
-                and max(la, lb) >= min_block_bp
+                and min(big_a, big_b) >= JUNCTION_PARTNER_BP  # both have a real block (not a sliver)
+                and max(big_a, big_b) >= min_block_bp  # one is a clear arm/centromere
                 and sb - ea < ADJACENT_GAP_BP
             ):
                 seen.add(frozenset({ca, cb}))
