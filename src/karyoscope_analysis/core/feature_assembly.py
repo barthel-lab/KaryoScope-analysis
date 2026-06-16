@@ -924,6 +924,29 @@ def _landmark_sequence(
     return seq
 
 
+def _landmark_blocks_at(
+    segments: Sequence[Segment], landmark_of: LandmarkOf, min_bp: int
+) -> list[tuple[str, float, float]]:
+    """Landmark blocks ``(token, start, end)`` in **read coordinates**, ≥ ``min_bp`` each.
+
+    Unlike :func:`_landmark_sequence` this keeps positions, so the gap between consecutive blocks
+    (filler between them) is recoverable — two same-token blocks separated by a long arm stay
+    separate (an isolated distal copy of a satellite is not merged with the proximal one)."""
+    blocks: list[tuple[str, float, float]] = []
+    cur: str | None = None
+    cstart = pos = 0.0
+    for feature, length in segments:
+        token = landmark_of(feature)
+        if token != cur:
+            if cur is not None:
+                blocks.append((cur, cstart, pos))
+            cur, cstart = token, pos
+        pos += length
+    if cur is not None:
+        blocks.append((cur, cstart, pos))
+    return [(t, a, b) for t, a, b in blocks if b - a >= min_bp]
+
+
 def _landmark_order(sequences: Iterable[Sequence[str]]) -> dict[str, int]:
     """Rank backbone tokens along the cluster's structure from the per-read landmark sequences.
 
@@ -964,7 +987,8 @@ def _orient_reads(
     members: Sequence[str],
     seed: str,
     rank: Mapping[str, int],
-    sequences: Mapping[str, Sequence[str]],
+    landmark_of: LandmarkOf,
+    min_bp: int,
     scorer: SubScore,
     gap_factor: float,
 ) -> dict[str, bool]:
@@ -973,15 +997,60 @@ def _orient_reads(
     The backbone is the orientation signal: given the landmark ``rank`` along the cluster's
     structure (:func:`_landmark_order` — chromosomes for a translocation, distinctive features for a
     single-chromosome cluster), **flip any read whose landmarks run in the descending direction** —
-    so every read reads the backbone in one consistent order. A read carrying fewer than two
-    landmarks has no such signal, so it falls back to whichever orientation aligns better to the
-    seed.
+    so every read reads the backbone in one consistent order. A read is oriented by the first vs last
+    of its **core** landmarks (those in more than half the reads): a rare distal tail (a
+    ``… → telomere``/``mon`` a few reads reach) is not core, so it isn't the first/last landmark
+    compared. When that is indecisive because a *core* landmark sits at both ends — a read carrying
+    the same satellite twice, e.g. the ``TAR1 → ITS`` the cluster shares plus a second isolated
+    ``TAR1`` 169 kb away — the read is oriented by the **run holding its most conserved junction**
+    (the adjacent, gap < ``ADJACENT_GAP_BP``, landmark contact most reads share): the gap puts the
+    isolated copy in its own run, so the conserved ``TAR1 → ITS`` decides. A read with neither falls
+    back to all of its landmarks (so a real but rare partner — a third chromosome in a few reads —
+    still orients it), then to whichever orientation aligns better to the seed.
     """
+    blocks = {r: _landmark_blocks_at(reads[r], landmark_of, min_bp) for r in members}
+    present: Counter = Counter()
+    for r in members:
+        present.update({t for t, _s, _e in blocks[r]} & set(rank))
+    core = {t for t, c in present.items() if c * 2 > len(members)}  # in more than half the reads
+    # Conserved junction: how many reads carry each adjacent (contact) landmark pair.
+    junction_reads: Counter = Counter()
+    for r in members:
+        seen = {
+            frozenset((ta, tb))
+            for (ta, _a, ea), (tb, sb, _b) in pairwise(blocks[r])
+            if ta != tb and sb - ea < ADJACENT_GAP_BP and ta in rank and tb in rank
+        }
+        junction_reads.update(seen)
+
+    def conserved_run_core(rblocks: list[tuple[str, float, float]]) -> list[int]:
+        """Core-landmark ranks of the contact-run carrying the read's most-conserved junction."""
+        runs: list[list[tuple[str, float, float]]] = []
+        for blk in rblocks:
+            if runs and blk[1] - runs[-1][-1][2] < ADJACENT_GAP_BP:
+                runs[-1].append(blk)
+            else:
+                runs.append([blk])
+
+        def run_score(run: list[tuple[str, float, float]]) -> int:
+            return max(
+                (junction_reads[frozenset((a[0], b[0]))]
+                 for a, b in pairwise(run) if a[0] != b[0] and a[0] in core and b[0] in core),
+                default=0,
+            )
+
+        best = max(runs, key=run_score, default=[])
+        return [rank[t] for t, _s, _e in best if t in core]
+
     orient: dict[str, bool] = {}
     undetermined: list[str] = []
     for r in members:
-        ranks = [rank[c] for c in sequences[r] if c in rank]
-        if len({*ranks}) >= 2:  # spans >= 2 backbone landmarks -> orient by their order
+        ranks = [rank[t] for t, _s, _e in blocks[r] if t in core]  # core landmarks across the read
+        if len({*ranks}) < 2 or ranks[0] == ranks[-1]:  # indecisive (a core landmark at both ends)
+            ranks = conserved_run_core(blocks[r])  # -> the run holding the most-conserved junction
+        if len({*ranks}) < 2 or ranks[0] == ranks[-1]:  # still indecisive -> all of the read's landmarks
+            ranks = [rank[t] for t, _s, _e in blocks[r] if t in rank]
+        if len({*ranks}) >= 2 and ranks[0] != ranks[-1]:  # decisive end-to-end order -> orient by it
             orient[r] = ranks[-1] < ranks[0]
         else:
             undetermined.append(r)
@@ -1231,7 +1300,9 @@ def consensus_layout(
         top = max(orient_rank.values())
         orient_rank = {t: top - v for t, v in orient_rank.items()}
 
-    orient = _orient_reads(reads, members, seed, orient_rank, orient_seqs, scorer, gap_factor)
+    orient = _orient_reads(
+        reads, members, seed, orient_rank, landmark_of, orient_min, scorer, gap_factor
+    )
     oriented_segs = {
         r: (reverse_segments(reads[r]) if orient[r] else list(reads[r])) for r in members
     }

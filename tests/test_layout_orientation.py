@@ -322,6 +322,63 @@ def test_anchors_on_filler_breakpoint_for_a_variable_length_feature():
     assert max(ends) - min(ends) <= 1, ends
 
 
+def _orient_only(reads, rank, seed, min_bp=150):
+    """Helper: run _orient_reads with a chromosome-stripped landmark fn (telomere collapsed)."""
+    def landmark_of(feature):
+        s = feature.split(":", 1)[1] if ":" in feature else feature
+        if s in {"p_arm", "q_arm", "arm", "ct"}:
+            return None
+        return "telomere" if s in {"canonical_telomere", "noncanonical_telomere"} else s
+    return asm._orient_reads(reads, list(reads), seed, rank, landmark_of, min_bp, SUB, 0.1)
+
+
+def test_orientation_ignores_rare_distal_tail():
+    """A rare distal tail landmark must not decide a read's orientation (HeLa cluster_6).
+
+    With a rank where the tail ``telomere`` outranks ``bSat``, comparing the first vs last of *all* a
+    read's landmarks makes a ``bSat … TAR1 … telomere`` tail read look ascending (so it is *not*
+    flipped) while a plain ``bSat … TAR1`` core read is flipped — leaving their shared bSat-ITS-TAR1
+    backbone reading in opposite directions. Orienting on the conserved core landmarks ignores the
+    rare telomere and flips them together."""
+    rank = {"TAR1": 0, "ITS": 1, "bSat": 2, "telomere": 3}  # telomere outranks bSat (the failure)
+    reads = {
+        "core1": [("c:bSat", 1000), ("c:ITS", 1000), ("c:TAR1", 1000)],
+        "core2": [("c:bSat", 1000), ("c:ITS", 1000), ("c:TAR1", 1000)],
+        "core3": [("c:TAR1", 1000), ("c:ITS", 1000), ("c:bSat", 1000)],  # reverse-orientation core
+        "tail1": [("c:bSat", 1000), ("c:ITS", 1000), ("c:TAR1", 1000), ("c:ITS", 1000),
+                  ("c:TAR1", 1000), ("c:canonical_telomere", 1000)],  # telomere in <half the reads
+        "tail2": [("c:bSat", 1000), ("c:ITS", 1000), ("c:TAR1", 1000), ("c:canonical_telomere", 1000)],
+    }
+    orient = _orient_only(reads, rank, "core1")
+    assert orient["tail1"] == orient["core1"], orient
+    assert orient["tail2"] == orient["core1"], orient
+    assert orient["core2"] == orient["core1"], orient
+    assert orient["core3"] != orient["core1"], orient
+
+
+def test_orientation_by_conserved_junction_ignores_isolated_repeat():
+    """A palindromic read (a feature on both ends) orients by the run holding the cluster's conserved
+    junction, not the isolated distal copy (HeLa cluster_2).
+
+    The bulk share a ``TAR1 → ITS`` contact (gap 0). The seed has that contact too *and* a second
+    TAR1 169 kb away (an isolated copy with only a telomere beside it). Splitting on the gap puts the
+    isolated TAR1 in its own run, so the conserved ``TAR1 → ITS`` run orients the seed like the bulk
+    rather than the read's palindromic ``TAR1 … TAR1`` ends flipping it on the distal telomere."""
+    rank = {"TAR1": 0, "ITS": 1, "telomere": 2}
+    reads = {
+        "bulk1": [("c:q_arm", 9000), ("c:TAR1", 1785), ("c:ITS", 297)],
+        "bulk2": [("c:q_arm", 9000), ("c:TAR1", 1780), ("c:ITS", 300)],
+        "bulk3": [("c:ITS", 297), ("c:TAR1", 1785), ("c:q_arm", 9000)],  # reverse
+        # seed: TAR1->ITS (gap 0), then 169 kb of arm, then an isolated TAR1 beside a telomere
+        "seed": [("c:q_arm", 80000), ("c:TAR1", 1785), ("c:ITS", 297), ("c:q_arm", 169000),
+                 ("c:TAR1", 1652), ("c:noncanonical_telomere", 800)],
+    }
+    orient = _orient_only(reads, rank, "seed")
+    # the seed's TAR1->ITS must read the same direction as the bulk's TAR1->ITS
+    assert orient["seed"] == orient["bulk1"] == orient["bulk2"], orient
+    assert orient["bulk3"] != orient["bulk1"], orient
+
+
 def test_telomere_subtypes_collapse_to_one_backbone_landmark():
     """A subtelomeric ``TAR1 → telomere`` array aligns even when reads abut different telomere
     *subtypes* (canonical vs noncanonical). Keeping the subtypes as separate backbone landmarks
