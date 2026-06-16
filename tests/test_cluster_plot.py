@@ -32,13 +32,15 @@ def test_load_colors_by_featureset():
 
 # ----------------------------------------------------------------- renderer
 def test_structural_feature_and_color():
+    import pytest
+
     colors = {"aSat": "#111111"}
     assert render.structural_feature("chr13:aSat") == "aSat"
     assert render.structural_feature("aSat") == "aSat"
     assert render.feature_color("chr13:aSat", colors) == "#111111"  # by structural layer
-    auto = render.feature_color("mystery", {})
-    assert auto in render._AUTO_PALETTE
-    assert render.feature_color("mystery", {}) == auto  # deterministic
+    assert render.feature_color("novel", colors) == "#ffffff"  # only novel may be absent
+    with pytest.raises(render.UnknownFeatureError):
+        render.feature_color("mystery", colors)  # unknown feature -> hard error
 
 
 def test_render_cluster_svg():
@@ -48,22 +50,32 @@ def test_render_cluster_svg():
         render.PlacedRead("m", False, False, [(100, 200, "bSat"), (200, 300, "HSat3")]),
     ]
     consensus = [(0, 100, "aSat"), (100, 200, "bSat"), (200, 300, "HSat3")]
-    colors = {"aSat": "#111111", "bSat": "#222222"}
+    colors = {"aSat": "#111111", "bSat": "#222222", "HSat3": "#333333"}
     svg = render.render_cluster_svg(placed, consensus, 300, colors, title="cluster_0")
     assert svg.startswith("<svg") and svg.rstrip().endswith("</svg>")
     assert "#111111" in svg and "#222222" in svg  # mapped colors used
     assert "cluster_0" in svg and "(seed)" in svg
     assert svg.count("<rect") >= 7  # consensus(3) + seed(2) + member(2) + legend swatches
-    assert "HSat3" in svg  # auto-colored feature appears in the legend
+    assert "HSat3" in svg  # DB-colored feature appears in the legend
+
+
+def test_render_cluster_svg_unknown_feature_errors():
+    import pytest
+
+    placed = [render.PlacedRead("seed", True, False, [(0, 100, "aSat")])]
+    with pytest.raises(render.UnknownFeatureError, match="aSat"):
+        render.render_cluster_svg(placed, [(0, 100, "aSat")], 100, {})  # no color for aSat
 
 
 def test_chromosome_layer_and_color():
+    import pytest
+
     colors = {"chr4": "#abc123", "p_arm": "#111111"}
     assert render.chromosome_layer("chr4:p_arm") == "chr4"
     assert render.chromosome_layer("aSat") == ""  # non-composite -> no chromosome
     assert render.chromosome_color("chr4:p_arm", colors) == "#abc123"  # by chromosome layer
-    auto = render.chromosome_color("chr9:bSat", {})
-    assert auto in render._AUTO_PALETTE
+    with pytest.raises(render.UnknownFeatureError):
+        render.chromosome_color("chr9:bSat", colors)  # chr9 not in palette -> error
 
 
 def test_chromosome_track_renders_dual_tracks_and_legend():
@@ -80,8 +92,9 @@ def test_chromosome_track_renders_dual_tracks_and_legend():
 def test_consensus_track_can_be_hidden():
     placed = [render.PlacedRead("rd", False, False, [(0, 100, "aSat")])]
     panel = render.ClusterPanel("c", 100, placed, [(0, 100, "bSat")])
-    on = render.render_clusters_svg([panel], {})
-    off = render.render_clusters_svg([panel], {}, consensus_track=False)
+    colors = {"aSat": "#111111", "bSat": "#222222"}
+    on = render.render_clusters_svg([panel], colors)
+    off = render.render_clusters_svg([panel], colors, consensus_track=False)
     assert "consensus" in on and "consensus" not in off  # the consensus row is dropped
     assert "rd" in off  # the read track is still drawn
 
@@ -99,7 +112,8 @@ def test_render_clusters_svg_stacks_panels():
             [(0, 100, "chr21:bSat")],
         ),
     ]
-    svg = render.render_clusters_svg(panels, {})
+    colors = {"aSat": "#111111", "bSat": "#222222", "chr13": "#aaaaaa", "chr21": "#bbbbbb"}
+    svg = render.render_clusters_svg(panels, colors)
     assert svg.startswith("<svg") and svg.rstrip().endswith("</svg>")
     assert "cluster_0  n=1  chr13" in svg and "cluster_1  n=1  chr21" in svg  # both panels
     assert "aSat" in svg and "bSat" in svg  # one shared legend (structural layer)
@@ -174,11 +188,15 @@ def test_cluster_plot_cli_all_clusters(cli_runner, tmp_path: Path):
 def test_major_chromosomes_labels_translocations():
     from karyoscope_analysis.commands.cluster_plot import _major_chromosomes
 
+    # Chromosome set is DB-derived (species-agnostic), not a "chr" prefix check.
+    chroms = frozenset({"chr4", "chr22"})
     # single chromosome
-    assert _major_chromosomes([(0, 1000, "chr4:p_arm"), (1000, 1100, "chr4:aSat")]) == "chr4"
+    assert _major_chromosomes([(0, 1000, "chr4:p_arm"), (1000, 1100, "chr4:aSat")], chroms) == "chr4"
     # translocation: both chromosomes >= 10% -> joined, dominant first
-    assert _major_chromosomes([(0, 1500, "chr4:p_arm"), (1500, 2500, "chr22:q_arm")]) == "chr4+chr22"
-    # a tiny sliver (<10%) and ambiguous labels are dropped
     assert _major_chromosomes(
-        [(0, 9000, "chr4:p_arm"), (9000, 9100, "chr22:q_arm"), (9100, 9300, "autosome:ct")]
+        [(0, 1500, "chr4:p_arm"), (1500, 2500, "chr22:q_arm")], chroms
+    ) == "chr4+chr22"
+    # a tiny sliver (<10%) and non-chromosome layers (autosome) are dropped
+    assert _major_chromosomes(
+        [(0, 9000, "chr4:p_arm"), (9000, 9100, "chr22:q_arm"), (9100, 9300, "autosome:ct")], chroms
     ) == "chr4"

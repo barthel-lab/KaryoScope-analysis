@@ -24,6 +24,15 @@ from pathlib import Path
 NOVEL = "novel"
 
 
+class UnknownFeatureError(ValueError):
+    """A feature is absent from the DB (hierarchy/colors) and is not the ``novel`` sentinel.
+
+    The KaryoScope DB is authoritative — ``colors.tsv`` covers every ``hierarchy.tsv`` node — so
+    an out-of-taxonomy feature signals a data/DB mismatch rather than something to render with a
+    fallback color (convention C2). Shared by the renderers that resolve feature colors.
+    """
+
+
 class FeatureHierarchy:
     """A parsed KaryoScope feature hierarchy (a per-feature-set parent/child tree)."""
 

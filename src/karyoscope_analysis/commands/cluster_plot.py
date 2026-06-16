@@ -13,6 +13,7 @@ from pathlib import Path
 import click
 
 from karyoscope_analysis.core import cluster_plot as render
+from karyoscope_analysis.core.feature_vocab import FeatureHierarchy
 from karyoscope_analysis.core.io.colors import load_colors
 
 
@@ -22,18 +23,22 @@ def _read_tsv(path: Path) -> list[dict[str, str]]:
     return [dict(zip(header, line.split("\t"), strict=True)) for line in lines[1:]]
 
 
-def _major_chromosomes(consensus: list[render.Interval], min_frac: float = 0.10) -> str:
+def _major_chromosomes(
+    consensus: list[render.Interval], chromosomes: frozenset[str], min_frac: float = 0.10
+) -> str:
     """All specific chromosomes covering ≥ ``min_frac`` of a consensus, e.g. ``chr4+chr22``.
 
-    Labels translocation clusters with every chromosome they span (not just the dominant one);
-    ambiguous chromosome layers (``autosome``/…) and tiny slivers are dropped. '' if none.
+    Labels translocation clusters with every chromosome they span (not just the dominant one).
+    A composite label's chromosome layer counts only if it is a real chromosome in the DB
+    (``chromosomes`` = ``FeatureHierarchy.chromosomes``), so grouping layers (``autosome``/…) and
+    non-human naming schemes are handled by the database, not a ``chr`` prefix. '' if none.
     """
     by_chrom: dict[str, int] = {}
     total = 0
     for s, e, feature in consensus:
         total += e - s
         chrom, sep, _ = feature.partition(":")
-        if sep and chrom.startswith("chr"):
+        if sep and chrom in chromosomes:
             by_chrom[chrom] = by_chrom.get(chrom, 0) + (e - s)
     if total == 0:
         return ""
@@ -61,9 +66,18 @@ def _major_chromosomes(consensus: list[render.Interval], min_frac: float = 0.10)
 @click.option(
     "--colors",
     "colors_path",
-    default=None,
+    required=True,
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    help="Database colors.tsv (feature_set, feature, color). Falls back to an auto-palette.",
+    help="Database colors.tsv (feature_set, feature, color). Every feature must have a color "
+    "(only 'novel' may be absent).",
+)
+@click.option(
+    "--hierarchy",
+    "hierarchy_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Database hierarchy.tsv (identifies the chromosomes for translocation labels). "
+    "Default: hierarchy.tsv next to --colors.",
 )
 @click.option(
     "--cluster-id",
@@ -111,7 +125,8 @@ def _major_chromosomes(consensus: list[render.Interval], min_frac: float = 0.10)
 def cmd(
     layout_path: Path,
     consensus_path: Path,
-    colors_path: Path | None,
+    colors_path: Path,
+    hierarchy_path: Path | None,
     cluster_id: str | None,
     min_cluster_size: int,
     min_segment_bp: int,
@@ -122,7 +137,13 @@ def cmd(
     output: Path,
 ) -> None:
     """Render one cluster, or all clusters stacked in one SVG."""
-    colors = load_colors(colors_path) if colors_path else {}
+    colors = load_colors(colors_path)
+    hpath = hierarchy_path or colors_path.parent / "hierarchy.tsv"
+    if not hpath.exists():
+        raise click.UsageError(
+            f"need the DB hierarchy to label chromosomes; none found at {hpath}. Pass --hierarchy."
+        )
+    chromosomes = FeatureHierarchy.from_tsv(hpath).chromosomes
 
     def keep(segs: list[render.Interval]) -> list[render.Interval]:
         return [(s, e, f) for s, e, f in segs if e - s >= min_segment_bp]
@@ -162,14 +183,17 @@ def cmd(
         span = max(
             [e for r in placed for _s, e, _f in r.segments] + [e for _s, e, _f in consensus] + [1]
         )
-        chrom = _major_chromosomes(consensus_by_cluster.get(cid, []))
+        chrom = _major_chromosomes(consensus_by_cluster.get(cid, []), chromosomes)
         title = f"{cid}  n={len(placed)}" + (f"  {chrom}" if chrom else "")
         panels.append(render.ClusterPanel(title=title, width=span, placed=placed, consensus=consensus))
 
-    svg = render.render_clusters_svg(
-        panels, colors, width=width, row_height=row_height, chromosome_track=chromosome_track,
-        consensus_track=consensus_track,
-    )
+    try:
+        svg = render.render_clusters_svg(
+            panels, colors, width=width, row_height=row_height, chromosome_track=chromosome_track,
+            consensus_track=consensus_track,
+        )
+    except render.UnknownFeatureError as e:
+        raise click.ClickException(str(e)) from e
     output.write_text(svg)
     n_reads = sum(len(p.placed) for p in panels)
     click.echo(f"Rendered {len(panels)} cluster(s), {n_reads} reads, to {output}")

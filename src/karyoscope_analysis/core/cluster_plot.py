@@ -11,30 +11,25 @@ Rendering goes through ``karyoplot`` (the shared plotting library): segment rows
 :func:`karyoplot.svg.drawing.draw_annotation_track`, the feature/chromosome legend with
 :func:`karyoplot.svg.legend.draw_grouped_legend`, onto a ``drawsvg`` Drawing — the same stack the
 KaryoScope engine renders with. Engine-B specifics (composite ``chr:feature`` labels, seed
-marking, the consensus row, and the deterministic auto-color for features absent from the DB
-palette) stay here. One cluster (:func:`render_cluster_svg`) or many stacked in one figure
-(:func:`render_clusters_svg`), sharing a single feature legend.
+marking, the consensus row) stay here. Colors come from the DB palette: only ``novel`` may be
+absent (it renders white); any other uncolored feature raises :class:`UnknownFeatureError`
+rather than getting a fallback color. One cluster (:func:`render_cluster_svg`) or many stacked in
+one figure (:func:`render_clusters_svg`), sharing a single feature legend.
 """
 
 from __future__ import annotations
 
-import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import drawsvg as draw
-from karyoplot.core.colors import TAB20
 from karyoplot.core.fonts import DEFAULT_FONT_FAMILY
 from karyoplot.svg.drawing import draw_annotation_track
 from karyoplot.svg.legend import draw_grouped_legend
+from karyoscope.core.io.features import NOVEL_NAME
 
+from karyoscope_analysis.core.feature_vocab import UnknownFeatureError
 from karyoscope_analysis.core.io.bed import Interval
-
-#: Fallback palette for features absent from the colors file (deterministic by name).
-#: Sourced from karyoplot's single categorical palette rather than a hardcoded list, so
-#: cluster-ID / unknown-feature coloring stays consistent across the ecosystem (the rule:
-#: feature colors come from the DB; categorical colors from one shared library palette).
-_AUTO_PALETTE = TAB20
 
 #: Chrome (non-data) text colors. Not feature colors, so not DB-sourced.
 _TEXT = "#000000"
@@ -69,11 +64,17 @@ def structural_feature(label: str) -> str:
 
 
 def feature_color(label: str, colors: Mapping[str, str]) -> str:
-    """Color for a label: the colors file (by structural layer), else a stable auto-color."""
+    """Color for a label's structural layer, from the DB palette.
+
+    Strict: only ``novel`` may be absent from ``colors`` (it renders white); any other feature
+    without a color raises :class:`UnknownFeatureError` (the DB is authoritative).
+    """
     feature = structural_feature(label)
     if feature in colors:
         return colors[feature]
-    return _AUTO_PALETTE[zlib.crc32(feature.encode()) % len(_AUTO_PALETTE)]
+    if feature == NOVEL_NAME:
+        return "#ffffff"
+    raise UnknownFeatureError(feature)
 
 
 def chromosome_layer(label: str) -> str:
@@ -82,11 +83,30 @@ def chromosome_layer(label: str) -> str:
 
 
 def chromosome_color(label: str, colors: Mapping[str, str]) -> str:
-    """Color for a label's chromosome layer (colors file by chromosome, else a stable auto-color)."""
+    """Color for a label's chromosome layer, from the DB palette (strict — see :func:`feature_color`)."""
     chrom = chromosome_layer(label)
     if chrom in colors:
         return colors[chrom]
-    return _AUTO_PALETTE[zlib.crc32(chrom.encode()) % len(_AUTO_PALETTE)]
+    raise UnknownFeatureError(chrom)
+
+
+def validate_colors(panels: Sequence[ClusterPanel], colors: Mapping[str, str]) -> None:
+    """Raise :class:`UnknownFeatureError` if any segment's feature/chromosome has no DB color."""
+    unknown: set[str] = set()
+    for panel in panels:
+        segs = list(panel.consensus) + [s for r in panel.placed for s in r.segments]
+        for _s, _e, label in segs:
+            feat = structural_feature(label)
+            if feat not in colors and feat != NOVEL_NAME:
+                unknown.add(feat)
+            chrom = chromosome_layer(label)
+            if chrom and chrom not in colors:
+                unknown.add(chrom)
+    if unknown:
+        raise UnknownFeatureError(
+            "features have no color in the database palette (only 'novel' may be absent): "
+            + ", ".join(sorted(unknown))
+        )
 
 
 def _panel_rows(
@@ -215,6 +235,7 @@ def render_clusters_svg(
     consensus_track: bool = True,
 ) -> str:
     """Render one or more cluster panels, stacked, into a single SVG with shared legends."""
+    validate_colors(panels, colors)
     present, present_chrom = _collect_present(
         panels, colors, chromosome_track=chromosome_track, consensus_track=consensus_track
     )

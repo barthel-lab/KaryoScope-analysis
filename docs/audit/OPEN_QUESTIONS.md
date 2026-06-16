@@ -37,6 +37,12 @@ not just code.
 - **`animate` fixed-zoom mode** (item 12) — still used, or has adaptive superseded it? Dropping it removes
   most of the duplication.
 
+- **Engine B chromosome detection** — `core/feature_assembly.py` identifies chromosome layers via
+  `startswith("chr")`, which assumes human/CHM13 naming. The plotting commands now derive the
+  chromosome set from the DB (`FeatureHierarchy.chromosomes`); Engine B should too, so other-species
+  / custom databases work. Deferred: it's woven through the clustering layout engine (deep change,
+  extensive tests) — scope/verify before changing.
+
 ## C. Biology to parameterize / relabel (needs scientific intent)
 - **Type I ALT relabel** (CA-open #1) — sample-name-specific labeling baked into `cluster-annotate`. Extract
   to a config-driven post-step, or fully parameterize?

@@ -28,12 +28,10 @@ from karyoplot.core.fonts import DEFAULT_FONT_FAMILY
 from karyoplot.svg.reads import rasterize_features
 from karyoscope.core.io.features import NOVEL_NAME
 
+from karyoscope_analysis.core.feature_vocab import UnknownFeatureError
+
 #: Neutral fill for heatmap cells whose value is missing (Barthel gray, not a data color).
 _HEATMAP_MISSING = BARTHEL["gray"]
-
-
-class UnknownFeatureError(ValueError):
-    """A read carries a feature with no color in the DB palette (and it isn't ``novel``)."""
 
 
 def resolve_feature_color(feature: str, colors: Mapping[str, str]) -> str:

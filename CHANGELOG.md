@@ -344,6 +344,13 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
 
 ### Changed
 
+- **`cluster-plot` is now strict and DB-faithful** (consistency with `plot-reads`): `--colors` is
+  required, unknown feature colors are a hard error (only `novel` may be absent → white) instead of
+  the previous `TAB20` auto-palette fallback, and translocation-label chromosomes are identified
+  from the DB `hierarchy.tsv` (`FeatureHierarchy.chromosomes`) rather than a hardcoded `chr` prefix
+  — so non-human / custom chromosome naming is handled by the database. `UnknownFeatureError` now
+  lives in `core/feature_vocab.py` (shared by both renderers). Engine B's `feature_assembly`
+  chromosome detection still uses the `chr` prefix and is tracked as a separate follow-up.
 - Dropped all legacy v1 `_specific` / `_multigroup` suffix handling from the migrated plotting
   code (and from `karyoplot`'s `load_palette_file` / legend label cleaner, now `clean_label`):
   the v2 DB uses clean feature names, so this dead-code path is gone. v1 names remain rejected by
