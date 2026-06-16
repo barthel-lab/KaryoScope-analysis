@@ -130,8 +130,9 @@ main.add_command(version.cmd, name="version")
 #                    genome-weights ✓ (reference-genome information-content feature weights)
 # Plotting:          cluster-plot ✓ (read-renderer; SVG via karyoplot.svg drawsvg primitives),
 #                    draw-legend ✓ (standalone DB-palette legend; karyoplot.svg.legend),
-#                    plot-reads ◐ (3a SVG core ✓ + 3b heatmap/grouping/markers ✓; 3c PNG/animation
-#                    + telogator preset pending). Deferred: animation/video (D7), Engine A bubble/matrix.
+#                    plot-reads ✓ (3a SVG core + 3b heatmap/grouping/markers + 3c PNG via
+#                    svg_to_png + telogator preset). Deferred: panning animation/video (D7),
+#                    Engine A bubble/matrix.
 # Translocations:    find-/cluster-/visualize-translocation-reads
 
 

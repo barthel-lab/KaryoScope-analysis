@@ -285,6 +285,41 @@ def test_plot_reads_cli_heatmap_requires_read_list(cli_runner, tmp_path: Path):
     assert "require --read-list" in res.output
 
 
+# ----------------------------------------------------------------- 3c: PNG / preset
+def test_plot_reads_cli_preset_telogator_applies_orientation(cli_runner, tmp_path: Path):
+    # Telomere at the end -> preset's telomere orientation flips it to the top. Force --format svg
+    # so the test doesn't require rsvg-convert (the preset would otherwise default to both).
+    bed = tmp_path / "S.bed"
+    bed.write_text("r1\t0\t35000\taSat\nr1\t35000\t40000\tcanonical_telomere\n")
+    out = tmp_path / "out.svg"
+    res = cli_runner.invoke(
+        main,
+        ["plot-reads", "--bed", f"S:{bed}", "--colors", str(COLORS_TSV),
+         "--preset", "telogator", "--format", "svg", "-o", str(out)],
+    )
+    assert res.exit_code == 0, res.output
+    assert out.exists()  # SVG written; orientation applied without error
+
+
+def test_plot_reads_cli_png(cli_runner, tmp_path: Path):
+    from karyoplot.svg.export import is_rsvg_convert_available
+
+    bed = tmp_path / "S.bed"
+    _write_bed(bed)
+    out = tmp_path / "out.png"
+    res = cli_runner.invoke(
+        main, ["plot-reads", "--bed", f"S:{bed}", "--colors", str(COLORS_TSV), "--format", "png",
+               "-o", str(out)]
+    )
+    if is_rsvg_convert_available():
+        assert res.exit_code == 0, res.output
+        assert out.exists()
+        assert not out.with_suffix(".svg").exists()  # png-only drops the intermediate SVG
+    else:
+        assert res.exit_code != 0
+        assert "rsvg-convert" in res.output
+
+
 def test_plot_reads_cli_grouping_heatmap_markers(cli_runner, tmp_path: Path):
     bed = tmp_path / "S.bed"
     bed.write_text(

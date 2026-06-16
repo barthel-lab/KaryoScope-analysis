@@ -11,7 +11,9 @@ white) — any other uncolored feature is an error. ``--orient`` resolves its te
 A ``--read-list`` TSV adds two-tier grouping (``--label-tier``), a metadata heatmap above the
 reads (``--heatmap``/``--heatmap-track``; categorical colors from karyoplot's shared palette),
 and group filtering (``--filter-group``); ``--markers`` draws arrowheads at given bp positions.
-PNG/animation and the ``telogator-reads-viz`` preset (3c) land later.
+``--format png``/``both`` converts the SVG to PNG via ``rsvg-convert``; ``--preset telogator``
+reproduces the legacy ``telogator-reads-viz`` defaults (telomere orientation, SVG+PNG). The
+panning animation (D7) remains deferred.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import click
+from karyoplot.svg.export import RsvgConvertMissingError, svg_to_png
 
 from karyoscope_analysis.core import plot_reads as render
 from karyoscope_analysis.core.feature_vocab import FeatureHierarchy
@@ -46,7 +49,24 @@ from karyoscope_analysis.core.io.colors import load_colors
     "-o",
     required=True,
     type=click.Path(dir_okay=False, path_type=Path),
-    help="Output SVG path.",
+    help="Output path. The extension is set from --format (.svg / .png); 'both' writes each.",
+)
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["svg", "png", "both"]),
+    default="svg",
+    show_default=True,
+    help="Output format. PNG is produced by converting the SVG (needs rsvg-convert).",
+)
+@click.option("--png-scale", type=int, default=4, show_default=True, help="PNG zoom factor (rsvg -z).")
+@click.option(
+    "--preset",
+    type=click.Choice(["none", "telogator"]),
+    default="none",
+    show_default=True,
+    help="Convenience preset. 'telogator' defaults --orient telomere and --format both "
+    "(reproduces the legacy telogator-reads-viz; explicit flags still win).",
 )
 @click.option("--horizontal", is_flag=True, help="Draw reads as horizontal rows (default: vertical columns).")
 @click.option(
@@ -122,10 +142,15 @@ from karyoscope_analysis.core.io.colors import load_colors
     help="TSV (read_id, start, end) drawing left-pointing arrowheads at those bp positions.",
 )
 @click.option("--marker-scale", type=float, default=1.0, show_default=True, help="Arrowhead size factor.")
+@click.pass_context
 def cmd(
+    ctx: click.Context,
     bed_specs: tuple[str, ...],
     colors_path: Path,
     output: Path,
+    fmt: str,
+    png_scale: int,
+    preset: str,
     horizontal: bool,
     orient: str,
     hierarchy_path: Path | None,
@@ -152,7 +177,14 @@ def cmd(
     markers_path: Path | None,
     marker_scale: float,
 ) -> None:
-    """Render per-read feature BEDs as an SVG of stacked colored bars."""
+    """Render per-read feature BEDs as an SVG (and/or PNG) of stacked colored bars."""
+    if preset == "telogator":  # legacy telogator-reads-viz defaults; explicit flags still win
+        default = click.core.ParameterSource.DEFAULT
+        if ctx.get_parameter_source("orient") == default:
+            orient = "telomere"
+        if ctx.get_parameter_source("fmt") == default:
+            fmt = "both"
+
     colors = load_colors(colors_path)
     try:
         reads, sample_order = render.load_bed_specs(list(bed_specs))
@@ -237,5 +269,21 @@ def cmd(
         svg = render.render(reads, colors, cfg, sample_order, horizontal=horizontal)
     except render.UnknownFeatureError as e:
         raise click.ClickException(str(e)) from e
-    output.write_text(svg)
-    click.echo(f"Rendered {len(reads)} reads from {len(sample_order)} sample(s) to {output}")
+
+    # PNG is produced by converting the SVG; always write the SVG (it's the source of truth).
+    svg_path = output.with_suffix(".svg")
+    svg_path.write_text(svg)
+    written = [svg_path]
+    if fmt in ("png", "both"):
+        png_path = output.with_suffix(".png")
+        try:
+            svg_to_png(svg_path, png_path, scale=png_scale, raise_on_error=True)
+        except RsvgConvertMissingError as e:
+            raise click.ClickException(f"{e} (needed for --format {fmt})") from e
+        written.append(png_path)
+        if fmt == "png":
+            svg_path.unlink()  # png-only: the SVG was just an intermediate
+            written = [png_path]
+
+    paths = ", ".join(str(p) for p in written)
+    click.echo(f"Rendered {len(reads)} reads from {len(sample_order)} sample(s) to {paths}")

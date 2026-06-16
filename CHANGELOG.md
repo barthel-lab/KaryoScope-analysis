@@ -319,7 +319,7 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
 
 ### Added
 
-- **`plot-reads`** (Phase 3a–3b) — render per-read feature BEDs (`read_id  start  end feature`)
+- **`plot-reads`** (Phase 3a–3c) — render per-read feature BEDs (`read_id  start  end feature`)
   as stacked feature-colored bars: vertical columns (default) or `--horizontal` rows, with
   `--orient {telomere,chromosome,satellite}` reorientation, a scale bar, an optional auto-filtered
   legend, `--background {black,white}`, and `--feature-mode {smooth,transition,raw}`.
@@ -327,9 +327,12 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   the DB `colors.tsv` (features absent from it render white, the `novel` sentinel). A `--read-list`
   TSV adds two-tier `--label-tier` grouping, a metadata `--heatmap`/`--heatmap-track` above the
   reads (categorical colors from `karyoplot.core.colors.qualitative_palette`, **not** a hardcoded
-  list), and `--filter-group`; `--markers` draws arrowheads at given bp positions. Migrated from
-  the SVG core of the legacy `KaryoScope_plot_reads.py`; PNG/animation + the `telogator-reads-viz`
-  preset (3c) follow. **No hardcoded biology:** unknown feature colors are a hard error (only
+  list), and `--filter-group`; `--markers` draws arrowheads at given bp positions. `--format
+  png`/`both` converts the SVG to PNG via `karyoplot.svg.export.svg_to_png` (rsvg-convert; the
+  legacy PIL raster path is not ported), and `--preset telogator` reproduces the legacy
+  `telogator-reads-viz` defaults (telomere orientation + SVG/PNG). The panning animation stays
+  deferred (D7). Migrated from the SVG core of the legacy `KaryoScope_plot_reads.py`.
+  **No hardcoded biology:** unknown feature colors are a hard error (only
   `novel` may be absent, rendered white) rather than a silent white bar; and `--orient`'s
   telomere/chromosome/satellite feature classes are derived from the DB `hierarchy.tsv` via
   `FeatureHierarchy` (new `chromosomes`/`telomere_features`/`leaves`), not literal feature lists.
