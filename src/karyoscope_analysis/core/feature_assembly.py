@@ -718,29 +718,38 @@ def _refine_by_concordance(
         changed = False
         for r in members:
             own = {k: t for k, t in cells_of[r]}  # leave-one-out: r's own vote per cell it covers
-            cons: dict[str, list[tuple[float, float]]] = defaultdict(list)
+            # consensus blocks carry their support (how many reads vote that token there), so a read
+            # aligns to the *best-supported* copy of a feature — a read mis-anchored ~12 kb off in a
+            # second register snaps to the majority's register rather than overlapping a few like-
+            # misplaced reads equally (the overlap *length* is the same in either register).
+            cons: dict[str, list[tuple[float, float, int]]] = defaultdict(list)
             for k in range(len(votes)):
                 tok = cell_token(votes[k], own[k]) if k in own else full_token[k]
                 if tok is not None:
+                    support = votes[k][tok] - (1 if own.get(k) == tok else 0)
                     block = cons[tok]
+                    # Coalesce a whole contiguous same-token block and take its peak support, so the
+                    # support gradient *within* one block (a big uniform hub's center vs edges) can't
+                    # pull a read to slide inside it — only switching to a separate, better-supported
+                    # copy of the feature changes the score.
                     if block and block[-1][1] == cuts[k]:
-                        block[-1] = (block[-1][0], cuts[k + 1])  # coalesce contiguous cells
+                        block[-1] = (block[-1][0], cuts[k + 1], max(block[-1][2], support))
                     else:
-                        block.append((cuts[k], cuts[k + 1]))
+                        block.append((cuts[k], cuts[k + 1], support))
 
             def concordance(off: float, cons=cons, segs=per_read[r]) -> float:
                 score = 0.0
                 for s, e, t, w in segs:
                     a0, a1 = s + off, e + off
-                    for cs, ce in cons.get(t, ()):
+                    for cs, ce, support in cons.get(t, ()):
                         overlap = min(a1, ce) - max(a0, cs)
                         if overlap > 0:
-                            score += overlap * w
+                            score += overlap * w * support
                 return score
 
             offsets = {0.0}
             for s, _e, t, _w in per_read[r]:
-                offsets.update(cs - s for cs, _ce in cons.get(t, ()))
+                offsets.update(cs - s for cs, _ce, _sup in cons.get(t, ()))
             best_off = max(offsets, key=concordance)
             if best_off != 0.0 and concordance(best_off) > concordance(0.0):
                 placed[r] = [b + best_off for b in placed[r]]

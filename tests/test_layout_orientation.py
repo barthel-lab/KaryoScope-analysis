@@ -379,6 +379,28 @@ def test_orientation_by_conserved_junction_ignores_isolated_repeat():
     assert orient["bulk3"] != orient["bulk1"], orient
 
 
+def test_refine_snaps_minority_register_to_majority():
+    """A few reads mis-anchored into a second register snap to the better-supported register in
+    concordance refinement (IMR90 cluster_6).
+
+    Reads share an ``ITS —(12 kb)— TAR1`` structure. Most are placed in one register; two are placed
+    ~20 kb off (they anchored on a feature the majority don't share). Their features overlap their own
+    minority register's consensus blocks exactly as much (by length) as the majority's, so weighting
+    concordance by consensus *support* is what pulls them onto the majority register."""
+    def seg():
+        return [("c:ITS", 1000), ("c:p_arm", 12000), ("c:TAR1", 1000)]
+    oriented = {f"m{i}": seg() for i in range(4)}
+    oriented.update({f"o{i}": seg() for i in range(2)})
+    placed = {}
+    for r in oriented:
+        base = 20000.0 if r.startswith("o") else 0.0  # the two outliers start 20 kb to the right
+        placed[r] = [base, base + 1000, base + 13000, base + 14000]
+    landmark_of = lambda f: None if f.split(":", 1)[1] == "p_arm" else f.split(":", 1)[1]  # noqa: E731
+    out = asm._refine_by_concordance(placed, oriented, list(oriented), landmark_of, {})
+    its_starts = [out[r][0] for r in oriented]
+    assert max(its_starts) - min(its_starts) <= 1000, {r: out[r][0] for r in oriented}
+
+
 def test_telomere_subtypes_collapse_to_one_backbone_landmark():
     """A subtelomeric ``TAR1 → telomere`` array aligns even when reads abut different telomere
     *subtypes* (canonical vs noncanonical). Keeping the subtypes as separate backbone landmarks
