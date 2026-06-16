@@ -53,13 +53,15 @@ dependencies = [
   "pyyaml>=6.0",
   "jsonschema>=4.21",
   # --- Sibling KaryoScope-ecosystem packages (NOT on PyPI) ---
-  # These are installed editable from their sibling repos during development
-  # (see CONTRIBUTING.md). They are intentionally NOT listed as hard
-  # dependencies yet because (a) they are not published, so `pip install`
-  # could not resolve them, and (b) the skeleton has no imports of them yet.
-  # Add them here once the migrated code imports them / once they are published:
-  #   karyoplot    -> KaryoScope-plotlib  (shared drawsvg/matplotlib plotting library)
-  #   karyoscope   -> KaryoScope          (core engine; DB path resolution via karyoscope.paths)
+  # Installed editable from their sibling repos during development (see
+  # CONTRIBUTING.md). Listed here because the migrated code now imports them:
+  #   karyoscope -> KaryoScope          (core engine; canonical DB parsers
+  #                 karyoscope.core.io.{colors,hierarchy} + DB path resolution)
+  #   karyoplot  -> KaryoScope-plotlib  (shared drawsvg/matplotlib plotting library)
+  # They are not on PyPI, so `pip install` cannot resolve them automatically;
+  # install the siblings editable first (CONTRIBUTING.md / `pip install -e ../KaryoScope`).
+  "karyoscope",
+  "karyoplot",
 ]
 
 [project.optional-dependencies]

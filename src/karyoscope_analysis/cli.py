@@ -33,6 +33,7 @@ from karyoscope_analysis.commands import (
     cluster,
     cluster_plot,
     detect_rearrangements,
+    draw_legend,
     genome_weights,
     overlay_annotations,
     version,
@@ -116,6 +117,7 @@ main.add_command(detect_rearrangements.cmd, name="detect-rearrangements")
 main.add_command(genome_weights.cmd, name="genome-weights")
 main.add_command(cluster.cmd, name="cluster")
 main.add_command(cluster_plot.cmd, name="cluster-plot")
+main.add_command(draw_legend.cmd, name="draw-legend")
 main.add_command(version.cmd, name="version")
 
 # --- Roadmap (Phase 4 migration; see docs/audit/DECISIONS.md) ---
@@ -124,8 +126,10 @@ main.add_command(version.cmd, name="version")
 # Rearrangements:    detect-rearrangements ✓ (Engine A; differential colocalization)
 # Clustering:        cluster ✓ (Engine B; OLC clustering + consensus),
 #                    genome-weights ✓ (reference-genome information-content feature weights)
-# Plotting:          cluster-plot ✓ (read-renderer; SVG). Deferred: animation/video (D7),
-#                    Engine A bubble/matrix, karyoplot.svg push-down.
+# Plotting:          cluster-plot ✓ (read-renderer; SVG),
+#                    draw-legend ✓ (standalone DB-palette legend; karyoplot.svg.legend).
+#                    Deferred: animation/video (D7), Engine A bubble/matrix; the cluster-plot
+#                    karyoplot.svg push-down is Phase 2 of the plotting migration.
 # Translocations:    find-/cluster-/visualize-translocation-reads
 
 

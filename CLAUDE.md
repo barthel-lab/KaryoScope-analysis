@@ -15,6 +15,9 @@ the sibling `KaryoScope` engine and `KaryoScope-plotlib` (`karyoplot`) library.
 ```bash
 git checkout package-reorg
 python3 -m venv .venv
+# Sibling packages (not on PyPI) must be installed editable FIRST — `karyoscope`
+# provides the canonical DB parsers (core.io.{colors,hierarchy}); `karyoplot` the renderers.
+.venv/bin/pip install -e ../KaryoScope -e ../KaryoScope-plotlib
 .venv/bin/pip install -e '.[dev]'          # base + pytest; then: .venv/bin/pip install ruff
 .venv/bin/python -m pytest -q              # ~227 pass; integration tests deselected by default
 .venv/bin/ruff check src tests             # line-length 100 (config in pyproject.toml)

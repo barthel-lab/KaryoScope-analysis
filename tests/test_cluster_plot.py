@@ -6,7 +6,7 @@ from pathlib import Path
 
 from karyoscope_analysis.cli import main
 from karyoscope_analysis.core import cluster_plot as render
-from karyoscope_analysis.core.io.colors import load_colors
+from karyoscope_analysis.core.io.colors import load_colors, load_colors_by_featureset
 
 HIERARCHY_TSV = Path(__file__).resolve().parent / "data" / "hierarchy.tsv"
 COLORS_TSV = Path(__file__).resolve().parent / "data" / "colors.tsv"
@@ -18,6 +18,16 @@ def test_load_colors():
     assert "feature_set" not in colors  # header skipped
     assert colors["aSat"].startswith("#")  # a region satellite has a color
     assert all(c.startswith("#") for c in colors.values())
+
+
+def test_load_colors_by_featureset():
+    by_set = load_colors_by_featureset(COLORS_TSV)
+    # Canonical nested shape from karyoscope.core.io.colors.parse_colors.
+    assert "region" in by_set and "acrocentric" in by_set
+    assert by_set["region"]["aSat"].startswith("#")
+    # Collapsed view agrees with the per-featureset view (file-order last wins).
+    collapsed = load_colors(COLORS_TSV)
+    assert collapsed["aSat"] == by_set["region"]["aSat"]
 
 
 # ----------------------------------------------------------------- renderer

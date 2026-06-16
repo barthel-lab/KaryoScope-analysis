@@ -317,6 +317,27 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   Self-contained raw SVG (no plotting deps) — the `karyoplot.svg` push-down is deferred, as are the
   animation/video (D7) and the old `cluster_analysis`-specific visuals (dendrogram/enrichment bubbles).
 
+### Added
+
+- **`draw-legend`** — render a standalone SVG legend straight from the database `colors.tsv`,
+  grouped by feature set (the `feature_set` column drives the sections, replacing the legacy
+  `KaryoScope_draw_legend.py` manual `Header:feat1,feat2` string). Colors come entirely from the DB;
+  nothing is hardcoded. Supports `--feature-set`/`--include`/`--exclude` filtering, `--merge-same-color`,
+  `--theme dark|light`, and label cleanup. Renders via `karyoplot.svg.legend` — new helper
+  `featureset_legend_items` flattens a `{feature_set: {feature: color}}` palette into legend rows
+  (DB-agnostic; takes plain dicts). The grouped layout uses one column per feature set so no group is
+  silently truncated.
+
+### Changed
+
+- DB color parsing is now delegated to the canonical `karyoscope.core.io.colors.parse_colors`
+  (and `parse_hierarchy`) rather than reimplemented: `core/io/colors.py` is a thin layer over the
+  engine's parser, exposing `load_colors` (collapsed `{feature: color}`) and the new
+  `load_colors_by_featureset` (`{feature_set: {feature: color}}`). `karyoscope` and `karyoplot` are
+  now declared dependencies (install the siblings editable first; see `CONTRIBUTING.md`). This keeps
+  the three-column `colors.tsv`/`hierarchy.tsv` format parsed and validated in exactly one place
+  across the ecosystem, and `karyoplot` stays a DB-agnostic renderer fed plain dicts.
+
 ### Notes
 
 - Migration of the analysis scripts into the package (with bug fixes, v2-only
