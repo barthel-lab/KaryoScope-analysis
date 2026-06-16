@@ -319,6 +319,17 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
 
 ### Added
 
+- **`test-enrichment`** + **`pool-samples`** — cross-sample cluster enrichment (the enrichment half
+  of the legacy `cluster_analysis.py`, re-modeled for Engine B). `pool-samples` concatenates
+  per-sample (overlay) BEDs with `{sample}|{read_id}`-namespaced read ids and emits a read→sample
+  TSV, so all samples are clustered **once, jointly** (Engine B co-clusters shared structures). On
+  that pooled clustering, `test-enrichment` reports, per cluster, per-group read counts,
+  depth-normalized fractions, log2 fold-enrichment vs the pool, and `private`/`enriched` flags —
+  the headline being structures that define a line (e.g. ALT architectures private to U2OS). The
+  model is **descriptive and effect-size-first** (read counts are not independent replicates;
+  typically one sample per line ⇒ no biological replication), so it does not emit per-read p-values;
+  a formal group contrast for replicated designs, plus bp-depth and per-chromosome-end copy-number
+  normalization, are planned refinements. See `core/enrichment.py`.
 - **`plot-reads`** (Phase 3a–3c) — render per-read feature BEDs (`read_id  start  end feature`)
   as stacked feature-colored bars: vertical columns (default) or `--horizontal` rows, with
   `--orient {telomere,chromosome,satellite}` reorientation, a scale bar, an optional auto-filtered
