@@ -319,6 +319,13 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
 
 ### Added
 
+- **`select-representatives`** — catalog each cluster's representative structure. The cluster
+  **consensus is the representative** (Engine B computes it), so the legacy best-read selection (a
+  length/feature heuristic with a declared-but-unused `centroid_distance`) is obsolete: this reads
+  `clusters.tsv` + `consensus.bed` and writes one row per cluster — size, consensus segment count,
+  width, and a compact consensus *signature* (the ordered feature path, e.g.
+  `canonical_telomere > ITS > bSat`) that the raw per-segment `consensus.bed` doesn't provide.
+  Filtered by `--min-cluster-size`. See `core/representatives.py`.
 - **`test-enrichment`** + **`pool-samples`** — cross-sample cluster enrichment (the enrichment half
   of the legacy `cluster_analysis.py`, re-modeled for Engine B). `pool-samples` concatenates
   per-sample (overlay) BEDs with `{sample}|{read_id}`-namespaced read ids and emits a read→sample

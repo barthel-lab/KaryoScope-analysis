@@ -38,6 +38,7 @@ from karyoscope_analysis.commands import (
     overlay_annotations,
     plot_reads,
     pool_samples,
+    select_representatives,
     test_enrichment,
     version,
 )
@@ -121,6 +122,7 @@ main.add_command(genome_weights.cmd, name="genome-weights")
 main.add_command(pool_samples.cmd, name="pool-samples")
 main.add_command(cluster.cmd, name="cluster")
 main.add_command(test_enrichment.cmd, name="test-enrichment")
+main.add_command(select_representatives.cmd, name="select-representatives")
 main.add_command(cluster_plot.cmd, name="cluster-plot")
 main.add_command(draw_legend.cmd, name="draw-legend")
 main.add_command(plot_reads.cmd, name="plot-reads")
@@ -133,9 +135,10 @@ main.add_command(version.cmd, name="version")
 # Clustering:        cluster ✓ (Engine B; OLC clustering + consensus),
 #                    genome-weights ✓ (reference-genome information-content feature weights),
 #                    pool-samples ✓ (namespace + pool per-sample BEDs for one joint clustering),
-#                    test-enrichment ✓ (per-cluster cross-sample enrichment; descriptive v1).
-#                    Clustering-downstream still to migrate: select-representatives,
-#                    cluster-annotate, cluster-diagnostics, compare-clusterings.
+#                    test-enrichment ✓ (per-cluster cross-sample enrichment; descriptive v1),
+#                    select-representatives ✓ (consensus-as-representative catalog).
+#                    Clustering-downstream still to migrate: cluster-annotate,
+#                    cluster-diagnostics, compare-clusterings.
 # Plotting:          cluster-plot ✓ (read-renderer; SVG via karyoplot.svg drawsvg primitives),
 #                    draw-legend ✓ (standalone DB-palette legend; karyoplot.svg.legend),
 #                    plot-reads ✓ (3a SVG core + 3b heatmap/grouping/markers + 3c PNG via
