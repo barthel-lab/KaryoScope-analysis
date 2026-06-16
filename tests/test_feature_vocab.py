@@ -61,6 +61,24 @@ def test_descendants(h: FeatureHierarchy) -> None:
     assert "arm" not in d  # different subtree
 
 
+def test_chromosomes_are_the_leaves(h: FeatureHierarchy) -> None:
+    # The specific chromosomes are the leaves of the chromosome featureset; the grouping
+    # nodes (autosome/acrocentric/metacentric/submetacentric/sex/categorized) are excluded.
+    assert h.chromosomes == {f"chr{c}" for c in [*range(1, 23), "X", "Y"]}
+    assert "autosome" not in h.chromosomes
+    assert "acrocentric" not in h.chromosomes
+
+
+def test_telomere_features(h: FeatureHierarchy) -> None:
+    assert h.telomere_features == {"canonical_telomere", "noncanonical_telomere"}
+
+
+def test_leaves_excludes_parents(h: FeatureHierarchy) -> None:
+    leaves = h.leaves("subtelomeric")
+    assert "canonical_telomere" in leaves
+    assert "telomere_like" not in leaves  # has children ITS/noncanonical_telomere/TAR1
+
+
 def test_children(h: FeatureHierarchy) -> None:
     assert h.children("region", "HSat") == {"HSat1", "HSat2", "HSat3"}
     assert h.children("region", "HSat1") == {"HSat1A", "HSat1B"}

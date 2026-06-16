@@ -90,6 +90,11 @@ class FeatureHierarchy:
             seen.add(root)
         return frozenset(seen)
 
+    def leaves(self, feature_set: str) -> frozenset[str]:
+        """Leaf features of ``feature_set`` — nodes that are never a parent (the most specific)."""
+        parents = set(self._children.get(feature_set, {}))
+        return frozenset(self._nodes.get(feature_set, set()) - parents)
+
     def __contains__(self, feature: object) -> bool:
         return any(feature in nodes for nodes in self._nodes.values())
 
@@ -154,6 +159,21 @@ class FeatureHierarchy:
         if "acrocentric" not in self.features("chromosome"):
             return frozenset()
         return self.descendants("chromosome", "acrocentric")
+
+    @property
+    def chromosomes(self) -> frozenset[str]:
+        """The specific chromosomes (chr1..chrY) — the leaves of the ``chromosome`` featureset.
+
+        The grouping nodes (``autosome``/``acrocentric``/``metacentric``/``submetacentric``/``sex``
+        and the ``categorized`` root) are parents, so the leaves are exactly the per-chromosome
+        features. Empty if the hierarchy has no ``chromosome`` featureset.
+        """
+        return self.leaves("chromosome")
+
+    @property
+    def telomere_features(self) -> frozenset[str]:
+        """Telomere features for read orientation: canonical + noncanonical telomere."""
+        return self.canonical_telomere | self.noncanonical_telomere
 
     @property
     def canonical_telomere(self) -> frozenset[str]:

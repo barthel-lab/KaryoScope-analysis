@@ -319,14 +319,20 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
 
 ### Added
 
-- **`plot-reads`** (Phase 3a, SVG core) — render per-read feature BEDs (`read_id  start  end
-  feature`) as stacked feature-colored bars: vertical columns (default) or `--horizontal` rows,
-  with `--orient {telomere,chromosome,satellite}` reorientation, a scale bar, an optional
-  auto-filtered legend, `--background {black,white}`, and `--feature-mode {smooth,transition,raw}`.
+- **`plot-reads`** (Phase 3a–3b) — render per-read feature BEDs (`read_id  start  end feature`)
+  as stacked feature-colored bars: vertical columns (default) or `--horizontal` rows, with
+  `--orient {telomere,chromosome,satellite}` reorientation, a scale bar, an optional auto-filtered
+  legend, `--background {black,white}`, and `--feature-mode {smooth,transition,raw}`.
   Rasterization is delegated to `karyoplot.svg.reads.rasterize_features`; feature colors come from
-  the DB `colors.tsv` (features absent from it render white, the `novel` sentinel). Migrated from
-  the SVG core of the legacy `KaryoScope_plot_reads.py`; heatmap/metadata tracks + read-list
-  grouping + markers (3b) and PNG/animation + the `telogator-reads-viz` preset (3c) follow.
+  the DB `colors.tsv` (features absent from it render white, the `novel` sentinel). A `--read-list`
+  TSV adds two-tier `--label-tier` grouping, a metadata `--heatmap`/`--heatmap-track` above the
+  reads (categorical colors from `karyoplot.core.colors.qualitative_palette`, **not** a hardcoded
+  list), and `--filter-group`; `--markers` draws arrowheads at given bp positions. Migrated from
+  the SVG core of the legacy `KaryoScope_plot_reads.py`; PNG/animation + the `telogator-reads-viz`
+  preset (3c) follow. **No hardcoded biology:** unknown feature colors are a hard error (only
+  `novel` may be absent, rendered white) rather than a silent white bar; and `--orient`'s
+  telomere/chromosome/satellite feature classes are derived from the DB `hierarchy.tsv` via
+  `FeatureHierarchy` (new `chromosomes`/`telomere_features`/`leaves`), not literal feature lists.
 - **`draw-legend`** — render a standalone SVG legend straight from the database `colors.tsv`,
   grouped by feature set (the `feature_set` column drives the sections, replacing the legacy
   `KaryoScope_draw_legend.py` manual `Header:feat1,feat2` string). Colors come entirely from the DB;
@@ -338,6 +344,10 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
 
 ### Changed
 
+- Dropped all legacy v1 `_specific` / `_multigroup` suffix handling from the migrated plotting
+  code (and from `karyoplot`'s `load_palette_file` / legend label cleaner, now `clean_label`):
+  the v2 DB uses clean feature names, so this dead-code path is gone. v1 names remain rejected by
+  hierarchy validation (the existing v2-only policy), not silently translated.
 - **`cluster-plot` now renders through `karyoplot`** instead of emitting raw SVG strings: the
   consensus read-track figure is built on a `drawsvg` Drawing using
   `karyoplot.svg.drawing.draw_annotation_track` (segment + chromosome sub-tracks) and
