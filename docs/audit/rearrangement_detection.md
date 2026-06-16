@@ -403,6 +403,34 @@ shared feature — addressed by **community detection** (§13). The layout/conse
 seed-relative offset → drift; seed-only consensus) is fixed by the **consensus-coordinate layout**
 (§14).
 
+### Recomputing / extending the weights
+
+`data/chm13v2_feature_weights.tsv` is **committed**, so clustering never needs to recompute it. Re-run
+`genome-weights` only when the reference changes or to **add a featureset** — the command is generic
+(one `--bed FEATURESET=PATH` per featureset; a single O(intervals) streaming pass). The reference is
+the annotated CHM13 BEDs `data/raw_bed/chm13v2.0.KS_human_CHM13_v2.<featureset>.smoothed.bed.gz`
+(gitignored, ~475 MB — needed *only* here).
+
+```bash
+DB=/path/to/KS_human_CHM13_v2                       # hierarchy.tsv (C2 feature validation)
+REF=data/raw_bed/chm13v2.0.KS_human_CHM13_v2        # annotated reference BED prefix
+karyoscope-analysis genome-weights \
+  --bed region=$REF.region.smoothed.bed.gz \
+  --bed subtelomeric=$REF.subtelomeric.smoothed.bed.gz \
+  --bed chromosome=$REF.chromosome.smoothed.bed.gz \
+  --bed repeat=$REF.repeat.smoothed.bed.gz \
+  --bed gene=$REF.gene.smoothed.bed.gz \
+  --bed acrocentric=$REF.acrocentric.smoothed.bed.gz \
+  --hierarchy $DB/hierarchy.tsv \
+  -o data/chm13v2_feature_weights.tsv
+```
+
+Wrapped as `scripts/compute_genome_weights.sh --db DB [--ref-prefix P] [--featuresets "a b c"]
+[-o OUT]`. To add a featureset, give it another `--bed` (or extend `--featuresets`): it is tallied,
+normalized on the same `(0, 1]` scale as the rest, and written out. Two requirements — the featureset
+must validate against `hierarchy.tsv`, and its reference BED must cover the **whole genome** (the
+weight uses the feature's fraction of the featureset total, so a partial reference inflates every `p`).
+
 ## 14. Consensus-coordinate layout (`consensus_layout`)
 
 The v1 layout placed each read by a single seed-relative offset, so length-mismatched segments
