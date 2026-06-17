@@ -26,6 +26,7 @@ from karyoplot.svg.export import RsvgConvertMissingError, svg_to_png
 from karyoscope_analysis.core import plot_reads as render
 from karyoscope_analysis.core.feature_vocab import FeatureHierarchy
 from karyoscope_analysis.core.io.colors import load_colors
+from karyoscope_analysis.core.legend_order import feature_sort_key
 
 
 @click.command(name="plot-reads", help="Render per-read feature BEDs as stacked colored bars (SVG).")
@@ -252,6 +253,13 @@ def cmd(
     markers = render.parse_markers(markers_path) if markers_path is not None else {}
     reads = render.sort_reads(reads, sample_order)
 
+    # KaryoScope-style legend ordering when a hierarchy is available (next to --colors or --hierarchy).
+    legend_key = None
+    if legend:
+        lpath = hierarchy_path or colors_path.parent / "hierarchy.tsv"
+        if lpath.exists():
+            legend_key = feature_sort_key(lpath)
+
     cfg = render.PlotConfig(
         bar_width=bar_width, read_spacing=read_spacing, sample_spacing=sample_spacing,
         subgroup_spacing=subgroup_spacing, ratio=ratio, background=background, font_size=font_size,
@@ -263,7 +271,7 @@ def cmd(
         read_metadata=rl.read_metadata if want_heatmap else {},
         heatmap_colors=heatmap_colors,
         heatmap_display_names=dict(rl.heatmap_specs) if want_heatmap else {},
-        markers=markers, marker_scale=marker_scale,
+        markers=markers, marker_scale=marker_scale, legend_sort_key=legend_key,
     )
     try:
         svg = render.render(reads, colors, cfg, sample_order, horizontal=horizontal)

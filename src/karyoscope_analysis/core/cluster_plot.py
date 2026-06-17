@@ -239,8 +239,13 @@ def render_clusters_svg(
     label_width: int = 220,
     chromosome_track: bool = True,
     consensus_track: bool = True,
+    legend_sort_key=None,
 ) -> str:
-    """Render one or more cluster panels, stacked, into a single SVG with shared legends."""
+    """Render one or more cluster panels, stacked, into a single SVG with shared legends.
+
+    ``legend_sort_key`` (optional ``feature -> sortable`` callable) orders the legend; default
+    alphabetical. Pass ``core.legend_order.feature_sort_key`` for KaryoScope-style ordering.
+    """
     validate_colors(panels, colors)
     present, present_chrom = _collect_present(
         panels, colors, chromosome_track=chromosome_track, consensus_track=consensus_track
@@ -263,7 +268,7 @@ def render_clusters_svg(
         d, 6, y + 14, _TEXT,
         used_colors={"features": present, "chromosomes": present_chrom},
         track_labels={"features": "Features", "chromosomes": "Chromosomes"},
-        tracks=tracks, layout="column", column_width=180,
+        tracks=tracks, layout="column", column_width=180, sort_key=legend_sort_key,
     )
 
     svg = d.as_svg()
@@ -281,6 +286,7 @@ def render_cluster_svg(
     label_width: int = 220,
     title: str = "",
     chromosome_track: bool = True,
+    legend_sort_key=None,
 ) -> str:
     """Render a single cluster to an SVG (a one-panel :func:`render_clusters_svg`)."""
     return render_clusters_svg(
@@ -290,4 +296,5 @@ def render_cluster_svg(
         row_height=row_height,
         label_width=label_width,
         chromosome_track=chromosome_track,
+        legend_sort_key=legend_sort_key,
     )

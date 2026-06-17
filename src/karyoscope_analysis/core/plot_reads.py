@@ -116,6 +116,10 @@ class PlotConfig:
     markers: Mapping[str, Sequence[tuple[int, int]]] = field(default_factory=dict)
     marker_scale: float = 1.0
 
+    #: Optional feature -> sortable key for ordering the legend (e.g. KaryoScope-style via
+    #: core.legend_order.feature_sort_key); None = alphabetical.
+    legend_sort_key: object | None = None
+
     @property
     def text_color(self) -> str:
         return "#ffffff" if self.background == "black" else "#000000"
@@ -523,8 +527,13 @@ def filter_legend_features(
     features_used: set[str],
     colors: Mapping[str, str],
     color_sections: Sequence[tuple[str | None, Sequence[str]]] | None = None,
+    sort_key=None,
 ) -> list[tuple[str, str, str | None]]:
-    """(display, color, section_header) for features actually used, dedup'd; ``_`` -> space."""
+    """(display, color, section_header) for features actually used, dedup'd; ``_`` -> space.
+
+    Without ``color_sections``, features are ordered by ``sort_key`` (on the feature name) if
+    given, else alphabetically.
+    """
     seen: set[str] = set()
     result: list[tuple[str, str, str | None]] = []
 
@@ -543,7 +552,8 @@ def filter_legend_features(
                 if feat in features_used:
                     _emit(feat, header)
     else:
-        for feat in sorted(features_used):
+        ordered = sorted(features_used, key=sort_key) if sort_key else sorted(features_used)
+        for feat in ordered:
             _emit(feat, None)
     return result
 
@@ -643,7 +653,7 @@ def _draw_legend(
     extra_items: Sequence[tuple[str, str, str | None]] | None = None,
 ) -> float:
     """Draw the legend (optional heatmap items prepended, then features); return its height."""
-    filtered = list(extra_items or []) + filter_legend_features(features_used, colors, color_sections)
+    filtered = list(extra_items or []) + filter_legend_features(features_used, colors, color_sections, cfg.legend_sort_key)
     if not filtered:
         return 0
     layout = compute_legend_layout(
@@ -675,7 +685,7 @@ def _legend_height(
     color_sections: Sequence[tuple[str | None, Sequence[str]]] | None = None,
     extra_items: Sequence[tuple[str, str, str | None]] | None = None,
 ) -> float:
-    filtered = list(extra_items or []) + filter_legend_features(features_used, colors, color_sections)
+    filtered = list(extra_items or []) + filter_legend_features(features_used, colors, color_sections, cfg.legend_sort_key)
     if not filtered:
         return 0
     return compute_legend_layout(

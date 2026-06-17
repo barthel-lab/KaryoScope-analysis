@@ -15,6 +15,7 @@ import click
 from karyoscope_analysis.core import cluster_plot as render
 from karyoscope_analysis.core.feature_vocab import FeatureHierarchy
 from karyoscope_analysis.core.io.colors import load_colors
+from karyoscope_analysis.core.legend_order import feature_sort_key
 
 
 def _read_tsv(path: Path) -> list[dict[str, str]]:
@@ -144,6 +145,7 @@ def cmd(
             f"need the DB hierarchy to label chromosomes; none found at {hpath}. Pass --hierarchy."
         )
     chromosomes = FeatureHierarchy.from_tsv(hpath).chromosomes
+    legend_sort_key = feature_sort_key(hpath)  # KaryoScope-style legend ordering (featureset-first)
 
     def keep(segs: list[render.Interval]) -> list[render.Interval]:
         return [(s, e, f) for s, e, f in segs if e - s >= min_segment_bp]
@@ -190,7 +192,7 @@ def cmd(
     try:
         svg = render.render_clusters_svg(
             panels, colors, width=width, row_height=row_height, chromosome_track=chromosome_track,
-            consensus_track=consensus_track,
+            consensus_track=consensus_track, legend_sort_key=legend_sort_key,
         )
     except render.UnknownFeatureError as e:
         raise click.ClickException(str(e)) from e

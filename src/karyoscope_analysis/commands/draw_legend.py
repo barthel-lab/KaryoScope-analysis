@@ -15,6 +15,7 @@ from karyoplot.core import theme as themes
 from karyoplot.svg.legend import featureset_legend_items, make_legend_drawing, merge_by_color
 
 from karyoscope_analysis.core.io.colors import load_colors, load_colors_by_featureset
+from karyoscope_analysis.core.legend_order import feature_sort_key
 
 
 def _csv_set(value: str | None) -> set[str] | None:
@@ -56,6 +57,14 @@ def _group_layout(items: list[tuple[str, str, bool]]) -> tuple[int, int]:
     required=True,
     type=click.Path(dir_okay=False, path_type=Path),
     help="Output SVG path.",
+)
+@click.option(
+    "--hierarchy",
+    "hierarchy_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Database hierarchy.tsv for KaryoScope-style feature ordering within each set. "
+    "Default: hierarchy.tsv next to --colors if present (else colors.tsv order).",
 )
 @click.option(
     "--feature-set",
@@ -102,6 +111,7 @@ def _group_layout(items: list[tuple[str, str, bool]]) -> tuple[int, int]:
 def cmd(
     colors_path: Path,
     output: Path,
+    hierarchy_path: Path | None,
     feature_sets: tuple[str, ...],
     include: str | None,
     exclude: str | None,
@@ -116,6 +126,10 @@ def cmd(
     """Render a standalone legend SVG from the DB color palette."""
     theme = themes.get(theme_name)
 
+    # KaryoScope-style within-featureset ordering if a hierarchy is available.
+    hpath = hierarchy_path or colors_path.parent / "hierarchy.tsv"
+    sort_key = feature_sort_key(hpath) if hpath.exists() else None
+
     if merge_same_color:
         collapsed = load_colors(colors_path)
         merged = merge_by_color(list(collapsed.items()))
@@ -127,6 +141,7 @@ def cmd(
             include=_csv_set(include),
             exclude=_csv_set(exclude),
             clean_labels=clean_labels,
+            sort_key=sort_key,
         )
         # Grouped layout: one column per feature set, with `rows` tall enough for the
         # largest group, so make_legend_drawing never wraps a group mid-column or
