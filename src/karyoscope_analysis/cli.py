@@ -38,6 +38,7 @@ from karyoscope_analysis.commands import (
     draw_legend,
     genome_weights,
     overlay_annotations,
+    plot_enrichment,
     plot_reads,
     pool_samples,
     select_representatives,
@@ -124,6 +125,7 @@ main.add_command(genome_weights.cmd, name="genome-weights")
 main.add_command(pool_samples.cmd, name="pool-samples")
 main.add_command(cluster.cmd, name="cluster")
 main.add_command(test_enrichment.cmd, name="test-enrichment")
+main.add_command(plot_enrichment.cmd, name="plot-enrichment")
 main.add_command(select_representatives.cmd, name="select-representatives")
 main.add_command(cluster_annotate.cmd, name="cluster-annotate")
 main.add_command(compare_clusterings.cmd, name="compare-clusterings")
@@ -140,6 +142,7 @@ main.add_command(version.cmd, name="version")
 #                    genome-weights ✓ (reference-genome information-content feature weights),
 #                    pool-samples ✓ (namespace + pool per-sample BEDs for one joint clustering),
 #                    test-enrichment ✓ (per-cluster cross-sample enrichment; descriptive v1),
+#                    plot-enrichment ✓ (clusters×samples log2FC heatmap, labeled),
 #                    select-representatives ✓ (consensus-as-representative catalog),
 #                    compare-clusterings ✓ (ARI/NMI + overlap; legacy ARI bug fixed),
 #                    cluster-annotate ✓ (consensus-signature labeling, hierarchy-derived classes).
