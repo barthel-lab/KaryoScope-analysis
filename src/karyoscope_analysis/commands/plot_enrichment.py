@@ -13,6 +13,7 @@ from pathlib import Path
 import click
 
 from karyoscope_analysis.core import enrichment_plot as ep
+from karyoscope_analysis.core.feature_vocab import FeatureHierarchy
 from karyoscope_analysis.core.io.clusters import read_consensus_segments
 from karyoscope_analysis.core.io.colors import load_colors
 from karyoscope_analysis.core.legend_order import feature_sort_key
@@ -78,6 +79,13 @@ def _read_tsv(path: Path) -> list[dict[str, str]]:
     help="Normalize each consensus bar to its own width (compare structure only). Default: a "
     "shared absolute bp scale, so cluster lengths are comparable.",
 )
+@click.option(
+    "--align-telomere/--no-align-telomere",
+    default=True,
+    show_default=True,
+    help="Orient each consensus telomere-left and align rows at the telomere->rest breakpoint "
+    "(needs the DB hierarchy for the telomere class). Ignored with --normalize-consensus.",
+)
 @click.option("--dark", is_flag=True, help="Dark background.")
 @click.option(
     "--output",
@@ -96,6 +104,7 @@ def cmd(
     all_clusters: bool,
     clamp: float,
     normalize_consensus: bool,
+    align_telomere: bool,
     dark: bool,
     output: Path,
 ) -> None:
@@ -119,7 +128,7 @@ def cmd(
         raise click.ClickException("no clusters to plot (try --all-clusters)")
 
     # Optional consensus-structure panel.
-    consensus = colors = sort_key = None
+    consensus = colors = sort_key = telomere = None
     if consensus_path is not None or colors_path is not None:
         if consensus_path is None or colors_path is None:
             raise click.UsageError("--consensus and --colors must be given together")
@@ -128,11 +137,12 @@ def cmd(
         hpath = hierarchy_path or colors_path.parent / "hierarchy.tsv"
         if hpath.exists():
             sort_key = feature_sort_key(hpath)
+            telomere = set(FeatureHierarchy.from_tsv(hpath).telomere_features)
 
     ep.render_heatmap(
         rows, groups, str(output), clamp=clamp, dark_mode=dark,
         consensus=consensus, colors=colors, sort_key=sort_key,
-        normalize_consensus=normalize_consensus,
+        normalize_consensus=normalize_consensus, telomere=telomere, align_telomere=align_telomere,
     )
     extra = " + consensus" if consensus else ""
     click.echo(

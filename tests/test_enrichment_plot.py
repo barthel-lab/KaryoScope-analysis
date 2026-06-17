@@ -43,6 +43,20 @@ def test_render_heatmap_writes_file(tmp_path: Path):
     assert out.exists() and out.stat().st_size > 0
 
 
+def test_orient_to_breakpoint_flips_and_finds_breakpoint():
+    tel = {"canonical_telomere"}
+    # Telomere on the RIGHT -> mirrored to the left; breakpoint = leading telomere block end.
+    segs = [(0, 8000, "chr4:q_arm"), (8000, 10000, "chr4:canonical_telomere")]
+    nsegs, bp = ep._orient_to_breakpoint(segs, tel)
+    assert nsegs[0][2].endswith("canonical_telomere")  # telomere now first (left)
+    assert bp == 2000  # 2 kb telomere block at the left
+
+
+def test_orient_to_breakpoint_no_telomere_breakpoint_zero():
+    _nsegs, bp = ep._orient_to_breakpoint([(0, 5000, "chr4:aSat")], {"canonical_telomere"})
+    assert bp == 0.0  # no leading telomere -> aligns at start
+
+
 def test_render_heatmap_with_consensus_panel(tmp_path: Path):
     rows = ep.select_rows(_rows(), ["HeLa", "U2OS"], {"c1": "ECTR", "c2": "subtelomere"})
     consensus = {

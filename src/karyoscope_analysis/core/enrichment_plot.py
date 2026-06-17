@@ -72,34 +72,74 @@ def _segment_color(feature: str, colors: Mapping[str, str]) -> str:
     return "#ffffff" if struct == "novel" else "#dddddd"
 
 
-def _draw_consensus_panel(ax, rows, consensus, colors, fg, *, absolute: bool) -> set[str]:
+def _orient_to_breakpoint(
+    segs: Sequence[Segment], telomere: set[str]
+) -> tuple[list[Segment], float]:
+    """Orient a consensus telomere-left and return ``(segments_from_0, breakpoint)``.
+
+    Segments are translated to start at 0; if the telomere features average past the midpoint the
+    consensus is mirrored (telomere -> left). The breakpoint is the right edge of the leading
+    contiguous telomere block (0 if there is no leading telomere), i.e. where the telomere meets
+    the rest of the structure.
+    """
+    span_start = segs[0][0]
+    width = max(e for _s, e, _f in segs) - span_start
+    nsegs = [(s - span_start, e - span_start, f) for s, e, f in segs]
+    tel_pos = [(s + e) / 2 for s, e, f in nsegs if f.split(":")[-1] in telomere]
+    if tel_pos and sum(tel_pos) / len(tel_pos) > width / 2:  # telomere on the right -> mirror
+        nsegs = sorted(((width - e, width - s, f) for s, e, f in nsegs), key=lambda x: x[0])
+    breakpoint = 0.0
+    for s, e, f in nsegs:  # extend through the contiguous telomere run at the left edge
+        if f.split(":")[-1] in telomere and s <= breakpoint + 1e-6:
+            breakpoint = max(breakpoint, e)
+        else:
+            break
+    return nsegs, breakpoint
+
+
+def _draw_consensus_panel(
+    ax, rows, consensus, colors, fg, *, absolute: bool,
+    telomere: set[str] | None = None, align: bool = True,
+) -> set[str]:
     """Draw each row's consensus as a feature-colored bar; return the features shown.
 
     ``absolute`` draws all rows on one shared bp scale (so cluster *lengths* are comparable);
-    otherwise each row is normalized to its own width (compares structure/proportions only).
+    otherwise each row is normalized to its own width. When ``absolute`` and ``align`` and a
+    ``telomere`` feature set is given, each consensus is oriented telomere-left and shifted so its
+    telomere->rest **breakpoint** is at x=0 (telomere extends left, the rest right; a line marks 0).
     """
+    do_align = absolute and align and bool(telomere)
     shown: set[str] = set()
-    segs_by_row = [sorted(consensus.get(r.cluster_id, []), key=lambda s: s[0]) for r in rows]
-    max_width = max(
-        (max(e for _s, e, _f in segs) - segs[0][0] for segs in segs_by_row if segs), default=1
-    )
-    for i, segs in enumerate(segs_by_row):
+    min_x = max_x = 0.0
+    for i, row in enumerate(rows):
+        segs = sorted(consensus.get(row.cluster_id, []), key=lambda s: s[0])
         if not segs:
             continue
-        span_start = segs[0][0]
-        if absolute:
-            xranges = [(s - span_start, e - s) for s, e, _f in segs]
+        if do_align:
+            nsegs, offset = _orient_to_breakpoint(segs, telomere)
         else:
-            span = max(1, max(e for _s, e, _f in segs) - span_start)
-            xranges = [((s - span_start) / span, (e - s) / span) for s, e, _f in segs]
-        facecolors = [_segment_color(f, colors) for _s, _e, f in segs]
-        shown.update(f.split(":")[-1] for _s, _e, f in segs)
+            start0 = segs[0][0]
+            nsegs, offset = [(s - start0, e - start0, f) for s, e, f in segs], 0.0
+        if absolute:
+            xranges = [(s - offset, e - s) for s, e, _f in nsegs]
+            min_x = min(min_x, min(s - offset for s, _e, _f in nsegs))
+            max_x = max(max_x, max(e - offset for _s, e, _f in nsegs))
+        else:
+            span = max(1, max(e for _s, e, _f in nsegs))
+            xranges = [(s / span, (e - s) / span) for s, e, _f in nsegs]
+        facecolors = [_segment_color(f, colors) for _s, _e, f in nsegs]
+        shown.update(f.split(":")[-1] for _s, _e, f in nsegs)
         ax.broken_barh(xranges, (i - 0.4, 0.8), facecolors=facecolors, edgecolors="none")
     if absolute:
-        ax.set_xlim(0, max_width)
-        ax.set_xlabel("consensus length (bp)", color=fg, fontsize=8)
+        ax.set_xlim(min_x, max_x)
         ax.tick_params(axis="x", colors=fg, labelsize=7)
-        ax.set_title("consensus structure (shared bp scale)", color=fg, fontsize=9)
+        if do_align:
+            ax.axvline(0, color=fg, linewidth=0.6, linestyle=":")
+            ax.set_xlabel("bp from telomere breakpoint", color=fg, fontsize=8)
+            ax.set_title("consensus (telomere-left, aligned at breakpoint)", color=fg, fontsize=9)
+        else:
+            ax.set_xlabel("consensus length (bp)", color=fg, fontsize=8)
+            ax.set_title("consensus structure (shared bp scale)", color=fg, fontsize=9)
     else:
         ax.set_xlim(0, 1)
         ax.set_xticks([])
@@ -118,6 +158,8 @@ def render_heatmap(
     colors: Mapping[str, str] | None = None,
     sort_key=None,
     normalize_consensus: bool = False,
+    telomere: set[str] | None = None,
+    align_telomere: bool = True,
 ) -> None:
     """Render the clusters x groups log2-fold-enrichment heatmap to ``output_path``.
 
@@ -161,7 +203,8 @@ def render_heatmap(
             gridspec_kw={"width_ratios": [6.0, max(1.5, 1.1 * len(groups))], "wspace": 0.04},
         )
         shown = _draw_consensus_panel(
-            ax_cons, rows, consensus, colors, fg, absolute=not normalize_consensus
+            ax_cons, rows, consensus, colors, fg, absolute=not normalize_consensus,
+            telomere=telomere, align=align_telomere,
         )
         label_ax = ax_cons
     else:
