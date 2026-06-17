@@ -43,6 +43,18 @@ def test_render_heatmap_writes_file(tmp_path: Path):
     assert out.exists() and out.stat().st_size > 0
 
 
+def test_render_heatmap_with_consensus_panel(tmp_path: Path):
+    rows = ep.select_rows(_rows(), ["HeLa", "U2OS"], {"c1": "ECTR", "c2": "subtelomere"})
+    consensus = {
+        "c1": [(0, 2000, "chr4:canonical_telomere"), (2000, 5000, "chr4:q_arm")],
+        "c2": [(0, 3000, "chr7:aSat"), (3000, 4000, "chr7:novel")],  # novel -> white, no crash
+    }
+    colors = {"canonical_telomere": "#008000", "q_arm": "#808080", "aSat": "#fa0000"}
+    out = tmp_path / "heat_consensus.png"
+    ep.render_heatmap(rows, ["HeLa", "U2OS"], str(out), consensus=consensus, colors=colors)
+    assert out.exists() and out.stat().st_size > 0
+
+
 def test_plot_enrichment_cli(cli_runner, tmp_path: Path):
     enr = tmp_path / "enrichment.tsv"
     enr.write_text(

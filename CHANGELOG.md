@@ -321,8 +321,11 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
 
 - **`plot-enrichment`** — the capstone enrichment figure: a clusters x samples heatmap colored by
   log2 fold-enrichment (from `test-enrichment`), rows labeled by their structural label (from
-  `cluster-annotate`), enriched clusters first. One glance shows which structural haplotypes
-  concentrate in which line. matplotlib via `karyoplot.mpl.style`; see `core/enrichment_plot.py`.
+  `cluster-annotate`), enriched clusters first. With `--consensus`/`--colors` it also draws each
+  row's **consensus structure** (a normalized feature-colored bar + feature legend) beside the
+  heatmap, so the label can be checked against the actual structure. One glance shows which
+  structural haplotypes concentrate in which line. matplotlib via `karyoplot.mpl.style`; see
+  `core/enrichment_plot.py`.
 - **`cluster-annotate`** — label each cluster from its **consensus** structure, re-modeled for
   Engine B. The legacy decision tree keyed on per-read telomere-density columns (the gone Ward-era
   `sequence_annotate` format); this reads the label off the consensus using **hierarchy-derived

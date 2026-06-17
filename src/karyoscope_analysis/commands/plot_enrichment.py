@@ -13,6 +13,9 @@ from pathlib import Path
 import click
 
 from karyoscope_analysis.core import enrichment_plot as ep
+from karyoscope_analysis.core.io.clusters import read_consensus_segments
+from karyoscope_analysis.core.io.colors import load_colors
+from karyoscope_analysis.core.legend_order import feature_sort_key
 
 
 def _read_tsv(path: Path) -> list[dict[str, str]]:
@@ -34,6 +37,28 @@ def _read_tsv(path: Path) -> list[dict[str, str]]:
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
     help="`cluster-annotate` output TSV, to label rows by their structural label.",
+)
+@click.option(
+    "--consensus",
+    "consensus_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="`cluster` consensus BED. With --colors, draws each row's consensus structure beside the "
+    "heatmap (to check the label against the actual structure).",
+)
+@click.option(
+    "--colors",
+    "colors_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Database colors.tsv for the consensus-structure panel (needs --consensus).",
+)
+@click.option(
+    "--hierarchy",
+    "hierarchy_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Database hierarchy.tsv to order the consensus feature legend (default: beside --colors).",
 )
 @click.option(
     "--max-clusters",
@@ -58,6 +83,9 @@ def _read_tsv(path: Path) -> list[dict[str, str]]:
 def cmd(
     enrichment_path: Path,
     annot_path: Path | None,
+    consensus_path: Path | None,
+    colors_path: Path | None,
+    hierarchy_path: Path | None,
     max_clusters: int | None,
     all_clusters: bool,
     clamp: float,
@@ -83,5 +111,22 @@ def cmd(
     if not rows:
         raise click.ClickException("no clusters to plot (try --all-clusters)")
 
-    ep.render_heatmap(rows, groups, str(output), clamp=clamp, dark_mode=dark)
-    click.echo(f"Rendered enrichment heatmap: {len(rows)} clusters x {len(groups)} groups -> {output}")
+    # Optional consensus-structure panel.
+    consensus = colors = sort_key = None
+    if consensus_path is not None or colors_path is not None:
+        if consensus_path is None or colors_path is None:
+            raise click.UsageError("--consensus and --colors must be given together")
+        consensus = read_consensus_segments(consensus_path)
+        colors = load_colors(colors_path)
+        hpath = hierarchy_path or colors_path.parent / "hierarchy.tsv"
+        if hpath.exists():
+            sort_key = feature_sort_key(hpath)
+
+    ep.render_heatmap(
+        rows, groups, str(output), clamp=clamp, dark_mode=dark,
+        consensus=consensus, colors=colors, sort_key=sort_key,
+    )
+    extra = " + consensus" if consensus else ""
+    click.echo(
+        f"Rendered enrichment heatmap{extra}: {len(rows)} clusters x {len(groups)} groups -> {output}"
+    )

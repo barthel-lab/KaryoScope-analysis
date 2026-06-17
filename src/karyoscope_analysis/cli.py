@@ -142,7 +142,7 @@ main.add_command(version.cmd, name="version")
 #                    genome-weights ✓ (reference-genome information-content feature weights),
 #                    pool-samples ✓ (namespace + pool per-sample BEDs for one joint clustering),
 #                    test-enrichment ✓ (per-cluster cross-sample enrichment; descriptive v1),
-#                    plot-enrichment ✓ (clusters×samples log2FC heatmap, labeled),
+#                    plot-enrichment ✓ (clusters-x-samples log2FC heatmap, labeled),
 #                    select-representatives ✓ (consensus-as-representative catalog),
 #                    compare-clusterings ✓ (ARI/NMI + overlap; legacy ARI bug fixed),
 #                    cluster-annotate ✓ (consensus-signature labeling, hierarchy-derived classes).
