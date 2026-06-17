@@ -383,6 +383,18 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
 
 ### Changed
 
+- **`bin-annotations`: gate `novel` on an absolute window fraction.** `novel` (k-mer-not-in-index)
+  is an index property, so the *same* positions are novel across a database's featuresets — but the
+  rolling-window vote chose it by *plurality*, whose competing feature differs per featureset, so the
+  binned-novel extent diverged and overlaying produced spurious `chrN:novel` / `novel:feature` mixes.
+  `novel` now wins a window only when it covers at least `--novel-min-fraction` (default 0.5);
+  otherwise it's dropped from the vote and the dominant non-novel feature wins. This makes
+  binned-novel featureset-independent → overlay yields `novel:novel`. (Rare residual mixes remain
+  where the *raw* novel extents differ by a few bp across featuresets at a boundary; they render
+  fine via the cluster-plot fix below.)
+- **`cluster-plot`: allow `novel` as a chromosome layer.** A composite label's chromosome layer can
+  be the `novel` sentinel (`novel:HSat3`, `novel:novel`); like a novel structural feature it now
+  renders white instead of raising `UnknownFeatureError`.
 - **`cluster-plot` is now strict and DB-faithful** (consistency with `plot-reads`): `--colors` is
   required, unknown feature colors are a hard error (only `novel` may be absent → white) instead of
   the previous `TAB20` auto-palette fallback, and translocation-label chromosomes are identified

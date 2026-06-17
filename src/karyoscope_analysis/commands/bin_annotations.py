@@ -32,6 +32,7 @@ def _binned_rows(
     window: int,
     majority_fraction: float,
     scope: str,
+    novel_min_fraction: float,
 ) -> Iterator[BedRow]:
     """Stream the input BED one sequence at a time, yielding its binned rows.
 
@@ -45,7 +46,8 @@ def _binned_rows(
         if cur_seq is None:
             return
         for s, e, f in binning.bin_sequence(
-            buf, tree, window=window, majority_fraction=majority_fraction, scope=scope
+            buf, tree, window=window, majority_fraction=majority_fraction, scope=scope,
+            novel_min_fraction=novel_min_fraction,
         ):
             yield cur_seq, s, e, f
 
@@ -128,6 +130,15 @@ def _write_streaming(output: Path, rows: Iterator[BedRow]) -> int:
     "majority, more specific) or 'window' (whole-window bp; conservative).",
 )
 @click.option(
+    "--novel-min-fraction",
+    default=binning.DEFAULT_NOVEL_MIN,
+    show_default=True,
+    type=float,
+    help="Minimum window fraction for 'novel' to win a window. novel is an index property "
+    "(shared across featuresets), so this absolute gate keeps the binned-novel extent "
+    "featureset-independent -> overlaying yields 'novel:novel', not 'chrN:novel' mixes.",
+)
+@click.option(
     "--output",
     "-o",
     required=True,
@@ -141,6 +152,7 @@ def cmd(
     window: int,
     majority_fraction: float,
     threshold_scope: str,
+    novel_min_fraction: float,
     output: Path,
 ) -> None:
     """Mode-filter a featureset BED and write the denoised C4 BED."""
@@ -148,6 +160,8 @@ def cmd(
         raise click.BadParameter("--window must be >= 1")
     if not 0.0 <= majority_fraction <= 1.0:
         raise click.BadParameter("--majority-fraction must be in [0, 1]")
+    if not 0.0 <= novel_min_fraction <= 1.0:
+        raise click.BadParameter("--novel-min-fraction must be in [0, 1]")
 
     hierarchy = FeatureHierarchy.from_tsv(hierarchy_path)
     if feature_set not in hierarchy.feature_sets():
@@ -166,6 +180,7 @@ def cmd(
             window=window,
             majority_fraction=majority_fraction,
             scope=threshold_scope,
+            novel_min_fraction=novel_min_fraction,
         )
         count = _write_streaming(output, rows)
     except ValueError as exc:

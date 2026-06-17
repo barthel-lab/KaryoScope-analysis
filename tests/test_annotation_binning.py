@@ -73,8 +73,29 @@ def test_descend_single_label(region_tree: binning.BinTree):
 
 
 def test_descend_novel_as_top_level_leaf(region_tree: binning.BinTree):
-    # novel is outside the tree; a novel-dominated window reports novel.
+    # novel wins only when it covers >= novel_min_fraction (default 0.5) of the window.
     assert binning.descend({"novel": 60.0, "aSat": 40.0}, region_tree, scope="node") == "novel"
+
+
+def test_descend_novel_gated_below_threshold(region_tree: binning.BinTree):
+    # 40% novel < 50%: novel is dropped from the vote; the dominant non-novel feature wins
+    # (60% aSat -> aSat), NOT novel (which a plurality vote would have picked at tau=0).
+    assert binning.descend({"novel": 40.0, "aSat": 60.0}, region_tree,
+                           scope="node", majority_fraction=0.0) == "aSat"
+    # exactly at the threshold (50%) novel still wins.
+    assert binning.descend({"novel": 50.0, "aSat": 50.0}, region_tree, scope="node") == "novel"
+    # the gate is configurable.
+    assert binning.descend({"novel": 40.0, "aSat": 60.0}, region_tree,
+                           scope="node", novel_min_fraction=0.3) == "novel"
+
+
+def test_bin_intervals_novel_gate_fast_matches_naive(region_tree: binning.BinTree):
+    # A window mostly non-novel with scattered novel: novel must not win, and the fast path's
+    # per-base novel recompute must match the reference implementation.
+    intervals = [(0, 30, "aSat"), (30, 45, "novel"), (45, 100, "bSat")]
+    fast = binning.bin_intervals(intervals, region_tree, window=51, majority_fraction=0.0)
+    naive = binning.bin_intervals_naive(intervals, region_tree, window=51, majority_fraction=0.0)
+    assert fast == naive
 
 
 def test_descend_majority_fraction_knob(region_tree: binning.BinTree):

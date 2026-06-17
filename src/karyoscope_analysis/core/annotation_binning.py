@@ -39,13 +39,15 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from karyoscope_analysis.core.feature_vocab import FeatureHierarchy
+from karyoscope_analysis.core.feature_vocab import NOVEL, FeatureHierarchy
 from karyoscope_analysis.core.io.bed import Interval
 
 #: Default rolling-window size (bp). Odd so the window is symmetric about each base.
 DEFAULT_WINDOW = 101
 #: Default majority fraction (τ) for descending into a child. 0 = always descend to a leaf.
 DEFAULT_MAJORITY = 0.5
+#: Default minimum window fraction for ``novel`` to win a window (see :func:`descend`).
+DEFAULT_NOVEL_MIN = 0.5
 #: Valid values for ``threshold_scope``.
 THRESHOLD_SCOPES = ("node", "window")
 
@@ -132,16 +134,33 @@ def descend(
     *,
     majority_fraction: float = DEFAULT_MAJORITY,
     scope: str = "node",
+    novel_min_fraction: float = DEFAULT_NOVEL_MIN,
 ) -> str | None:
     """The hierarchical majority-rule call for one window's per-feature bp ``weights``.
 
     Returns the deepest node whose dominant child clears the majority bar at every step,
     or the flat-plurality label if the descent can't leave the root. ``None`` for an empty
     window.
+
+    ``novel`` (k-mer-not-in-index) is gated on an **absolute** fraction: it is only reported when
+    it covers at least ``novel_min_fraction`` of the window; otherwise it is dropped from the vote
+    and the dominant *non-novel* feature is reported. Because novel positions are identical across
+    a database's featuresets (it is an index property, not a featureset call), this absolute gate
+    makes the binned-novel extent featureset-independent — so overlaying the binned featuresets
+    yields ``novel:novel`` rather than spurious ``chrN:novel`` / ``novel:feature`` mixes that a
+    relative plurality (whose competing feature differs per featureset) would produce.
     """
     total = sum(w for w in weights.values() if w > 0)
     if total <= 0:
         return None
+    novel_w = weights.get(NOVEL, 0.0)
+    if novel_w > 0:
+        if novel_w >= novel_min_fraction * total:
+            return NOVEL
+        weights = {k: v for k, v in weights.items() if k != NOVEL}
+        total = sum(w for w in weights.values() if w > 0)
+        if total <= 0:
+            return NOVEL
     sub = _subtree_weights(weights, tree)
     root = tree.root
     node = root
@@ -203,6 +222,7 @@ def _descent_run(
     anc_x: frozenset[str],
     majority_fraction: float,
     scope: str,
+    novel_min_fraction: float = DEFAULT_NOVEL_MIN,
 ) -> tuple[str, float]:
     """The descent feature plus a safe lower bound on how long it stays constant.
 
@@ -213,6 +233,18 @@ def _descent_run(
     (``max_dt`` may be ``inf``). Bounds are conservative — recompute-and-merge keeps the
     result exact regardless — and mirror :func:`descend` at ``dt = 0``.
     """
+    # The ``novel`` absolute-fraction gate (see :func:`descend`) is a non-hierarchical threshold;
+    # rather than thread its crossing through the analytical bounds, recompute per base whenever
+    # novel is present in, entering, or leaving the window. Non-novel windows (the bulk) keep the
+    # window-independent fast path below.
+    if counts.get(NOVEL, 0.0) > 0 or NOVEL in anc_e or NOVEL in anc_x:
+        feat = descend(
+            counts, tree, majority_fraction=majority_fraction, scope=scope,
+            novel_min_fraction=novel_min_fraction,
+        )
+        assert feat is not None
+        return feat, 0.0
+
     sub0 = _subtree_weights(counts, tree)
     root = tree.root
 
@@ -279,6 +311,7 @@ def bin_intervals(
     window: int = DEFAULT_WINDOW,
     majority_fraction: float = DEFAULT_MAJORITY,
     scope: str = "node",
+    novel_min_fraction: float = DEFAULT_NOVEL_MIN,
 ) -> list[Interval]:
     """Mode-filter a single sequence's intervals; return the smoothed partition of ``[0, L)``.
 
@@ -335,7 +368,10 @@ def bin_intervals(
     i = 0
     while i <= length - 1:
         if i == length - 1:  # last position: one window, no forward step
-            feat = descend(counts, tree, majority_fraction=majority_fraction, scope=scope)
+            feat = descend(
+                counts, tree, majority_fraction=majority_fraction, scope=scope,
+                novel_min_fraction=novel_min_fraction,
+            )
             assert feat is not None
             _merge(runs, i, i + 1, feat)
             break
@@ -355,7 +391,8 @@ def bin_intervals(
         seg_end = min(seg_end, ends[interval_of(leave)] + a if l_act else a)
 
         feat, run = _descent_run(
-            counts, tree, anc_e=anc_e, anc_x=anc_x, majority_fraction=majority_fraction, scope=scope
+            counts, tree, anc_e=anc_e, anc_x=anc_x, majority_fraction=majority_fraction,
+            scope=scope, novel_min_fraction=novel_min_fraction,
         )
         d = min(run, seg_end - 1 - i, length - 1 - i)  # constant call, within segment + sequence
         d = max(0, int(d))
@@ -379,6 +416,7 @@ def bin_intervals_naive(
     window: int = DEFAULT_WINDOW,
     majority_fraction: float = DEFAULT_MAJORITY,
     scope: str = "node",
+    novel_min_fraction: float = DEFAULT_NOVEL_MIN,
 ) -> list[Interval]:
     """Reference implementation: evaluate :func:`descend` at every base (for tests)."""
     if not intervals:
@@ -395,7 +433,10 @@ def bin_intervals_naive(
         counts: dict[str, float] = defaultdict(float)
         for x in range(lo, hi + 1):
             counts[labels[x]] += 1
-        feature = descend(counts, tree, majority_fraction=majority_fraction, scope=scope)
+        feature = descend(
+            counts, tree, majority_fraction=majority_fraction, scope=scope,
+            novel_min_fraction=novel_min_fraction,
+        )
         assert feature is not None
         _merge(runs, i, i + 1, feature)
     return runs
@@ -408,6 +449,7 @@ def bin_sequence(
     window: int = DEFAULT_WINDOW,
     majority_fraction: float = DEFAULT_MAJORITY,
     scope: str = "node",
+    novel_min_fraction: float = DEFAULT_NOVEL_MIN,
 ) -> list[Interval]:
     """:func:`bin_intervals` for a sequence whose first interval may not start at 0."""
     if not intervals:
@@ -415,6 +457,7 @@ def bin_sequence(
     off = intervals[0][0]
     shifted = [(s - off, e - off, f) for s, e, f in intervals]
     binned = bin_intervals(
-        shifted, tree, window=window, majority_fraction=majority_fraction, scope=scope
+        shifted, tree, window=window, majority_fraction=majority_fraction, scope=scope,
+        novel_min_fraction=novel_min_fraction,
     )
     return [(s + off, e + off, f) for s, e, f in binned]

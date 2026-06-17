@@ -76,6 +76,17 @@ def test_chromosome_layer_and_color():
     assert render.chromosome_color("chr4:p_arm", colors) == "#abc123"  # by chromosome layer
     with pytest.raises(render.UnknownFeatureError):
         render.chromosome_color("chr9:bSat", colors)  # chr9 not in palette -> error
+    # The chromosome layer may be the novel sentinel (unknown chromosome featureset) -> white.
+    assert render.chromosome_color("novel:HSat3", colors) == "#ffffff"
+
+
+def test_render_allows_novel_chromosome_layer():
+    # A consensus with a novel chromosome layer (novel:feature) must render, not error.
+    placed = [render.PlacedRead("r", True, False, [(0, 100, "novel:aSat"), (100, 200, "chr2:bSat")])]
+    consensus = [(0, 100, "novel:aSat"), (100, 200, "chr2:bSat")]
+    colors = {"aSat": "#111111", "bSat": "#222222", "chr2": "#333333"}
+    svg = render.render_cluster_svg(placed, consensus, 200, colors)
+    assert svg.startswith("<svg")  # no UnknownFeatureError for the novel chromosome layer
 
 
 def test_chromosome_track_renders_dual_tracks_and_legend():

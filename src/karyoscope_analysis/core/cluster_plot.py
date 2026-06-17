@@ -83,10 +83,16 @@ def chromosome_layer(label: str) -> str:
 
 
 def chromosome_color(label: str, colors: Mapping[str, str]) -> str:
-    """Color for a label's chromosome layer, from the DB palette (strict — see :func:`feature_color`)."""
+    """Color for a label's chromosome layer, from the DB palette (strict — see :func:`feature_color`).
+
+    The chromosome layer may be the ``novel`` sentinel (the chromosome featureset is unknown for a
+    region, e.g. ``novel:HSat3``); like a novel structural feature it renders white.
+    """
     chrom = chromosome_layer(label)
     if chrom in colors:
         return colors[chrom]
+    if chrom == NOVEL_NAME:
+        return "#ffffff"
     raise UnknownFeatureError(chrom)
 
 
@@ -100,7 +106,7 @@ def validate_colors(panels: Sequence[ClusterPanel], colors: Mapping[str, str]) -
             if feat not in colors and feat != NOVEL_NAME:
                 unknown.add(feat)
             chrom = chromosome_layer(label)
-            if chrom and chrom not in colors:
+            if chrom and chrom not in colors and chrom != NOVEL_NAME:
                 unknown.add(chrom)
     if unknown:
         raise UnknownFeatureError(
