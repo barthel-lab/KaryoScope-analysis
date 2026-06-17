@@ -72,6 +72,12 @@ def _read_tsv(path: Path) -> list[dict[str, str]]:
     help="Include all (multi-read) clusters, not just the enriched ones.",
 )
 @click.option("--clamp", type=float, default=4.0, show_default=True, help="Color-scale limit (log2).")
+@click.option(
+    "--normalize-consensus",
+    is_flag=True,
+    help="Normalize each consensus bar to its own width (compare structure only). Default: a "
+    "shared absolute bp scale, so cluster lengths are comparable.",
+)
 @click.option("--dark", is_flag=True, help="Dark background.")
 @click.option(
     "--output",
@@ -89,6 +95,7 @@ def cmd(
     max_clusters: int | None,
     all_clusters: bool,
     clamp: float,
+    normalize_consensus: bool,
     dark: bool,
     output: Path,
 ) -> None:
@@ -125,6 +132,7 @@ def cmd(
     ep.render_heatmap(
         rows, groups, str(output), clamp=clamp, dark_mode=dark,
         consensus=consensus, colors=colors, sort_key=sort_key,
+        normalize_consensus=normalize_consensus,
     )
     extra = " + consensus" if consensus else ""
     click.echo(

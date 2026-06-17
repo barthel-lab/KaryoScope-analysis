@@ -72,22 +72,38 @@ def _segment_color(feature: str, colors: Mapping[str, str]) -> str:
     return "#ffffff" if struct == "novel" else "#dddddd"
 
 
-def _draw_consensus_panel(ax, rows, consensus, colors, fg) -> set[str]:
-    """Draw each row's consensus as a normalized feature-colored bar; return features shown."""
+def _draw_consensus_panel(ax, rows, consensus, colors, fg, *, absolute: bool) -> set[str]:
+    """Draw each row's consensus as a feature-colored bar; return the features shown.
+
+    ``absolute`` draws all rows on one shared bp scale (so cluster *lengths* are comparable);
+    otherwise each row is normalized to its own width (compares structure/proportions only).
+    """
     shown: set[str] = set()
-    for i, row in enumerate(rows):
-        segs = sorted(consensus.get(row.cluster_id, []), key=lambda s: s[0])
+    segs_by_row = [sorted(consensus.get(r.cluster_id, []), key=lambda s: s[0]) for r in rows]
+    max_width = max(
+        (max(e for _s, e, _f in segs) - segs[0][0] for segs in segs_by_row if segs), default=1
+    )
+    for i, segs in enumerate(segs_by_row):
         if not segs:
             continue
         span_start = segs[0][0]
-        span = max(1, max(e for _s, e, _f in segs) - span_start)
-        xranges = [((s - span_start) / span, (e - s) / span) for s, e, _f in segs]
+        if absolute:
+            xranges = [(s - span_start, e - s) for s, e, _f in segs]
+        else:
+            span = max(1, max(e for _s, e, _f in segs) - span_start)
+            xranges = [((s - span_start) / span, (e - s) / span) for s, e, _f in segs]
         facecolors = [_segment_color(f, colors) for _s, _e, f in segs]
         shown.update(f.split(":")[-1] for _s, _e, f in segs)
         ax.broken_barh(xranges, (i - 0.4, 0.8), facecolors=facecolors, edgecolors="none")
-    ax.set_xlim(0, 1)
-    ax.set_xticks([])
-    ax.set_title("consensus structure (normalized)", color=fg, fontsize=9)
+    if absolute:
+        ax.set_xlim(0, max_width)
+        ax.set_xlabel("consensus length (bp)", color=fg, fontsize=8)
+        ax.tick_params(axis="x", colors=fg, labelsize=7)
+        ax.set_title("consensus structure (shared bp scale)", color=fg, fontsize=9)
+    else:
+        ax.set_xlim(0, 1)
+        ax.set_xticks([])
+        ax.set_title("consensus structure (normalized)", color=fg, fontsize=9)
     return shown
 
 
@@ -101,6 +117,7 @@ def render_heatmap(
     consensus: Mapping[str, Sequence[Segment]] | None = None,
     colors: Mapping[str, str] | None = None,
     sort_key=None,
+    normalize_consensus: bool = False,
 ) -> None:
     """Render the clusters x groups log2-fold-enrichment heatmap to ``output_path``.
 
@@ -143,7 +160,9 @@ def render_heatmap(
             1, 2, figsize=(fig_w, fig_h), sharey=True,
             gridspec_kw={"width_ratios": [6.0, max(1.5, 1.1 * len(groups))], "wspace": 0.04},
         )
-        shown = _draw_consensus_panel(ax_cons, rows, consensus, colors, fg)
+        shown = _draw_consensus_panel(
+            ax_cons, rows, consensus, colors, fg, absolute=not normalize_consensus
+        )
         label_ax = ax_cons
     else:
         fig_w = max(4.0, heat_w + 1.0)
