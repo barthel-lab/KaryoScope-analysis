@@ -123,6 +123,18 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   grows with the window (U2OS region ~23–28 s at *either* window 101 or 1001, vs ~160 s for the
   original per-base version). A per-base reference (`bin_intervals_naive`) pins the fast path in
   a 600-case property test (τ ∈ {0, …, 1}, both scopes).
+- **`bin-annotations --step`**: stride between window centers (bp), default 1. `step=1` keeps the
+  exact per-base engine above; `step>1` switches to a strided engine (`bin_intervals_strided`)
+  that samples the centered window once per `step`-bp output block, maintaining the window
+  contents incrementally as it jumps — `O(intervals)` regardless of how the per-base fast path
+  behaves. This rescues the megabase-window / whole-genome coarsening case: on raw sample BEDs the
+  per-base engine degrades to `O(genome length)` because pervasive `novel` defeats its
+  window-independent bound (a ~3 Gb haplotype was ~hours at `step=1`/1 Mb window; ~1 min at
+  `step=10000`). `step>1` is an approximation of the per-base result — output boundaries snap to
+  the step grid and it is no longer reverse-complement invariant (a boundary can shift up to
+  `step`) — so keep `step` well below the smallest feature to localise. Unifies the two binning
+  styles under one knob: `step=1` is the rolling filter, `step=window` is non-overlapping tiling.
+  A property test pins `step=1` strided == `bin_intervals_naive`.
 - **`overlay-annotations` subcommand** (replaces `KaryoScope_merge_beds.py`): a
   **single-pass, streaming k-way overlay**. It reads every per-featureset BED
   concurrently and sweeps a line across the union of track boundaries per `seq_id`,

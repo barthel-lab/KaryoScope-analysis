@@ -168,6 +168,56 @@ def test_fast_matches_naive(region_tree: binning.BinTree, scope: str):
         assert fast == naive, (intervals, window, tau, scope)
 
 
+# ------------------------------------------------------------------ strided engine (step > 1)
+@pytest.mark.parametrize("scope", ["node", "window"])
+def test_strided_step1_matches_naive(region_tree: binning.BinTree, scope: str):
+    # At step=1 the strided engine samples the window centered on every base -- it must
+    # reproduce the per-base reference exactly, validating the incremental window arithmetic.
+    rng = random.Random(20240609)
+    for _ in range(400):
+        length = rng.randint(1, 80)
+        intervals = _random_partition(rng, length)
+        window = rng.choice([1, 3, 11, 21, 51])
+        tau = rng.choice([0.0, 0.5, 1.0])
+        strided = binning.bin_intervals_strided(
+            intervals, region_tree, window=window, step=1, majority_fraction=tau, scope=scope
+        )
+        naive = binning.bin_intervals_naive(
+            intervals, region_tree, window=window, majority_fraction=tau, scope=scope
+        )
+        assert strided == naive, (intervals, window, tau, scope)
+
+
+def test_strided_preserves_gapless_partition(region_tree: binning.BinTree):
+    intervals = [(0, 100, "aSat"), (100, 105, "bSat"), (105, 263, "arm")]
+    out = binning.bin_intervals_strided(intervals, region_tree, window=51, step=10)
+    assert out[0][0] == 0 and out[-1][1] == 263  # exact [0, L) coverage, odd length vs step
+    for prev, cur in itertools.pairwise(out):
+        assert prev[1] == cur[0]
+
+
+def test_strided_boundaries_snap_to_step_grid(region_tree: binning.BinTree):
+    # A clean aSat/arm boundary at 1000; with step=100 the called boundary lands on a grid
+    # multiple (within one step of the true boundary), unlike the exact step=1 engine.
+    intervals = [(0, 1000, "aSat"), (1000, 2000, "arm")]
+    out = binning.bin_intervals_strided(intervals, region_tree, window=51, step=100)
+    boundaries = [e for _, e, _ in out[:-1]]
+    assert all(boundary % 100 == 0 for boundary in boundaries)
+    assert [f for _, _, f in out] == ["aSat", "arm"]
+
+
+def test_strided_rejects_bad_step(region_tree: binning.BinTree):
+    with pytest.raises(ValueError, match="step must be >= 1"):
+        binning.bin_intervals_strided([(0, 10, "aSat")], region_tree, window=11, step=0)
+
+
+def test_bin_sequence_dispatches_on_step(region_tree: binning.BinTree):
+    # step>1 path is reachable through the public sequence wrapper and keeps absolute coords.
+    intervals = [(500, 600, "aSat"), (600, 605, "bSat"), (605, 800, "aSat")]
+    out = binning.bin_sequence(intervals, region_tree, window=51, step=10)
+    assert out == [(500, 800, "aSat")]
+
+
 def test_descend_tau_zero_always_reaches_a_leaf(region_tree: binning.BinTree):
     # tau=0 descends into the heaviest subtree at every level -> a specific leaf, never an
     # internal/ambiguous node. aSat 20 / bSat 40 / arm 40 -> centromeric(60) -> bSat(40).

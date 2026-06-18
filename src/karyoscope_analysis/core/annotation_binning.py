@@ -44,6 +44,9 @@ from karyoscope_analysis.core.io.bed import Interval
 
 #: Default rolling-window size (bp). Odd so the window is symmetric about each base.
 DEFAULT_WINDOW = 101
+#: Default step between successive window centers (bp). 1 = evaluate every base (the exact
+#: per-base engine); larger strides the window for an O(intervals) speed/coarseness trade-off.
+DEFAULT_STEP = 1
 #: Default majority fraction (τ) for descending into a child. 0 = always descend to a leaf.
 DEFAULT_MAJORITY = 0.5
 #: Default minimum window fraction for ``novel`` to win a window (see :func:`descend`).
@@ -442,22 +445,111 @@ def bin_intervals_naive(
     return runs
 
 
+def bin_intervals_strided(
+    intervals: Sequence[Interval],
+    tree: BinTree,
+    *,
+    window: int = DEFAULT_WINDOW,
+    step: int = DEFAULT_STEP,
+    majority_fraction: float = DEFAULT_MAJORITY,
+    scope: str = "node",
+    novel_min_fraction: float = DEFAULT_NOVEL_MIN,
+) -> list[Interval]:
+    """Strided centered-window mode-filter: sample the window once per ``step``-bp block.
+
+    The sequence ``[0, L)`` is tiled into ``step``-bp output blocks; each block's feature is
+    :func:`descend` over a width-``window`` window **centered on the block midpoint**. The
+    window contents are maintained incrementally as the window jumps by ``step`` (add the bp
+    entering on the right, remove the bp leaving on the left), so the cost is ``O(intervals)``
+    for the slide plus one ``descend`` per block -- it does NOT grow with the sequence length
+    the way the per-base engine does when its fast path is defeated (e.g. by pervasive
+    ``novel``).
+
+    Unlike :func:`bin_intervals` (step == 1, exact) this is an **approximation** of the
+    per-base result: output boundaries snap to the ``step`` grid, and because the grid is
+    anchored at coordinate 0 the result is not reverse-complement invariant (a boundary can
+    shift by up to ``step``). Pick ``step`` well below the smallest feature you care to
+    localise. ``intervals`` must be a gapless C4 partition of ``[0, L)`` sorted by start;
+    output is the coalesced gapless partition of the same ``[0, L)``.
+
+    With ``step == 1`` this is exactly :func:`bin_intervals_naive` (a useful cross-check), but
+    callers should use :func:`bin_intervals` for step 1 -- it is the faster exact engine.
+    """
+    if step < 1:
+        raise ValueError(f"step must be >= 1, got {step}")
+    if not intervals:
+        return []
+    a, b = (window - 1) // 2, window // 2
+    length = intervals[-1][1]
+    starts = [iv[0] for iv in intervals]
+    n = len(intervals)
+
+    counts: dict[str, float] = defaultdict(float)
+
+    def accumulate(x0: int, x1: int, sign: int) -> None:
+        """Add (``sign=+1``) or remove (``sign=-1``) per-feature bp over ``[x0, x1)``."""
+        if x1 <= x0:
+            return
+        k = max(0, bisect.bisect_right(starts, x0) - 1)
+        while k < n and starts[k] < x1:
+            s, e, f = intervals[k]
+            ov = min(e, x1) - max(s, x0)
+            if ov > 0:
+                counts[f] += sign * ov
+                if counts[f] <= 0:
+                    del counts[f]
+            k += 1
+
+    runs: list[Interval] = []
+    lo = hi = 0
+    pos = 0
+    while pos < length:
+        block_end = min(pos + step, length)
+        center = min(length - 1, pos + step // 2)
+        nlo, nhi = max(0, center - a), min(length, center + b + 1)
+        if nhi > hi:  # window center only advances, so edges are monotonic non-decreasing
+            accumulate(hi, nhi, +1)
+        if nlo > lo:
+            accumulate(lo, nlo, -1)
+        lo, hi = nlo, nhi
+        feat = descend(
+            counts, tree, majority_fraction=majority_fraction, scope=scope,
+            novel_min_fraction=novel_min_fraction,
+        )
+        assert feat is not None  # window is non-empty for a non-empty sequence
+        _merge(runs, pos, block_end, feat)
+        pos = block_end
+    return runs
+
+
 def bin_sequence(
     intervals: Sequence[Interval],
     tree: BinTree,
     *,
     window: int = DEFAULT_WINDOW,
+    step: int = DEFAULT_STEP,
     majority_fraction: float = DEFAULT_MAJORITY,
     scope: str = "node",
     novel_min_fraction: float = DEFAULT_NOVEL_MIN,
 ) -> list[Interval]:
-    """:func:`bin_intervals` for a sequence whose first interval may not start at 0."""
+    """Mode-filter a sequence whose first interval may not start at 0.
+
+    Dispatches on ``step``: ``step == 1`` uses the exact per-base engine
+    (:func:`bin_intervals`); ``step > 1`` uses the strided engine
+    (:func:`bin_intervals_strided`).
+    """
     if not intervals:
         return []
     off = intervals[0][0]
     shifted = [(s - off, e - off, f) for s, e, f in intervals]
-    binned = bin_intervals(
-        shifted, tree, window=window, majority_fraction=majority_fraction, scope=scope,
-        novel_min_fraction=novel_min_fraction,
-    )
+    if step == 1:
+        binned = bin_intervals(
+            shifted, tree, window=window, majority_fraction=majority_fraction, scope=scope,
+            novel_min_fraction=novel_min_fraction,
+        )
+    else:
+        binned = bin_intervals_strided(
+            shifted, tree, window=window, step=step, majority_fraction=majority_fraction,
+            scope=scope, novel_min_fraction=novel_min_fraction,
+        )
     return [(s + off, e + off, f) for s, e, f in binned]

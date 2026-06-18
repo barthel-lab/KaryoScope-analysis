@@ -30,6 +30,7 @@ def _binned_rows(
     feature_set: str,
     *,
     window: int,
+    step: int,
     majority_fraction: float,
     scope: str,
     novel_min_fraction: float,
@@ -46,8 +47,8 @@ def _binned_rows(
         if cur_seq is None:
             return
         for s, e, f in binning.bin_sequence(
-            buf, tree, window=window, majority_fraction=majority_fraction, scope=scope,
-            novel_min_fraction=novel_min_fraction,
+            buf, tree, window=window, step=step, majority_fraction=majority_fraction,
+            scope=scope, novel_min_fraction=novel_min_fraction,
         ):
             yield cur_seq, s, e, f
 
@@ -114,6 +115,16 @@ def _write_streaming(output: Path, rows: Iterator[BedRow]) -> int:
     help="Rolling-window size in bp (centered on each base; clipped at sequence ends).",
 )
 @click.option(
+    "--step",
+    default=binning.DEFAULT_STEP,
+    show_default=True,
+    type=int,
+    help="Stride between window centers in bp. 1 = evaluate every base (exact, slowest). "
+    ">1 strides the window for an O(intervals) speed/coarseness trade-off: output boundaries "
+    "snap to the step grid and the result is no longer reverse-complement invariant. Keep "
+    "step well below the smallest feature you need to localise.",
+)
+@click.option(
     "--majority-fraction",
     default=binning.DEFAULT_MAJORITY,
     show_default=True,
@@ -150,6 +161,7 @@ def cmd(
     hierarchy_path: Path,
     feature_set: str,
     window: int,
+    step: int,
     majority_fraction: float,
     threshold_scope: str,
     novel_min_fraction: float,
@@ -158,6 +170,8 @@ def cmd(
     """Mode-filter a featureset BED and write the denoised C4 BED."""
     if window < 1:
         raise click.BadParameter("--window must be >= 1")
+    if step < 1:
+        raise click.BadParameter("--step must be >= 1")
     if not 0.0 <= majority_fraction <= 1.0:
         raise click.BadParameter("--majority-fraction must be in [0, 1]")
     if not 0.0 <= novel_min_fraction <= 1.0:
@@ -178,6 +192,7 @@ def cmd(
             hierarchy,
             feature_set,
             window=window,
+            step=step,
             majority_fraction=majority_fraction,
             scope=threshold_scope,
             novel_min_fraction=novel_min_fraction,
