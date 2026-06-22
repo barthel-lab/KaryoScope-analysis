@@ -16,6 +16,14 @@
 default_language_version:
   python: python3
 
+# The legacy standalone scripts under scripts/ (being ported into
+# src/karyoscope_analysis/) are intentionally excluded from lint/format until
+# they are migrated, so the reorg lands cleanly file-by-file.
+exclude: |
+  (?x)^(
+    scripts/.*
+  )$
+
 repos:
   # Generic file hygiene.
   - repo: https://github.com/pre-commit/pre-commit-hooks
