@@ -54,14 +54,18 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      # NOTE (Phase 4): once the migrated code imports the sibling packages
-      # `karyoplot` (KaryoScope-plotlib) and `karyoscope` (KaryoScope), this
-      # step must check them out and `pip install -e` them first, and a
-      # `pytest -m integration` job should be added (mirroring the engine's CI).
-      - name: Install karyoscope-analysis
+      # Sibling packages (not on PyPI) — install from their public barthel-lab
+      # repos first so pip resolves the `karyoscope` and `karyoplot` runtime
+      # dependencies from git rather than the (unrelated) PyPI `karyoplot`.
+      - name: Install sibling packages (karyoscope, karyoplot)
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install \
+            "karyoscope @ git+https://github.com/barthel-lab/KaryoScope" \
+            "karyoplot @ git+https://github.com/barthel-lab/KaryoScope-plotlib"
+
+      - name: Install karyoscope-analysis
+        run: pip install -e ".[dev]"
 
       - name: Smoke test the CLI
         run: |
