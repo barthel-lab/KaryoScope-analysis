@@ -307,8 +307,14 @@ def cmd(
     structureless = filler - hierarchy.canonical_telomere - hierarchy.noncanonical_telomere
     layouts = [
         asm.consensus_layout(
-            reads, c, neighbors=neighbors, sub_score=sub_score, gap_factor=gap_factor,
-            filler=filler, structureless=structureless, acrocentric_chromosomes=acrocentrics,
+            reads,
+            c,
+            neighbors=neighbors,
+            sub_score=sub_score,
+            gap_factor=gap_factor,
+            filler=filler,
+            structureless=structureless,
+            acrocentric_chromosomes=acrocentrics,
             weight=weight,
         )
         for c in clusters

@@ -10,12 +10,27 @@ from karyoscope_analysis.core import enrichment_plot as ep
 
 def _rows():
     return [
-        {"cluster_id": "c1", "n_total": "10", "enriched": "1",
-         "log2fc_HeLa": "-inf", "log2fc_U2OS": "2.5"},
-        {"cluster_id": "c2", "n_total": "5", "enriched": "1",
-         "log2fc_HeLa": "1.2", "log2fc_U2OS": "-inf"},
-        {"cluster_id": "c3", "n_total": "3", "enriched": "0",  # not enriched
-         "log2fc_HeLa": "0.1", "log2fc_U2OS": "0.1"},
+        {
+            "cluster_id": "c1",
+            "n_total": "10",
+            "enriched": "1",
+            "log2fc_HeLa": "-inf",
+            "log2fc_U2OS": "2.5",
+        },
+        {
+            "cluster_id": "c2",
+            "n_total": "5",
+            "enriched": "1",
+            "log2fc_HeLa": "1.2",
+            "log2fc_U2OS": "-inf",
+        },
+        {
+            "cluster_id": "c3",
+            "n_total": "3",
+            "enriched": "0",  # not enriched
+            "log2fc_HeLa": "0.1",
+            "log2fc_U2OS": "0.1",
+        },
     ]
 
 

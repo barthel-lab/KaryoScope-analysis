@@ -98,8 +98,15 @@ def _orient_to_breakpoint(
 
 
 def _draw_consensus_panel(
-    ax, rows, consensus, colors, fg, *, absolute: bool,
-    telomere: set[str] | None = None, align: bool = True,
+    ax,
+    rows,
+    consensus,
+    colors,
+    fg,
+    *,
+    absolute: bool,
+    telomere: set[str] | None = None,
+    align: bool = True,
 ) -> set[str]:
     """Draw each row's consensus as a feature-colored bar; return the features shown.
 
@@ -199,12 +206,21 @@ def render_heatmap(
     if show_consensus:
         fig_w = heat_w + 6.0
         fig, (ax_cons, ax) = plt.subplots(
-            1, 2, figsize=(fig_w, fig_h), sharey=True,
+            1,
+            2,
+            figsize=(fig_w, fig_h),
+            sharey=True,
             gridspec_kw={"width_ratios": [6.0, max(1.5, 1.1 * len(groups))], "wspace": 0.04},
         )
         shown = _draw_consensus_panel(
-            ax_cons, rows, consensus, colors, fg, absolute=not normalize_consensus,
-            telomere=telomere, align=align_telomere,
+            ax_cons,
+            rows,
+            consensus,
+            colors,
+            fg,
+            absolute=not normalize_consensus,
+            telomere=telomere,
+            align=align_telomere,
         )
         label_ax = ax_cons
     else:
@@ -227,8 +243,15 @@ def render_heatmap(
         for j, g in enumerate(groups):
             v = row.log2fc[g]
             txt = "·" if v == float("-inf") else f"{v:.1f}"
-            ax.text(j, i, txt, ha="center", va="center", fontsize=6,
-                    color="black" if abs(_clamp(v)) < clamp * 0.6 else "white")
+            ax.text(
+                j,
+                i,
+                txt,
+                ha="center",
+                va="center",
+                fontsize=6,
+                color="black" if abs(_clamp(v)) < clamp * 0.6 else "white",
+            )
 
     cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cbar.set_label("log2 fold-enrichment", color=fg)
@@ -238,11 +261,19 @@ def render_heatmap(
 
     if shown:  # feature color legend for the consensus panel
         feats = sorted(shown, key=sort_key) if sort_key else sorted(shown)
-        handles = [Patch(facecolor=_segment_color(f, colors), edgecolor="none", label=f)
-                   for f in feats]
+        handles = [
+            Patch(facecolor=_segment_color(f, colors), edgecolor="none", label=f) for f in feats
+        ]
         ncol = max(1, min(8, len(feats)))
-        fig.legend(handles=handles, loc="lower center", ncol=ncol, fontsize=6,
-                   frameon=False, labelcolor=fg, bbox_to_anchor=(0.5, -0.02))
+        fig.legend(
+            handles=handles,
+            loc="lower center",
+            ncol=ncol,
+            fontsize=6,
+            frameon=False,
+            labelcolor=fg,
+            bbox_to_anchor=(0.5, -0.02),
+        )
 
     fig.suptitle("Cluster enrichment by sample", color=fg)
     fig.savefig(output_path, dpi=150, bbox_inches="tight")

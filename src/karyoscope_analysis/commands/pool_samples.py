@@ -21,7 +21,9 @@ def _open_text(path: Path):
     return gzip.open(path, "rt") if path.suffix == ".gz" else path.open()
 
 
-@click.command(name="pool-samples", help="Pool per-sample read BEDs (namespaced) for joint clustering.")
+@click.command(
+    name="pool-samples", help="Pool per-sample read BEDs (namespaced) for joint clustering."
+)
 @click.option(
     "--bed",
     "bed_specs",

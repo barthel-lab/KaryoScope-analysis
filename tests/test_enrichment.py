@@ -72,8 +72,17 @@ def test_enrichment_tsv_shape():
     tsv = enrich.enrichment_tsv(results, groups)
     header = tsv.splitlines()[0].split("\t")
     assert header == [
-        "cluster_id", "n_total", "n_A", "n_B", "frac_A", "frac_B",
-        "log2fc_A", "log2fc_B", "top_group", "private", "enriched",
+        "cluster_id",
+        "n_total",
+        "n_A",
+        "n_B",
+        "frac_A",
+        "frac_B",
+        "log2fc_A",
+        "log2fc_B",
+        "top_group",
+        "private",
+        "enriched",
     ]
     assert len(tsv.splitlines()) == 1 + len(results)
 
@@ -114,9 +123,7 @@ def test_test_enrichment_cli(cli_runner, tmp_path: Path):
         "k1\tHeLa|r3\t1\t0\t0\t100\taSat\n"
     )
     read_list = tmp_path / "samples.tsv"
-    read_list.write_text(
-        "read_id\tsample\nU2OS|r1\tU2OS\nU2OS|r2\tU2OS\nHeLa|r3\tHeLa\n"
-    )
+    read_list.write_text("read_id\tsample\nU2OS|r1\tU2OS\nU2OS|r2\tU2OS\nHeLa|r3\tHeLa\n")
     out = tmp_path / "enrichment.tsv"
     res = cli_runner.invoke(
         main,

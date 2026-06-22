@@ -83,7 +83,11 @@ def test_block_min_bp_only_compares_reads_sharing_a_major_feature():
     assert pairs == [(0, 1)]
     # the blocked graph still finds the x-y dovetail edge, and z makes none
     edges = asm.build_overlap_graph(
-        reads, sub_score=EXACT, gap_factor=0.01, min_overlap_bp=1, min_identity=0.5,
+        reads,
+        sub_score=EXACT,
+        gap_factor=0.01,
+        min_overlap_bp=1,
+        min_identity=0.5,
         block_min_bp=2500,
     )
     assert {tuple(sorted((e.a, e.b))) for e in edges} == {("x", "y")}
@@ -104,8 +108,12 @@ def test_label_propagation_splits_bridged_cliques():
     # bridge edge c-x (a noisy hub link). LP should keep two communities; CC would merge them.
     strong, weak = 10000.0, 1100.0
     edges = [
-        _edge("a", "b", strong), _edge("a", "c", strong), _edge("b", "c", strong),
-        _edge("x", "y", strong), _edge("x", "z", strong), _edge("y", "z", strong),
+        _edge("a", "b", strong),
+        _edge("a", "c", strong),
+        _edge("b", "c", strong),
+        _edge("x", "y", strong),
+        _edge("x", "z", strong),
+        _edge("y", "z", strong),
         _edge("c", "x", weak),  # the bridge
     ]
     label = asm._label_propagation(["a", "b", "c", "x", "y", "z"], edges)
@@ -115,11 +123,17 @@ def test_label_propagation_splits_bridged_cliques():
 
 
 def test_cluster_reads_communities_vs_components():
-    reads = {n: [("P", 1000)] for n in ("a", "b", "c", "x", "y", "z")}  # lengths only matter for seed
+    reads = {
+        n: [("P", 1000)] for n in ("a", "b", "c", "x", "y", "z")
+    }  # lengths only matter for seed
     strong, weak = 10000.0, 1100.0
     edges = [
-        _edge("a", "b", strong), _edge("a", "c", strong), _edge("b", "c", strong),
-        _edge("x", "y", strong), _edge("x", "z", strong), _edge("y", "z", strong),
+        _edge("a", "b", strong),
+        _edge("a", "c", strong),
+        _edge("b", "c", strong),
+        _edge("x", "y", strong),
+        _edge("x", "z", strong),
+        _edge("y", "z", strong),
         _edge("c", "x", weak),
     ]
     # connected components: one cluster of 6
@@ -320,7 +334,10 @@ def test_consensus_layout_stacks_features_and_spans_union():
     assert list(placed["m"].segments) == [(100, 200, "B"), (200, 300, "C"), (300, 400, "D")]
     # consensus spans the union (incl. D); B,C have support 2 (both reads agree)
     assert [(p.feature, p.support, p.coverage) for p in lo.consensus] == [
-        ("A", 1, 1), ("B", 2, 2), ("C", 2, 2), ("D", 1, 1)
+        ("A", 1, 1),
+        ("B", 2, 2),
+        ("C", 2, 2),
+        ("D", 1, 1),
     ]
 
 

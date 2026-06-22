@@ -27,7 +27,14 @@ from pathlib import Path
 from karyoscope_analysis.core.io.bed import BedRow
 
 #: Columns of the genome-weights TSV written by ``genome-weights``.
-WEIGHTS_HEADER = ("feature_set", "feature", "genome_bp", "genome_fraction", "info_content", "weight")
+WEIGHTS_HEADER = (
+    "feature_set",
+    "feature",
+    "genome_bp",
+    "genome_fraction",
+    "info_content",
+    "weight",
+)
 
 
 @dataclass(frozen=True)

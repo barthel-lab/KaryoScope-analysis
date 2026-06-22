@@ -172,37 +172,74 @@ def _draw_panel(
     chrom_h = _chrom_height(row_height, chromosome_track)
 
     if panel.title:
-        d.append(draw.Text(
-            panel.title, 11, 6, y + 11, fill=_TEXT, font_weight="bold",
-            font_family=DEFAULT_FONT_FAMILY,
-        ))
+        d.append(
+            draw.Text(
+                panel.title,
+                11,
+                6,
+                y + 11,
+                fill=_TEXT,
+                font_weight="bold",
+                font_family=DEFAULT_FONT_FAMILY,
+            )
+        )
         y += 17
 
     for label, is_seed, segs in _panel_rows(panel, consensus_track=consensus_track):
         tag = f"{label}{' (seed)' if is_seed and label != 'consensus' else ''}"
         emphasis = is_seed or label == "consensus"
-        d.append(draw.Text(
-            tag[:36], 9, 10, y + row_height - 2, fill=_TEXT if emphasis else _MUTED,
-            font_family=DEFAULT_FONT_FAMILY,
-        ))
+        d.append(
+            draw.Text(
+                tag[:36],
+                9,
+                10,
+                y + row_height - 2,
+                fill=_TEXT if emphasis else _MUTED,
+                font_family=DEFAULT_FONT_FAMILY,
+            )
+        )
         feat_segs = [(s, e, structural_feature(f)) for s, e, f in segs]
         feat_colors = {structural_feature(f): feature_color(f, colors) for _s, _e, f in segs}
         draw_annotation_track(
-            d, feat_segs, y, row_height, scale, label_width, "features", "", _TEXT,
-            label_width, feat_colors, {}, plot_width, 0, panel.width,
+            d,
+            feat_segs,
+            y,
+            row_height,
+            scale,
+            label_width,
+            "features",
+            "",
+            _TEXT,
+            label_width,
+            feat_colors,
+            {},
+            plot_width,
+            0,
+            panel.width,
         )
         if chromosome_track:
-            chrom_segs = [
-                (s, e, chromosome_layer(f)) for s, e, f in segs if chromosome_layer(f)
-            ]
+            chrom_segs = [(s, e, chromosome_layer(f)) for s, e, f in segs if chromosome_layer(f)]
             chrom_colors = {
                 chromosome_layer(f): chromosome_color(f, colors)
                 for _s, _e, f in segs
                 if chromosome_layer(f)
             }
             draw_annotation_track(
-                d, chrom_segs, y + row_height, chrom_h, scale, label_width, "chromosomes", "",
-                _TEXT, label_width, chrom_colors, {}, plot_width, 0, panel.width,
+                d,
+                chrom_segs,
+                y + row_height,
+                chrom_h,
+                scale,
+                label_width,
+                "chromosomes",
+                "",
+                _TEXT,
+                label_width,
+                chrom_colors,
+                {},
+                plot_width,
+                0,
+                panel.width,
             )
         y += row_height + chrom_h + 2
     return y + 10  # gap after the panel
@@ -251,28 +288,45 @@ def render_clusters_svg(
         panels, colors, chromosome_track=chromosome_track, consensus_track=consensus_track
     )
     total_h = _figure_height(
-        panels, len(present), len(present_chrom),
-        row_height=row_height, chromosome_track=chromosome_track, consensus_track=consensus_track,
+        panels,
+        len(present),
+        len(present_chrom),
+        row_height=row_height,
+        chromosome_track=chromosome_track,
+        consensus_track=consensus_track,
     )
     d = draw.Drawing(width, total_h, id_prefix="cluster")
 
     y: float = 12
     for panel in panels:
         y = _draw_panel(
-            d, y, panel, colors, width=width, label_width=label_width, row_height=row_height,
-            chromosome_track=chromosome_track, consensus_track=consensus_track,
+            d,
+            y,
+            panel,
+            colors,
+            width=width,
+            label_width=label_width,
+            row_height=row_height,
+            chromosome_track=chromosome_track,
+            consensus_track=consensus_track,
         )
 
     tracks = ["features"] + (["chromosomes"] if present_chrom else [])
     draw_grouped_legend(
-        d, 6, y + 14, _TEXT,
+        d,
+        6,
+        y + 14,
+        _TEXT,
         used_colors={"features": present, "chromosomes": present_chrom},
         track_labels={"features": "Features", "chromosomes": "Chromosomes"},
-        tracks=tracks, layout="column", column_width=180, sort_key=legend_sort_key,
+        tracks=tracks,
+        layout="column",
+        column_width=180,
+        sort_key=legend_sort_key,
     )
 
     svg = d.as_svg()
-    return svg[svg.index("<svg"):]  # drop the <?xml?> prolog (keep the string API stable)
+    return svg[svg.index("<svg") :]  # drop the <?xml?> prolog (keep the string API stable)
 
 
 def render_cluster_svg(

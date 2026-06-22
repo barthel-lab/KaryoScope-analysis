@@ -34,7 +34,15 @@ def test_draw_legend_feature_set_filter(cli_runner, tmp_path):
     out = tmp_path / "legend.svg"
     result = cli_runner.invoke(
         main,
-        ["draw-legend", "--colors", str(COLORS_TSV), "--feature-set", "subtelomeric", "-o", str(out)],
+        [
+            "draw-legend",
+            "--colors",
+            str(COLORS_TSV),
+            "--feature-set",
+            "subtelomeric",
+            "-o",
+            str(out),
+        ],
     )
     assert result.exit_code == 0, result.output
     svg = out.read_text()
@@ -46,7 +54,15 @@ def test_draw_legend_empty_after_filter_errors(cli_runner, tmp_path):
     out = tmp_path / "legend.svg"
     result = cli_runner.invoke(
         main,
-        ["draw-legend", "--colors", str(COLORS_TSV), "--feature-set", "nonexistent", "-o", str(out)],
+        [
+            "draw-legend",
+            "--colors",
+            str(COLORS_TSV),
+            "--feature-set",
+            "nonexistent",
+            "-o",
+            str(out),
+        ],
     )
     assert result.exit_code != 0
     assert "no legend entries" in result.output

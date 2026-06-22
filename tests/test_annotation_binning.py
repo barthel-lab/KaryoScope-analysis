@@ -80,13 +80,21 @@ def test_descend_novel_as_top_level_leaf(region_tree: binning.BinTree):
 def test_descend_novel_gated_below_threshold(region_tree: binning.BinTree):
     # 40% novel < 50%: novel is dropped from the vote; the dominant non-novel feature wins
     # (60% aSat -> aSat), NOT novel (which a plurality vote would have picked at tau=0).
-    assert binning.descend({"novel": 40.0, "aSat": 60.0}, region_tree,
-                           scope="node", majority_fraction=0.0) == "aSat"
+    assert (
+        binning.descend(
+            {"novel": 40.0, "aSat": 60.0}, region_tree, scope="node", majority_fraction=0.0
+        )
+        == "aSat"
+    )
     # exactly at the threshold (50%) novel still wins.
     assert binning.descend({"novel": 50.0, "aSat": 50.0}, region_tree, scope="node") == "novel"
     # the gate is configurable.
-    assert binning.descend({"novel": 40.0, "aSat": 60.0}, region_tree,
-                           scope="node", novel_min_fraction=0.3) == "novel"
+    assert (
+        binning.descend(
+            {"novel": 40.0, "aSat": 60.0}, region_tree, scope="node", novel_min_fraction=0.3
+        )
+        == "novel"
+    )
 
 
 def test_bin_intervals_novel_gate_fast_matches_naive(region_tree: binning.BinTree):
@@ -222,8 +230,12 @@ def test_descend_tau_zero_always_reaches_a_leaf(region_tree: binning.BinTree):
     # tau=0 descends into the heaviest subtree at every level -> a specific leaf, never an
     # internal/ambiguous node. aSat 20 / bSat 40 / arm 40 -> centromeric(60) -> bSat(40).
     leaves = {"aSat", "bSat", "HSat3", "arm", "ct", "rDNA", "p_arm", "q_arm", "HSat1A"}
-    assert binning.descend({"aSat": 20.0, "bSat": 40.0, "arm": 40.0}, region_tree,
-                           majority_fraction=0.0) == "bSat"
+    assert (
+        binning.descend(
+            {"aSat": 20.0, "bSat": 40.0, "arm": 40.0}, region_tree, majority_fraction=0.0
+        )
+        == "bSat"
+    )
     for weights in ({"aSat": 30.0, "bSat": 30.0, "arm": 40.0}, {"HSat3": 10.0, "p_arm": 9.0}):
         assert binning.descend(weights, region_tree, majority_fraction=0.0) in leaves
 

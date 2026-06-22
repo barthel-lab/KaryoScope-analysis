@@ -152,7 +152,15 @@ def test_filler_features():
     h = FeatureHierarchy.from_tsv(HIERARCHY_TSV)
     filler = h.filler_features
     # read-set-ubiquitous / structureless features are filler
-    for f in ("canonical_telomere", "noncanonical_telomere", "arm", "p_arm", "q_arm", "ct", "novel"):
+    for f in (
+        "canonical_telomere",
+        "noncanonical_telomere",
+        "arm",
+        "p_arm",
+        "q_arm",
+        "ct",
+        "novel",
+    ):
         assert f in filler, f
     # distinctive structural features are NOT filler
     for f in ("aSat", "bSat", "gSat", "HSat3", "mon", "ITS", "TAR1", "rDNA"):

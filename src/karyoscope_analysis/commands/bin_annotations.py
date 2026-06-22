@@ -47,8 +47,13 @@ def _binned_rows(
         if cur_seq is None:
             return
         for s, e, f in binning.bin_sequence(
-            buf, tree, window=window, step=step, majority_fraction=majority_fraction,
-            scope=scope, novel_min_fraction=novel_min_fraction,
+            buf,
+            tree,
+            window=window,
+            step=step,
+            majority_fraction=majority_fraction,
+            scope=scope,
+            novel_min_fraction=novel_min_fraction,
         ):
             yield cur_seq, s, e, f
 

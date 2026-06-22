@@ -82,4 +82,6 @@ def cmd(bed_specs: tuple[str, ...], hierarchy_path: Path, output: Path) -> None:
                 f"{w.feature_set}\t{w.feature}\t{w.genome_bp}\t"
                 f"{w.fraction:.3e}\t{w.info_content:.4f}\t{w.weight:.4f}\n"
             )
-    click.echo(f"Wrote {len(weights)} feature weights ({len(bp_by_featureset)} featuresets) to {output}")
+    click.echo(
+        f"Wrote {len(weights)} feature weights ({len(bp_by_featureset)} featuresets) to {output}"
+    )

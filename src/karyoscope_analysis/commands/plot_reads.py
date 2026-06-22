@@ -29,7 +29,9 @@ from karyoscope_analysis.core.io.colors import load_colors
 from karyoscope_analysis.core.legend_order import feature_sort_key
 
 
-@click.command(name="plot-reads", help="Render per-read feature BEDs as stacked colored bars (SVG).")
+@click.command(
+    name="plot-reads", help="Render per-read feature BEDs as stacked colored bars (SVG)."
+)
 @click.option(
     "--bed",
     "bed_specs",
@@ -60,7 +62,9 @@ from karyoscope_analysis.core.legend_order import feature_sort_key
     show_default=True,
     help="Output format. PNG is produced by converting the SVG (needs rsvg-convert).",
 )
-@click.option("--png-scale", type=int, default=4, show_default=True, help="PNG zoom factor (rsvg -z).")
+@click.option(
+    "--png-scale", type=int, default=4, show_default=True, help="PNG zoom factor (rsvg -z)."
+)
 @click.option(
     "--preset",
     type=click.Choice(["none", "telogator"]),
@@ -69,7 +73,9 @@ from karyoscope_analysis.core.legend_order import feature_sort_key
     help="Convenience preset. 'telogator' defaults --orient telomere and --format both "
     "(reproduces the legacy telogator-reads-viz; explicit flags still win).",
 )
-@click.option("--horizontal", is_flag=True, help="Draw reads as horizontal rows (default: vertical columns).")
+@click.option(
+    "--horizontal", is_flag=True, help="Draw reads as horizontal rows (default: vertical columns)."
+)
 @click.option(
     "--orient",
     type=click.Choice(["none", "telomere", "chromosome", "satellite"]),
@@ -100,18 +106,39 @@ from karyoscope_analysis.core.legend_order import feature_sort_key
     help="Background color (sets text/line color to its complement).",
 )
 @click.option("--legend", is_flag=True, help="Draw an auto-filtered color legend below the reads.")
-@click.option("--no-scale-bar", "scale_bar", flag_value=False, default=True, help="Omit the scale bar.")
+@click.option(
+    "--no-scale-bar", "scale_bar", flag_value=False, default=True, help="Omit the scale bar."
+)
 @click.option("--no-header", is_flag=True, help="Omit sample labels and separator lines.")
 @click.option("--read-border", is_flag=True, help="Outline each read bar.")
-@click.option("--bar-width", type=int, default=5, show_default=True, help="Read bar thickness (px).")
-@click.option("--read-spacing", type=int, default=5, show_default=True, help="Spacing between reads (px).")
-@click.option("--sample-spacing", type=int, default=20, show_default=True, help="Spacing between samples/groups (px).")
-@click.option("--subgroup-spacing", type=int, default=None, help="Spacing within a group (px; default: sample-spacing).")
+@click.option(
+    "--bar-width", type=int, default=5, show_default=True, help="Read bar thickness (px)."
+)
+@click.option(
+    "--read-spacing", type=int, default=5, show_default=True, help="Spacing between reads (px)."
+)
+@click.option(
+    "--sample-spacing",
+    type=int,
+    default=20,
+    show_default=True,
+    help="Spacing between samples/groups (px).",
+)
+@click.option(
+    "--subgroup-spacing",
+    type=int,
+    default=None,
+    help="Spacing within a group (px; default: sample-spacing).",
+)
 @click.option("--ratio", type=float, default=1 / 300, show_default=True, help="bp-to-pixel ratio.")
-@click.option("--font-size", type=int, default=11, show_default=True, help="Label/scale-bar text size.")
+@click.option(
+    "--font-size", type=int, default=11, show_default=True, help="Label/scale-bar text size."
+)
 @click.option("--min-length", type=int, default=None, help="Drop reads shorter than this (bp).")
 @click.option("--max-length", type=int, default=None, help="Drop reads longer than this (bp).")
-@click.option("--scale-bar-bp", type=int, default=None, help="Scale bar size in bp (default auto: 10kb/5kb).")
+@click.option(
+    "--scale-bar-bp", type=int, default=None, help="Scale bar size in bp (default auto: 10kb/5kb)."
+)
 @click.option(
     "--read-list",
     "read_list_path",
@@ -126,7 +153,9 @@ from karyoscope_analysis.core.legend_order import feature_sort_key
     help="Read-list column for a label tier as 'COLUMN[:DISPLAY]'; repeatable (group, then subgroup). "
     "Default: the first two columns.",
 )
-@click.option("--heatmap", is_flag=True, help="Draw a metadata heatmap above the reads (needs --read-list).")
+@click.option(
+    "--heatmap", is_flag=True, help="Draw a metadata heatmap above the reads (needs --read-list)."
+)
 @click.option(
     "--heatmap-track",
     "heatmap_tracks",
@@ -134,7 +163,12 @@ from karyoscope_analysis.core.legend_order import feature_sort_key
     help="Read-list column for a heatmap row as 'COLUMN[:DISPLAY]'; repeatable (implies --heatmap). "
     "Default: read-list columns after the label tiers.",
 )
-@click.option("--filter-group", "filter_groups", multiple=True, help="Keep only reads whose group is in these values.")
+@click.option(
+    "--filter-group",
+    "filter_groups",
+    multiple=True,
+    help="Keep only reads whose group is in these values.",
+)
 @click.option(
     "--markers",
     "markers_path",
@@ -142,7 +176,9 @@ from karyoscope_analysis.core.legend_order import feature_sort_key
     default=None,
     help="TSV (read_id, start, end) drawing left-pointing arrowheads at those bp positions.",
 )
-@click.option("--marker-scale", type=float, default=1.0, show_default=True, help="Arrowhead size factor.")
+@click.option(
+    "--marker-scale", type=float, default=1.0, show_default=True, help="Arrowhead size factor."
+)
 @click.pass_context
 def cmd(
     ctx: click.Context,
@@ -201,8 +237,11 @@ def cmd(
     rl = None
     if read_list_path is not None:
         rl = render.process_read_list(
-            reads, read_list_path, label_tier_specs=label_tiers,
-            heatmap_track_specs=heatmap_tracks, heatmap=heatmap or bool(heatmap_tracks),
+            reads,
+            read_list_path,
+            label_tier_specs=label_tiers,
+            heatmap_track_specs=heatmap_tracks,
+            heatmap=heatmap or bool(heatmap_tracks),
             filter_groups=filter_groups,
         )
         reads = rl.reads
@@ -247,8 +286,7 @@ def cmd(
         tier_display_names = {i: name for i, (_c, name) in enumerate(rl.tier_specs)}
 
     heatmap_colors = (
-        render.assign_heatmap_colors(rl.metadata_columns, rl.read_metadata)
-        if want_heatmap else {}
+        render.assign_heatmap_colors(rl.metadata_columns, rl.read_metadata) if want_heatmap else {}
     )
     markers = render.parse_markers(markers_path) if markers_path is not None else {}
     reads = render.sort_reads(reads, sample_order)
@@ -261,17 +299,30 @@ def cmd(
             legend_key = feature_sort_key(lpath)
 
     cfg = render.PlotConfig(
-        bar_width=bar_width, read_spacing=read_spacing, sample_spacing=sample_spacing,
-        subgroup_spacing=subgroup_spacing, ratio=ratio, background=background, font_size=font_size,
-        feature_mode=feature_mode, read_border=read_border, draw_scale_bar=scale_bar,
-        no_header=no_header, scale_bar_bp=scale_bar_bp, legend=legend,
-        label_tiers=label_tier_map, group_subgroup_order=group_subgroup_order,
-        tier_display_names=tier_display_names, group_boundaries=group_boundaries,
+        bar_width=bar_width,
+        read_spacing=read_spacing,
+        sample_spacing=sample_spacing,
+        subgroup_spacing=subgroup_spacing,
+        ratio=ratio,
+        background=background,
+        font_size=font_size,
+        feature_mode=feature_mode,
+        read_border=read_border,
+        draw_scale_bar=scale_bar,
+        no_header=no_header,
+        scale_bar_bp=scale_bar_bp,
+        legend=legend,
+        label_tiers=label_tier_map,
+        group_subgroup_order=group_subgroup_order,
+        tier_display_names=tier_display_names,
+        group_boundaries=group_boundaries,
         metadata_columns=rl.metadata_columns if want_heatmap else (),
         read_metadata=rl.read_metadata if want_heatmap else {},
         heatmap_colors=heatmap_colors,
         heatmap_display_names=dict(rl.heatmap_specs) if want_heatmap else {},
-        markers=markers, marker_scale=marker_scale, legend_sort_key=legend_key,
+        markers=markers,
+        marker_scale=marker_scale,
+        legend_sort_key=legend_key,
     )
     try:
         svg = render.render(reads, colors, cfg, sample_order, horizontal=horizontal)

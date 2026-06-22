@@ -72,7 +72,9 @@ def _read_tsv(path: Path) -> list[dict[str, str]]:
     is_flag=True,
     help="Include all (multi-read) clusters, not just the enriched ones.",
 )
-@click.option("--clamp", type=float, default=4.0, show_default=True, help="Color-scale limit (log2).")
+@click.option(
+    "--clamp", type=float, default=4.0, show_default=True, help="Color-scale limit (log2)."
+)
 @click.option(
     "--normalize-consensus",
     is_flag=True,
@@ -113,7 +115,7 @@ def cmd(
     if not enrichment:
         raise click.ClickException(f"no rows in {enrichment_path}")
     # Groups are the log2fc_<group> columns, in file order.
-    groups = [c[len("log2fc_"):] for c in enrichment[0] if c.startswith("log2fc_")]
+    groups = [c[len("log2fc_") :] for c in enrichment[0] if c.startswith("log2fc_")]
     if not groups:
         raise click.ClickException(f"{enrichment_path}: no 'log2fc_<group>' columns found")
 
@@ -140,9 +142,17 @@ def cmd(
             telomere = set(FeatureHierarchy.from_tsv(hpath).telomere_features)
 
     ep.render_heatmap(
-        rows, groups, str(output), clamp=clamp, dark_mode=dark,
-        consensus=consensus, colors=colors, sort_key=sort_key,
-        normalize_consensus=normalize_consensus, telomere=telomere, align_telomere=align_telomere,
+        rows,
+        groups,
+        str(output),
+        clamp=clamp,
+        dark_mode=dark,
+        consensus=consensus,
+        colors=colors,
+        sort_key=sort_key,
+        normalize_consensus=normalize_consensus,
+        telomere=telomere,
+        align_telomere=align_telomere,
     )
     extra = " + consensus" if consensus else ""
     click.echo(

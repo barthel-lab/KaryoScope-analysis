@@ -23,40 +23,71 @@ HIERARCHY_TSV = Path(__file__).resolve().parent / "data" / "hierarchy.tsv"
 CLUSTER6: dict[str, list[tuple[str, int]]] = {
     "b1cdc7e9": [("chr13:active_hor", 6857), ("chr19:active_hor", 92612)],
     "ce8fc11a": [
-        ("acrocentric:noncanonical_telomere", 120), ("chr13:noncanonical_telomere", 43),
-        ("chr13:active_hor", 2233), ("chr13:dhor", 910), ("chr13:active_hor", 14083),
-        ("acrocentric:active_hor", 527), ("chr13:active_hor", 6532),
+        ("acrocentric:noncanonical_telomere", 120),
+        ("chr13:noncanonical_telomere", 43),
+        ("chr13:active_hor", 2233),
+        ("chr13:dhor", 910),
+        ("chr13:active_hor", 14083),
+        ("acrocentric:active_hor", 527),
+        ("chr13:active_hor", 6532),
     ],
     "fa83bad4": [
-        ("chr13:active_hor", 5906), ("chr13:dhor", 7), ("chr13:active_hor", 15236),
-        ("chr13:dhor", 527), ("chr13:active_hor", 20699), ("chr19:active_hor", 3662),
+        ("chr13:active_hor", 5906),
+        ("chr13:dhor", 7),
+        ("chr13:active_hor", 15236),
+        ("chr13:dhor", 527),
+        ("chr13:active_hor", 20699),
+        ("chr19:active_hor", 3662),
     ],
     "r144772": [
-        ("chr11:q_arm", 2274), ("chr11:ct", 442), ("chr11:q_arm", 9786), ("chr11:gSat", 48),
-        ("chr11:TAR1", 1177), ("chr13:TAR1", 195), ("chr13:active_hor", 6220),
+        ("chr11:q_arm", 2274),
+        ("chr11:ct", 442),
+        ("chr11:q_arm", 9786),
+        ("chr11:gSat", 48),
+        ("chr11:TAR1", 1177),
+        ("chr13:TAR1", 195),
+        ("chr13:active_hor", 6220),
     ],
     "r221775": [
-        ("chr13:active_hor", 8449), ("chr13:TAR1", 6), ("chr11:TAR1", 1338),
-        ("chr11:gSat", 48), ("chr11:q_arm", 1800),
+        ("chr13:active_hor", 8449),
+        ("chr13:TAR1", 6),
+        ("chr11:TAR1", 1338),
+        ("chr11:gSat", 48),
+        ("chr11:q_arm", 1800),
     ],
     "r166594": [
-        ("chr13:active_hor", 7042), ("chr13:TAR1", 6), ("chr11:TAR1", 1343),
-        ("chr11:gSat", 48), ("chr11:q_arm", 7681),
+        ("chr13:active_hor", 7042),
+        ("chr13:TAR1", 6),
+        ("chr11:TAR1", 1343),
+        ("chr11:gSat", 48),
+        ("chr11:q_arm", 7681),
     ],
     "r212371": [
-        ("chr13:alpha_hor", 1), ("chr13:active_hor", 9834), ("chr13:alpha_hor", 19),
-        ("chr13:active_hor", 5591), ("chr13:TAR1", 6), ("chr11:TAR1", 1340),
-        ("chr11:gSat", 48), ("chr11:q_arm", 9808),
+        ("chr13:alpha_hor", 1),
+        ("chr13:active_hor", 9834),
+        ("chr13:alpha_hor", 19),
+        ("chr13:active_hor", 5591),
+        ("chr13:TAR1", 6),
+        ("chr11:TAR1", 1340),
+        ("chr11:gSat", 48),
+        ("chr11:q_arm", 9808),
     ],
     "r218256": [("chr19:active_hor", 9763), ("chr13:active_hor", 6845)],
     "r220268": [("chr19:active_hor", 5601), ("chr13:active_hor", 7232)],
     "r234684": [
-        ("chr13:dhor", 36), ("chr13:active_hor", 7988), ("chr13:TAR1", 72),
-        ("chr11:TAR1", 1265), ("chr11:gSat", 48), ("chr11:q_arm", 8008),
+        ("chr13:dhor", 36),
+        ("chr13:active_hor", 7988),
+        ("chr13:TAR1", 72),
+        ("chr11:TAR1", 1265),
+        ("chr11:gSat", 48),
+        ("chr11:q_arm", 8008),
     ],
     "r963850": [
-        ("chr11:q_arm", 7638), ("chr11:gSat", 48), ("chr11:TAR1", 1338),
-        ("chr13:TAR1", 6), ("chr13:active_hor", 6185),
+        ("chr11:q_arm", 7638),
+        ("chr11:gSat", 48),
+        ("chr11:TAR1", 1338),
+        ("chr13:TAR1", 6),
+        ("chr13:active_hor", 6185),
     ],
 }
 
@@ -69,8 +100,15 @@ SUB = chromosome_aware_substitution(_STRUCT, cross_chromosome_penalty=-2.0)
 # zero, so the big chr13 ``active_hor`` hub dominates the *score* — the flank that disambiguates
 # orientation contributes little, which is exactly what made the layout flip reads.
 WEIGHTS = {
-    "q_arm": 0.06, "p_arm": 0.06, "ct": 0.12, "active_hor": 0.42, "dhor": 0.42,
-    "alpha_hor": 0.42, "TAR1": 0.32, "gSat": 0.28, "noncanonical_telomere": 0.12,
+    "q_arm": 0.06,
+    "p_arm": 0.06,
+    "ct": 0.12,
+    "active_hor": 0.42,
+    "dhor": 0.42,
+    "alpha_hor": 0.42,
+    "TAR1": 0.32,
+    "gSat": 0.28,
+    "noncanonical_telomere": 0.12,
 }
 
 
@@ -89,13 +127,20 @@ def _layout_cluster6() -> asm.ClusterLayout:
     members = tuple(sorted(reads, key=lambda r: -sum(length for _f, length in reads[r])))
     seed = members[0]  # longest read (chr13-chr19)
     cluster = asm.Cluster(
-        members=members, seed=seed, size=len(members),
+        members=members,
+        seed=seed,
+        size=len(members),
         orientation_conflict=False,
     )
     neighbors = {r: [o for o in reads if o != r] for r in reads}  # all-vs-all within the cluster
     return asm.consensus_layout(
-        reads, cluster, neighbors=neighbors, sub_score=SUB, gap_factor=0.1,
-        structureless=frozenset({"arm", "p_arm", "q_arm", "ct"}), weight=WEIGHTS,  # arms/ct not landmarks
+        reads,
+        cluster,
+        neighbors=neighbors,
+        sub_score=SUB,
+        gap_factor=0.1,
+        structureless=frozenset({"arm", "p_arm", "q_arm", "ct"}),
+        weight=WEIGHTS,  # arms/ct not landmarks
     )
 
 
@@ -139,28 +184,57 @@ def test_cluster6_shared_junctions_align():
 # orientations with varying arm. The backbone here is the *structural* features, not chromosomes.
 CHR18 = {
     "a_fwd": [
-        ("chr18:p_arm", 30000), ("chr18:bSat", 7000), ("chr18:ITS", 600),
-        ("chr18:p_arm", 5000), ("chr18:TAR1", 2000), ("chr18:p_arm", 20000),
+        ("chr18:p_arm", 30000),
+        ("chr18:bSat", 7000),
+        ("chr18:ITS", 600),
+        ("chr18:p_arm", 5000),
+        ("chr18:TAR1", 2000),
+        ("chr18:p_arm", 20000),
     ],
     "b_fwd": [
-        ("chr18:p_arm", 18000), ("chr18:bSat", 7400), ("chr18:ITS", 590),
-        ("chr18:p_arm", 5000), ("chr18:TAR1", 1990), ("chr18:p_arm", 32000),
+        ("chr18:p_arm", 18000),
+        ("chr18:bSat", 7400),
+        ("chr18:ITS", 590),
+        ("chr18:p_arm", 5000),
+        ("chr18:TAR1", 1990),
+        ("chr18:p_arm", 32000),
     ],
     "c_rev": [  # same molecule, reversed: TAR1 ... bSat
-        ("chr18:p_arm", 20000), ("chr18:TAR1", 2000), ("chr18:p_arm", 5000),
-        ("chr18:ITS", 588), ("chr18:bSat", 7400),
+        ("chr18:p_arm", 20000),
+        ("chr18:TAR1", 2000),
+        ("chr18:p_arm", 5000),
+        ("chr18:ITS", 588),
+        ("chr18:bSat", 7400),
     ],
     "d_rev": [
-        ("chr18:p_arm", 19000), ("chr18:TAR1", 1880), ("chr18:p_arm", 4800),
-        ("chr18:ITS", 593), ("chr18:bSat", 3860),
+        ("chr18:p_arm", 19000),
+        ("chr18:TAR1", 1880),
+        ("chr18:p_arm", 4800),
+        ("chr18:ITS", 593),
+        ("chr18:bSat", 3860),
     ],
     # reads lacking TAR1 (the user's misaligned ones): only bSat + ITS. They share the bSat->ITS
     # junction with the others and must align there, not drift because they have no TAR1.
-    "e_noTAR1": [("chr18:p_arm", 25000), ("chr18:bSat", 7200), ("chr18:ITS", 595), ("chr18:p_arm", 3000)],
-    "f_noTAR1": [("chr18:p_arm", 22000), ("chr18:bSat", 3000), ("chr18:ITS", 590), ("chr18:p_arm", 8000)],
+    "e_noTAR1": [
+        ("chr18:p_arm", 25000),
+        ("chr18:bSat", 7200),
+        ("chr18:ITS", 595),
+        ("chr18:p_arm", 3000),
+    ],
+    "f_noTAR1": [
+        ("chr18:p_arm", 22000),
+        ("chr18:bSat", 3000),
+        ("chr18:ITS", 590),
+        ("chr18:p_arm", 8000),
+    ],
     # a read lacking the *proximal* bSat (only ITS + TAR1): no adjacent bSat->ITS junction, so it
     # must still pin its ITS to the ITS slot rather than drifting via the distal TAR1.
-    "g_noBSAT": [("chr18:p_arm", 24000), ("chr18:ITS", 588), ("chr18:p_arm", 5000), ("chr18:TAR1", 1990)],
+    "g_noBSAT": [
+        ("chr18:p_arm", 24000),
+        ("chr18:ITS", 588),
+        ("chr18:p_arm", 5000),
+        ("chr18:TAR1", 1990),
+    ],
 }
 
 
@@ -169,7 +243,9 @@ def _layout_chr18() -> asm.ClusterLayout:
     reads = {rid: list(segs) for rid, segs in CHR18.items()}
     members = tuple(sorted(reads, key=lambda r: -sum(length for _f, length in reads[r])))
     cluster = asm.Cluster(
-        members=members, seed=members[0], size=len(members),
+        members=members,
+        seed=members[0],
+        size=len(members),
         orientation_conflict=False,
     )
     neighbors = {r: [o for o in reads if o != r] for r in reads}
@@ -232,12 +308,18 @@ def test_acrocentric_chromosomes_collapse_in_backbone():
     }
     members = tuple(sorted(reads, key=lambda r: -sum(length for _f, length in reads[r])))
     cluster = asm.Cluster(
-        members=members, seed=members[0], size=len(members),
+        members=members,
+        seed=members[0],
+        size=len(members),
         orientation_conflict=False,
     )
     neighbors = {r: [o for o in reads if o != r] for r in reads}
     layout = asm.consensus_layout(
-        reads, cluster, neighbors=neighbors, sub_score=SUB, gap_factor=0.1,
+        reads,
+        cluster,
+        neighbors=neighbors,
+        sub_score=SUB,
+        gap_factor=0.1,
         acrocentric_chromosomes=acro,
     )
     # the chr4->acrocentric junction (chr4:bSat end / acrocentric:TAR1 start) lands at one coordinate
@@ -274,30 +356,52 @@ def test_translocation_chromosomes_distinguishes_clean_from_chimeric():
     # chr4 arm, then a telomere (chr2), then an acrocentric centromere: the telomere run sits between
     # the two big chromosomes, so they're not consecutive -> a chr4-end-then-acrocentric structure,
     # not a fusion -> structural backbone
-    telo = {f"v{i}": [("chr4:q_arm", 7000), ("chr2:canonical_telomere", 700), ("chr14:cenSat", 6000)]
-            for i in range(3)}
+    telo = {
+        f"v{i}": [("chr4:q_arm", 7000), ("chr2:canonical_telomere", 700), ("chr14:cenSat", 6000)]
+        for i in range(3)
+    }
     assert asm._translocation_chromosomes(telo, list(telo), frozenset({"chr14"}), bp) == set()
     # satellite slivers (a bSat array mis-assigned across chromosomes) never reach JUNCTION_PARTNER_BP
-    slivers = {f"x{i}": [("chr18:bSat", 5500), ("chr22:bSat", 400), ("chr4:bSat", 350)] for i in range(3)}
+    slivers = {
+        f"x{i}": [("chr18:bSat", 5500), ("chr22:bSat", 400), ("chr4:bSat", 350)] for i in range(3)
+    }
     assert asm._translocation_chromosomes(slivers, list(slivers), acro, bp) == set()
     # a "hub" chimera: every read carries the chr19->chr8 junction (a recurring pair) BUT also threads
     # many other substantial chromosomes (a noisy centromeric-satellite read) -> not a *simple*
     # translocation, so it falls back to the structural backbone (HeLa cluster_12).
-    hub = {f"h{i}": [("chr5:bSat", 2000), ("chr6:bSat", 2000), ("chr12:bSat", 2000),
-                     ("chr19:active_hor", 4000), ("chr8:q_arm", 20000)] for i in range(4)}
+    hub = {
+        f"h{i}": [
+            ("chr5:bSat", 2000),
+            ("chr6:bSat", 2000),
+            ("chr12:bSat", 2000),
+            ("chr19:active_hor", 4000),
+            ("chr8:q_arm", 20000),
+        ]
+        for i in range(4)
+    }
     assert asm._translocation_chromosomes(hub, list(hub), acro, bp) == set()
     # but one off-target recurring chromosome is allowed (a real 3-way fusion whose third junction
     # falls just under the half-of-reads bar): chr11-chr13 in all reads, chr13-chr19 in fewer
-    threeway = {f"a{i}": [("chr11:q_arm", 9000), ("chr13:active_hor", 8000), ("chr19:active_hor", 6000)]
-                for i in range(3)}
+    threeway = {
+        f"a{i}": [("chr11:q_arm", 9000), ("chr13:active_hor", 8000), ("chr19:active_hor", 6000)]
+        for i in range(3)
+    }
     threeway["a0"] = [("chr11:q_arm", 9000), ("chr13:active_hor", 8000)]  # this one lacks chr19
     assert asm._translocation_chromosomes(threeway, list(threeway), acro, bp) >= {"chr11", "chr13"}
     # a fuzzy junction: chr7 is a big arm but meets chr4 only through a thin telomere->TAR1
     # subtelomere. chr4's *run* clears JUNCTION_PARTNER_BP (TAR1 900 + ct 400 = 1300), but its
     # largest single feature block is a 900 bp TAR1 (a satellite, not an arm). The size test is on the
     # largest block, so chr4 isn't a translocation partner -> structural backbone (U2OS cluster_34).
-    fuzzy = {f"f{i}": [("chr7:p_arm", 30000), ("chr7:ct", 16000), ("chr7:noncanonical_telomere", 1300),
-                       ("chr4:TAR1", 900), ("chr4:ct", 400)] for i in range(3)}
+    fuzzy = {
+        f"f{i}": [
+            ("chr7:p_arm", 30000),
+            ("chr7:ct", 16000),
+            ("chr7:noncanonical_telomere", 1300),
+            ("chr4:TAR1", 900),
+            ("chr4:ct", 400),
+        ]
+        for i in range(3)
+    }
     assert asm._translocation_chromosomes(fuzzy, list(fuzzy), acro, bp) == set()
     # but the same chr7 meeting a real chr4 *arm* is a translocation (largest blocks are both arms)
     armfusion = {f"k{i}": [("chr7:p_arm", 30000), ("chr4:q_arm", 9000)] for i in range(3)}
@@ -314,12 +418,18 @@ def test_anchors_on_filler_breakpoint_for_a_variable_length_feature():
     }
     members = tuple(sorted(reads, key=lambda r: -sum(length for _f, length in reads[r])))
     cluster = asm.Cluster(
-        members=members, seed=members[0], size=len(members),
+        members=members,
+        seed=members[0],
+        size=len(members),
         orientation_conflict=False,
     )
     neighbors = {r: [o for o in reads if o != r] for r in reads}
     layout = asm.consensus_layout(
-        reads, cluster, neighbors=neighbors, sub_score=SUB, gap_factor=0.1,
+        reads,
+        cluster,
+        neighbors=neighbors,
+        sub_score=SUB,
+        gap_factor=0.1,
         structureless=frozenset({"arm", "p_arm", "q_arm", "ct"}),
     )
     ends = []  # the bSat -> q_arm boundary (bSat end) should land at one coordinate
@@ -334,11 +444,13 @@ def test_anchors_on_filler_breakpoint_for_a_variable_length_feature():
 
 def _orient_only(reads, rank, seed, min_bp=150):
     """Helper: run _orient_reads with a chromosome-stripped landmark fn (telomere collapsed)."""
+
     def landmark_of(feature):
         s = feature.split(":", 1)[1] if ":" in feature else feature
         if s in {"p_arm", "q_arm", "arm", "ct"}:
             return None
         return "telomere" if s in {"canonical_telomere", "noncanonical_telomere"} else s
+
     return asm._orient_reads(reads, list(reads), seed, rank, landmark_of, min_bp, SUB, 0.1)
 
 
@@ -355,9 +467,20 @@ def test_orientation_ignores_rare_distal_tail():
         "core1": [("c:bSat", 1000), ("c:ITS", 1000), ("c:TAR1", 1000)],
         "core2": [("c:bSat", 1000), ("c:ITS", 1000), ("c:TAR1", 1000)],
         "core3": [("c:TAR1", 1000), ("c:ITS", 1000), ("c:bSat", 1000)],  # reverse-orientation core
-        "tail1": [("c:bSat", 1000), ("c:ITS", 1000), ("c:TAR1", 1000), ("c:ITS", 1000),
-                  ("c:TAR1", 1000), ("c:canonical_telomere", 1000)],  # telomere in <half the reads
-        "tail2": [("c:bSat", 1000), ("c:ITS", 1000), ("c:TAR1", 1000), ("c:canonical_telomere", 1000)],
+        "tail1": [
+            ("c:bSat", 1000),
+            ("c:ITS", 1000),
+            ("c:TAR1", 1000),
+            ("c:ITS", 1000),
+            ("c:TAR1", 1000),
+            ("c:canonical_telomere", 1000),
+        ],  # telomere in <half the reads
+        "tail2": [
+            ("c:bSat", 1000),
+            ("c:ITS", 1000),
+            ("c:TAR1", 1000),
+            ("c:canonical_telomere", 1000),
+        ],
     }
     orient = _orient_only(reads, rank, "core1")
     assert orient["tail1"] == orient["core1"], orient
@@ -380,8 +503,14 @@ def test_orientation_by_conserved_junction_ignores_isolated_repeat():
         "bulk2": [("c:q_arm", 9000), ("c:TAR1", 1780), ("c:ITS", 300)],
         "bulk3": [("c:ITS", 297), ("c:TAR1", 1785), ("c:q_arm", 9000)],  # reverse
         # seed: TAR1->ITS (gap 0), then 169 kb of arm, then an isolated TAR1 beside a telomere
-        "seed": [("c:q_arm", 80000), ("c:TAR1", 1785), ("c:ITS", 297), ("c:q_arm", 169000),
-                 ("c:TAR1", 1652), ("c:noncanonical_telomere", 800)],
+        "seed": [
+            ("c:q_arm", 80000),
+            ("c:TAR1", 1785),
+            ("c:ITS", 297),
+            ("c:q_arm", 169000),
+            ("c:TAR1", 1652),
+            ("c:noncanonical_telomere", 800),
+        ],
     }
     orient = _orient_only(reads, rank, "seed")
     # the seed's TAR1->ITS must read the same direction as the bulk's TAR1->ITS
@@ -449,8 +578,10 @@ def test_refine_snaps_minority_register_to_majority():
     ~20 kb off (they anchored on a feature the majority don't share). Their features overlap their own
     minority register's consensus blocks exactly as much (by length) as the majority's, so weighting
     concordance by consensus *support* is what pulls them onto the majority register."""
+
     def seg():
         return [("c:ITS", 1000), ("c:p_arm", 12000), ("c:TAR1", 1000)]
+
     oriented = {f"m{i}": seg() for i in range(4)}
     oriented.update({f"o{i}": seg() for i in range(2)})
     placed = {}
@@ -475,12 +606,20 @@ def test_telomere_subtypes_collapse_to_one_backbone_landmark():
     # arm → TAR1 → telomere; reads vary in which telomere subtype directly abuts TAR1 and how much
     # telomere they captured. The TAR1 → telomere boundary must land at one coordinate.
     reads = {
-        "a": [("chr1:p_arm", 20000), ("chr1:TAR1", 2200), ("chr1:noncanonical_telomere", 500),
-              ("chr1:canonical_telomere", 900)],
+        "a": [
+            ("chr1:p_arm", 20000),
+            ("chr1:TAR1", 2200),
+            ("chr1:noncanonical_telomere", 500),
+            ("chr1:canonical_telomere", 900),
+        ],
         "b": [("chr1:p_arm", 17000), ("chr1:TAR1", 2100), ("chr1:canonical_telomere", 1200)],
         "c": [("chr1:p_arm", 24000), ("chr1:TAR1", 2300), ("chr1:noncanonical_telomere", 1100)],
-        "d": [("chr1:p_arm", 15000), ("chr1:TAR1", 2150), ("chr1:noncanonical_telomere", 400),
-              ("chr1:canonical_telomere", 700)],
+        "d": [
+            ("chr1:p_arm", 15000),
+            ("chr1:TAR1", 2150),
+            ("chr1:noncanonical_telomere", 400),
+            ("chr1:canonical_telomere", 700),
+        ],
     }
     members = tuple(sorted(reads, key=lambda r: -sum(length for _f, length in reads[r])))
     cluster = asm.Cluster(
@@ -488,8 +627,13 @@ def test_telomere_subtypes_collapse_to_one_backbone_landmark():
     )
     neighbors = {r: [o for o in reads if o != r] for r in reads}
     layout = asm.consensus_layout(
-        reads, cluster, neighbors=neighbors, sub_score=SUB, gap_factor=0.1,
-        filler=filler, structureless=structureless,
+        reads,
+        cluster,
+        neighbors=neighbors,
+        sub_score=SUB,
+        gap_factor=0.1,
+        filler=filler,
+        structureless=structureless,
     )
     ends = []  # the TAR1 -> telomere boundary (TAR1 end) should land at one coordinate
     for read in layout.placed:
@@ -520,17 +664,26 @@ def test_small_distinctive_feature_orients_reads():
     }
     members = tuple(sorted(reads, key=lambda r: -sum(length for _f, length in reads[r])))
     cluster = asm.Cluster(
-        members=members, seed=members[0], size=len(members),
+        members=members,
+        seed=members[0],
+        size=len(members),
         orientation_conflict=False,
     )
     neighbors = {r: [o for o in reads if o != r] for r in reads}
     layout = asm.consensus_layout(
-        reads, cluster, neighbors=neighbors, sub_score=SUB, gap_factor=0.1,
-        structureless=frozenset({"q_arm", "ct"}), weight=weights,
+        reads,
+        cluster,
+        neighbors=neighbors,
+        sub_score=SUB,
+        gap_factor=0.1,
+        structureless=frozenset({"q_arm", "ct"}),
+        weight=weights,
     )
     sides = set()
     for read in layout.placed:
         its, tar1 = _first_start(read, "ITS"), _first_start(read, "TAR1")
         assert its is not None and tar1 is not None
         sides.add(its < tar1)
-    assert len(sides) == 1, "ITS lands on inconsistent sides of TAR1 -> orientation not driven by it"
+    assert len(sides) == 1, (
+        "ITS lands on inconsistent sides of TAR1 -> orientation not driven by it"
+    )

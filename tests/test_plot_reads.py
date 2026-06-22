@@ -158,8 +158,18 @@ def test_plot_reads_cli_vertical(cli_runner, tmp_path: Path):
     out = tmp_path / "out.svg"
     res = cli_runner.invoke(
         main,
-        ["plot-reads", "--bed", f"HeLa:{bed}", "--colors", str(COLORS_TSV),
-         "--orient", "telomere", "--legend", "-o", str(out)],
+        [
+            "plot-reads",
+            "--bed",
+            f"HeLa:{bed}",
+            "--colors",
+            str(COLORS_TSV),
+            "--orient",
+            "telomere",
+            "--legend",
+            "-o",
+            str(out),
+        ],
     )
     assert res.exit_code == 0, res.output
     assert out.exists()
@@ -172,8 +182,17 @@ def test_plot_reads_cli_length_filter_errors(cli_runner, tmp_path: Path):
     out = tmp_path / "out.svg"
     res = cli_runner.invoke(
         main,
-        ["plot-reads", "--bed", f"HeLa:{bed}", "--colors", str(COLORS_TSV),
-         "--min-length", "999999999", "-o", str(out)],
+        [
+            "plot-reads",
+            "--bed",
+            f"HeLa:{bed}",
+            "--colors",
+            str(COLORS_TSV),
+            "--min-length",
+            "999999999",
+            "-o",
+            str(out),
+        ],
     )
     assert res.exit_code != 0
     assert "no reads to plot" in res.output
@@ -252,7 +271,9 @@ def test_parse_markers(tmp_path: Path):
 def test_render_with_heatmap_and_grouping_well_formed():
     reads = [
         pr.Read("Tumor — A", "r1", 40000, [(0, 5000, "canonical_telomere"), (5000, 40000, "aSat")]),
-        pr.Read("Normal — A", "r3", 18000, [(0, 2000, "canonical_telomere"), (2000, 18000, "bSat")]),
+        pr.Read(
+            "Normal — A", "r3", 18000, [(0, 2000, "canonical_telomere"), (2000, 18000, "bSat")]
+        ),
     ]
     order = ["Tumor — A", "Normal — A"]
     cfg = pr.PlotConfig(
@@ -278,8 +299,16 @@ def test_plot_reads_cli_heatmap_requires_read_list(cli_runner, tmp_path: Path):
     _write_bed(bed)
     res = cli_runner.invoke(
         main,
-        ["plot-reads", "--bed", f"S:{bed}", "--colors", str(COLORS_TSV), "--heatmap",
-         "-o", str(tmp_path / "out.svg")],
+        [
+            "plot-reads",
+            "--bed",
+            f"S:{bed}",
+            "--colors",
+            str(COLORS_TSV),
+            "--heatmap",
+            "-o",
+            str(tmp_path / "out.svg"),
+        ],
     )
     assert res.exit_code != 0
     assert "require --read-list" in res.output
@@ -294,8 +323,19 @@ def test_plot_reads_cli_preset_telogator_applies_orientation(cli_runner, tmp_pat
     out = tmp_path / "out.svg"
     res = cli_runner.invoke(
         main,
-        ["plot-reads", "--bed", f"S:{bed}", "--colors", str(COLORS_TSV),
-         "--preset", "telogator", "--format", "svg", "-o", str(out)],
+        [
+            "plot-reads",
+            "--bed",
+            f"S:{bed}",
+            "--colors",
+            str(COLORS_TSV),
+            "--preset",
+            "telogator",
+            "--format",
+            "svg",
+            "-o",
+            str(out),
+        ],
     )
     assert res.exit_code == 0, res.output
     assert out.exists()  # SVG written; orientation applied without error
@@ -308,8 +348,18 @@ def test_plot_reads_cli_png(cli_runner, tmp_path: Path):
     _write_bed(bed)
     out = tmp_path / "out.png"
     res = cli_runner.invoke(
-        main, ["plot-reads", "--bed", f"S:{bed}", "--colors", str(COLORS_TSV), "--format", "png",
-               "-o", str(out)]
+        main,
+        [
+            "plot-reads",
+            "--bed",
+            f"S:{bed}",
+            "--colors",
+            str(COLORS_TSV),
+            "--format",
+            "png",
+            "-o",
+            str(out),
+        ],
     )
     if is_rsvg_convert_available():
         assert res.exit_code == 0, res.output
@@ -334,9 +384,22 @@ def test_plot_reads_cli_grouping_heatmap_markers(cli_runner, tmp_path: Path):
     out = tmp_path / "out.svg"
     res = cli_runner.invoke(
         main,
-        ["plot-reads", "--bed", f"S:{bed}", "--colors", str(COLORS_TSV),
-         "--read-list", str(rl), "--heatmap-track", "condition:Condition",
-         "--markers", str(markers), "--legend", "-o", str(out)],
+        [
+            "plot-reads",
+            "--bed",
+            f"S:{bed}",
+            "--colors",
+            str(COLORS_TSV),
+            "--read-list",
+            str(rl),
+            "--heatmap-track",
+            "condition:Condition",
+            "--markers",
+            str(markers),
+            "--legend",
+            "-o",
+            str(out),
+        ],
     )
     assert res.exit_code == 0, res.output
     svg = out.read_text()

@@ -34,7 +34,11 @@ def test_label_subtelomere_one_end_and_type_ii_alt():
 
 
 def test_label_interstitial_telomere():
-    segs = [(0, 4000, "chr7:q_arm"), (4000, 5000, "chr7:canonical_telomere"), (5000, 10000, "chr7:q_arm")]
+    segs = [
+        (0, 4000, "chr7:q_arm"),
+        (4000, 5000, "chr7:canonical_telomere"),
+        (5000, 10000, "chr7:q_arm"),
+    ]
     assert ca.label_cluster(segs, _h(), ca.LabelConfig()) == "interstitial telomere"
 
 
@@ -80,8 +84,17 @@ def test_cluster_annotate_cli(cli_runner, tmp_path: Path):
     out = tmp_path / "annot.tsv"
     res = cli_runner.invoke(
         main,
-        ["cluster-annotate", "--clusters", str(clusters), "--consensus", str(consensus),
-         "--hierarchy", str(HIERARCHY_TSV), "-o", str(out)],
+        [
+            "cluster-annotate",
+            "--clusters",
+            str(clusters),
+            "--consensus",
+            str(consensus),
+            "--hierarchy",
+            str(HIERARCHY_TSV),
+            "-o",
+            str(out),
+        ],
     )
     assert res.exit_code == 0, res.output
     lines = out.read_text().splitlines()

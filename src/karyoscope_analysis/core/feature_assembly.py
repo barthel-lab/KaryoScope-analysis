@@ -315,7 +315,10 @@ def _edge_for_pair(
     identity = aln.score / (params.match_score * weighted_bp) if weighted_bp else 0.0
     if identity < params.min_identity:
         return None
-    if params.require_transition and _overlap_transitions(aln.columns, a, b_used, MIN_STRETCH_BP) < 1:
+    if (
+        params.require_transition
+        and _overlap_transitions(aln.columns, a, b_used, MIN_STRETCH_BP) < 1
+    ):
         return None  # overlap is a single uniform stretch (no shared junction) -> not confident
     return OverlapEdge(ids[ai], ids[bi], aln.score, identity, weighted_bp, kind, aln.reversed_b)
 
@@ -379,13 +382,17 @@ def build_overlap_graph(
     scorer = _memoized(_weighted_sub_score(sub_score, weight))
     ids = sorted(reads)
     params = _EdgeParams(
-        gap_factor, match_score, min_overlap_bp, min_identity, min_jaccard,
-        distinctive_weight, filler_features, require_transition,
+        gap_factor,
+        match_score,
+        min_overlap_bp,
+        min_identity,
+        min_jaccard,
+        distinctive_weight,
+        filler_features,
+        require_transition,
     )
     pair_iter = (
-        _candidate_pairs(ids, reads, block_min_bp)
-        if block_min_bp > 0.0
-        else _all_pairs(len(ids))
+        _candidate_pairs(ids, reads, block_min_bp) if block_min_bp > 0.0 else _all_pairs(len(ids))
     )
 
     if workers and workers > 1:  # align candidate pairs across processes (fork: shared state)
@@ -549,7 +556,9 @@ def cluster_reads(
     clusters: list[Cluster] = []
     for members in groups.values():
         seed = max(members, key=lambda r: (total_bp(r), r))
-        seed_root, _ = dsu.find(seed)  # the parity DSU still flags inconsistent-orientation components
+        seed_root, _ = dsu.find(
+            seed
+        )  # the parity DSU still flags inconsistent-orientation components
         ordered = tuple(sorted(members, key=lambda r: (-total_bp(r), r)))
         clusters.append(
             Cluster(
@@ -648,8 +657,11 @@ def _union_consensus(placed: Sequence[LaidOutRead], width: int) -> tuple[Consens
         if out and out[-1].feature == feature and out[-1].end == nxt.start:  # coalesce
             prev = out[-1]
             out[-1] = ConsensusPosition(
-                prev.start, nxt.end, feature,
-                max(prev.support, nxt.support), max(prev.coverage, nxt.coverage),
+                prev.start,
+                nxt.end,
+                feature,
+                max(prev.support, nxt.support),
+                max(prev.coverage, nxt.coverage),
             )
         else:
             out.append(nxt)
@@ -701,7 +713,9 @@ def _refine_by_concordance(
             for k, (feature, _length) in enumerate(oriented):
                 token = landmark_of(feature)
                 if token is not None:
-                    segs.append((bounds[k], bounds[k + 1], token, weight.get(_structural(feature), 1.0)))
+                    segs.append(
+                        (bounds[k], bounds[k + 1], token, weight.get(_structural(feature), 1.0))
+                    )
             per_read[r] = segs
         cuts = sorted({round(c) for r in members for s, e, *_ in per_read[r] for c in (s, e)})
         if len(cuts) < 2:
@@ -710,7 +724,9 @@ def _refine_by_concordance(
         cells_of: dict[str, list[tuple[int, str]]] = {r: [] for r in members}
         for r in members:
             for s, e, t, _w in per_read[r]:
-                for k in range(bisect.bisect_left(cuts, round(s)), bisect.bisect_left(cuts, round(e))):
+                for k in range(
+                    bisect.bisect_left(cuts, round(s)), bisect.bisect_left(cuts, round(e))
+                ):
                     votes[k][t] += 1
                     cells_of[r].append((k, t))
         full_token = [cell_token(ctr) for ctr in votes]
@@ -905,7 +921,8 @@ def _translocation_chromosomes(
         for (ca, _sa, ea, big_a), (cb, sb, _eb, big_b) in pairwise(real):
             if (
                 ca != cb
-                and min(big_a, big_b) >= JUNCTION_PARTNER_BP  # both have a real block (not a sliver)
+                and min(big_a, big_b)
+                >= JUNCTION_PARTNER_BP  # both have a real block (not a sliver)
                 and max(big_a, big_b) >= min_block_bp  # one is a clear arm/centromere
                 and sb - ea < ADJACENT_GAP_BP
             ):
@@ -1057,8 +1074,11 @@ def _orient_reads(
 
         def run_score(run: list[tuple[str, float, float]]) -> int:
             return max(
-                (junction_reads[frozenset((a[0], b[0]))]
-                 for a, b in pairwise(run) if a[0] != b[0] and a[0] in core and b[0] in core),
+                (
+                    junction_reads[frozenset((a[0], b[0]))]
+                    for a, b in pairwise(run)
+                    if a[0] != b[0] and a[0] in core and b[0] in core
+                ),
                 default=0,
             )
 
@@ -1071,9 +1091,13 @@ def _orient_reads(
         ranks = [rank[t] for t, _s, _e in blocks[r] if t in core]  # core landmarks across the read
         if len({*ranks}) < 2 or ranks[0] == ranks[-1]:  # indecisive (a core landmark at both ends)
             ranks = conserved_run_core(blocks[r])  # -> the run holding the most-conserved junction
-        if len({*ranks}) < 2 or ranks[0] == ranks[-1]:  # still indecisive -> all of the read's landmarks
+        if (
+            len({*ranks}) < 2 or ranks[0] == ranks[-1]
+        ):  # still indecisive -> all of the read's landmarks
             ranks = [rank[t] for t, _s, _e in blocks[r] if t in rank]
-        if len({*ranks}) >= 2 and ranks[0] != ranks[-1]:  # decisive end-to-end order -> orient by it
+        if (
+            len({*ranks}) >= 2 and ranks[0] != ranks[-1]
+        ):  # decisive end-to-end order -> orient by it
             orient[r] = ranks[-1] < ranks[0]
         else:
             undetermined.append(r)
@@ -1094,7 +1118,9 @@ def _orient_reads(
             reverse_segments(reads[r]), ref_oriented, sub_score=scorer, gap_factor=gap_factor
         )
         orient[r] = rev.score > fwd.score
-    if orient.get(seed):  # frame the cluster so the seed is unflipped (a global, relative-preserving flip)
+    if orient.get(
+        seed
+    ):  # frame the cluster so the seed is unflipped (a global, relative-preserving flip)
         orient = {r: not flipped for r, flipped in orient.items()}
     return orient
 
@@ -1372,14 +1398,14 @@ def consensus_layout(
     # Refine: slide each read to maximize feature concordance with the consensus, fixing reads the
     # backbone anchor pinned on the wrong junction (the alignment, done directly rather than by proxy).
     if len(members) >= 2:
-        placed = _refine_by_concordance(
-            placed, oriented_segs, members, landmark_of, weight or {}
-        )
+        placed = _refine_by_concordance(placed, oriented_segs, members, landmark_of, weight or {})
 
     raw: list[tuple[str, bool, bool, list[Interval]]] = []
     for rid in cluster.members:
         oriented, bounds = oriented_segs[rid], placed[rid]
-        segs = [(round(bounds[k]), round(bounds[k + 1]), oriented[k][0]) for k in range(len(oriented))]
+        segs = [
+            (round(bounds[k]), round(bounds[k + 1]), oriented[k][0]) for k in range(len(oriented))
+        ]
         raw.append((rid, rid == seed, orient[rid], segs))
     # order reads top-to-bottom by where they start in the consensus (leftmost first), id-tiebroken
     raw.sort(key=lambda row: (min((s for s, _e, _f in row[3]), default=0), row[0]))

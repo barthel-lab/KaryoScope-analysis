@@ -60,6 +60,7 @@ def validate_feature_colors(reads: Sequence[Read], colors: Mapping[str, str]) ->
             + ", ".join(unknown)
         )
 
+
 Feature = tuple[int, int, str]  # (start, end, feature_name)
 
 
@@ -134,8 +135,12 @@ class PlotConfig:
         n = len(self.metadata_columns)
         if not (self.has_heatmap and n):
             return 0
-        return (n * self.bar_width + (n - 1) * self.heatmap_row_gap
-                + self.heatmap_top_gap + self.heatmap_bottom_gap)
+        return (
+            n * self.bar_width
+            + (n - 1) * self.heatmap_row_gap
+            + self.heatmap_top_gap
+            + self.heatmap_bottom_gap
+        )
 
     @property
     def tier_offset(self) -> int:
@@ -150,6 +155,7 @@ class PlotConfig:
 
 
 # --------------------------------------------------------------------------- loading
+
 
 def parse_bed_file(bed_path: str | Path, sample: str) -> list[Read]:
     """Parse a per-read feature BED (``read_id  start  end  feature``) into reads."""
@@ -194,6 +200,7 @@ def sort_reads(reads: Sequence[Read], sample_order: Sequence[str]) -> list[Read]
 
 # ----------------------------------------------------- read-list, grouping, heatmap, markers
 
+
 def _composite_label(group: str, subgroup: str | None) -> str:
     """Composite sample label for a (group, subgroup) pair: ``group — subgroup`` or ``group``."""
     return f"{group} — {subgroup}" if subgroup else group
@@ -226,8 +233,10 @@ def load_read_list(path: str | Path) -> tuple[set[str], list[str], dict, list[tu
                 continue
             read_ids.add(rid)
             if columns and len(fields) > 1:
-                meta = {c: (fields[1 + i] if 1 + i < len(fields) and fields[1 + i] else None)
-                        for i, c in enumerate(columns)}
+                meta = {
+                    c: (fields[1 + i] if 1 + i < len(fields) and fields[1 + i] else None)
+                    for i, c in enumerate(columns)
+                }
                 read_data[rid] = meta
                 read_rows.append((rid, meta))
     return read_ids, columns, read_data, read_rows
@@ -285,7 +294,8 @@ def apply_grouping(
     sample_order = [_composite_label(g, s) for g, s in group_subgroup_order]
     relabeled = [
         Read(_composite_label(*read_groups[r.read_id]), r.read_id, r.length, r.features)
-        if r.read_id in read_groups else r
+        if r.read_id in read_groups
+        else r
         for r in reads
     ]
     boundaries = {
@@ -450,11 +460,19 @@ def process_read_list(
     read_metadata = {
         rid: {c: read_data.get(rid, {}).get(c) for c in metadata_columns} for rid in read_ids
     }
-    return ReadListData(kept, read_groups, group_subgroup_order, metadata_columns,
-                        read_metadata, tier_specs, heatmap_specs)
+    return ReadListData(
+        kept,
+        read_groups,
+        group_subgroup_order,
+        metadata_columns,
+        read_metadata,
+        tier_specs,
+        heatmap_specs,
+    )
 
 
 # --------------------------------------------------------------------------- orientation
+
 
 def _flip(read: Read) -> Read:
     flipped = sorted(
@@ -493,6 +511,7 @@ def orient_reads(
 
 # --------------------------------------------------------------------------- rasterization
 
+
 def _colored_features(
     features: Sequence[Feature], colors: Mapping[str, str], min_width_exclude: Sequence[str]
 ) -> list[tuple[int, int, str, float, bool]]:
@@ -518,8 +537,17 @@ def _read_runs(read: Read, colors: Mapping[str, str], cfg: PlotConfig):
 LegendItem = namedtuple("LegendItem", ["x", "y", "label", "color", "is_header"])
 LegendLayout = namedtuple(
     "LegendLayout",
-    ["items", "width", "height", "col_width", "cols", "swatch_size", "font_size",
-     "row_height", "item_padding"],
+    [
+        "items",
+        "width",
+        "height",
+        "col_width",
+        "cols",
+        "swatch_size",
+        "font_size",
+        "row_height",
+        "item_padding",
+    ],
 )
 
 
@@ -624,36 +652,61 @@ def compute_legend_layout(
             row = 0
             num_cols = max(num_cols, col + 1)
         if header:
-            positioned.append(LegendItem(
-                padding + col * (col_width + col_gap), padding + row * row_height,
-                header, None, True,
-            ))
+            positioned.append(
+                LegendItem(
+                    padding + col * (col_width + col_gap),
+                    padding + row * row_height,
+                    header,
+                    None,
+                    True,
+                )
+            )
             row += 1
         for display, color_hex in items:
             if row >= num_rows and col + 1 < num_cols:
                 col += 1
                 row = 0
-            positioned.append(LegendItem(
-                padding + col * (col_width + col_gap), padding + row * row_height,
-                display, color_hex, False,
-            ))
+            positioned.append(
+                LegendItem(
+                    padding + col * (col_width + col_gap),
+                    padding + row * row_height,
+                    display,
+                    color_hex,
+                    False,
+                )
+            )
             row += 1
 
     max_x = max(it.x for it in positioned) + col_width
     max_y = max(it.y for it in positioned) + row_height
     actual_cols = (max(it.x for it in positioned) - padding) // (col_width + col_gap) + 1
-    return LegendLayout(positioned, int(max_x + padding), int(max_y + padding), col_width,
-                        int(actual_cols), swatch_size, font_size, row_height, item_padding)
+    return LegendLayout(
+        positioned,
+        int(max_x + padding),
+        int(max_y + padding),
+        col_width,
+        int(actual_cols),
+        swatch_size,
+        font_size,
+        row_height,
+        item_padding,
+    )
 
 
 def _draw_legend(
-    d: draw.Drawing, features_used: set[str], colors: Mapping[str, str], cfg: PlotConfig,
-    legend_y: float, image_width: int,
+    d: draw.Drawing,
+    features_used: set[str],
+    colors: Mapping[str, str],
+    cfg: PlotConfig,
+    legend_y: float,
+    image_width: int,
     color_sections: Sequence[tuple[str | None, Sequence[str]]] | None = None,
     extra_items: Sequence[tuple[str, str, str | None]] | None = None,
 ) -> float:
     """Draw the legend (optional heatmap items prepended, then features); return its height."""
-    filtered = list(extra_items or []) + filter_legend_features(features_used, colors, color_sections, cfg.legend_sort_key)
+    filtered = list(extra_items or []) + filter_legend_features(
+        features_used, colors, color_sections, cfg.legend_sort_key
+    )
     if not filtered:
         return 0
     layout = compute_legend_layout(
@@ -662,30 +715,57 @@ def _draw_legend(
     for item in layout.items:
         ix, iy = item.x, legend_y + item.y
         if item.is_header:
-            d.append(draw.Text(
-                item.label, cfg.font_size, ix, iy + cfg.font_size, fill=cfg.text_color,
-                text_anchor="start", font_family=DEFAULT_FONT_FAMILY, font_weight="bold",
-            ))
+            d.append(
+                draw.Text(
+                    item.label,
+                    cfg.font_size,
+                    ix,
+                    iy + cfg.font_size,
+                    fill=cfg.text_color,
+                    text_anchor="start",
+                    font_family=DEFAULT_FONT_FAMILY,
+                    font_weight="bold",
+                )
+            )
             continue
         sx, sy = ix + layout.item_padding, iy + layout.item_padding
-        d.append(draw.Rectangle(
-            sx, sy, layout.swatch_size, layout.swatch_size, fill=item.color,
-            stroke=cfg.text_color, stroke_width=0.5,
-        ))
+        d.append(
+            draw.Rectangle(
+                sx,
+                sy,
+                layout.swatch_size,
+                layout.swatch_size,
+                fill=item.color,
+                stroke=cfg.text_color,
+                stroke_width=0.5,
+            )
+        )
         gap = int(layout.swatch_size * 0.4)
-        d.append(draw.Text(
-            item.label, cfg.font_size, sx + layout.swatch_size + gap, sy + layout.swatch_size - 1,
-            fill=cfg.text_color, text_anchor="start", font_family=DEFAULT_FONT_FAMILY,
-        ))
+        d.append(
+            draw.Text(
+                item.label,
+                cfg.font_size,
+                sx + layout.swatch_size + gap,
+                sy + layout.swatch_size - 1,
+                fill=cfg.text_color,
+                text_anchor="start",
+                font_family=DEFAULT_FONT_FAMILY,
+            )
+        )
     return layout.height
 
 
 def _legend_height(
-    features_used: set[str], colors: Mapping[str, str], cfg: PlotConfig, image_width: int,
+    features_used: set[str],
+    colors: Mapping[str, str],
+    cfg: PlotConfig,
+    image_width: int,
     color_sections: Sequence[tuple[str | None, Sequence[str]]] | None = None,
     extra_items: Sequence[tuple[str, str, str | None]] | None = None,
 ) -> float:
-    filtered = list(extra_items or []) + filter_legend_features(features_used, colors, color_sections, cfg.legend_sort_key)
+    filtered = list(extra_items or []) + filter_legend_features(
+        features_used, colors, color_sections, cfg.legend_sort_key
+    )
     if not filtered:
         return 0
     return compute_legend_layout(
@@ -695,8 +775,10 @@ def _legend_height(
 
 # --------------------------------------------------------------------------- scale bar
 
-def _draw_vertical_scale_bar(d: draw.Drawing, x: float, y: float, cfg: PlotConfig,
-                             max_height_px: int) -> None:
+
+def _draw_vertical_scale_bar(
+    d: draw.Drawing, x: float, y: float, cfg: PlotConfig, max_height_px: int
+) -> None:
     bp = cfg.scale_bar_bp or 10000
     h = int(bp * cfg.ratio)
     if not cfg.scale_bar_bp and h > max_height_px:
@@ -706,13 +788,22 @@ def _draw_vertical_scale_bar(d: draw.Drawing, x: float, y: float, cfg: PlotConfi
     d.append(draw.Line(x - 2, y, x + 6, y, stroke=cfg.text_color, stroke_width=1))
     d.append(draw.Line(x - 2, y + h, x + 6, y + h, stroke=cfg.text_color, stroke_width=1))
     lx, ly = x - 5, y + h / 2
-    d.append(draw.Text(
-        f"{bp // 1000} Kbp", cfg.font_size, lx, ly, fill=cfg.text_color, text_anchor="middle",
-        font_family=DEFAULT_FONT_FAMILY, transform=f"rotate(-90, {lx}, {ly})",
-    ))
+    d.append(
+        draw.Text(
+            f"{bp // 1000} Kbp",
+            cfg.font_size,
+            lx,
+            ly,
+            fill=cfg.text_color,
+            text_anchor="middle",
+            font_family=DEFAULT_FONT_FAMILY,
+            transform=f"rotate(-90, {lx}, {ly})",
+        )
+    )
 
 
 # --------------------------------------------------------------------------- heatmap / markers / headers
+
 
 def _effective_left_margin(cfg: PlotConfig, base_left: int) -> int:
     """Grow the left margin to fit tier / heatmap row labels drawn in the margin."""
@@ -724,97 +815,198 @@ def _effective_left_margin(cfg: PlotConfig, base_left: int) -> int:
     return max(base_left, needed)
 
 
-def _draw_heatmap_grid(d: draw.Drawing, read_positions: Sequence[tuple[str, float]],
-                       cfg: PlotConfig, top: int, left: int) -> None:
+def _draw_heatmap_grid(
+    d: draw.Drawing,
+    read_positions: Sequence[tuple[str, float]],
+    cfg: PlotConfig,
+    top: int,
+    left: int,
+) -> None:
     """Draw the metadata heatmap: one row of colored cells per column, stacked above the reads."""
     stroke = cfg.text_color
     for row_idx, col in enumerate(reversed(list(cfg.metadata_columns))):
-        row_y = (top - cfg.heatmap_bottom_gap - (row_idx + 1) * cfg.bar_width
-                 - row_idx * cfg.heatmap_row_gap)
+        row_y = (
+            top
+            - cfg.heatmap_bottom_gap
+            - (row_idx + 1) * cfg.bar_width
+            - row_idx * cfg.heatmap_row_gap
+        )
         val_colors = cfg.heatmap_colors.get(col, {})
         for read_id, rx in read_positions:
             val = cfg.read_metadata.get(read_id, {}).get(col)
             color = val_colors.get(val, val_colors.get(None, _HEATMAP_MISSING))
-            d.append(draw.Rectangle(rx, row_y, cfg.bar_width, cfg.bar_width, fill=color,
-                                    stroke=stroke, stroke_width=0.5))
-        d.append(draw.Text(
-            cfg.heatmap_display_names.get(col, col), cfg.font_size, left - 5,
-            row_y + cfg.bar_width / 2 + cfg.font_size * 0.35, fill=cfg.text_color,
-            text_anchor="end", font_family=DEFAULT_FONT_FAMILY,
-        ))
+            d.append(
+                draw.Rectangle(
+                    rx,
+                    row_y,
+                    cfg.bar_width,
+                    cfg.bar_width,
+                    fill=color,
+                    stroke=stroke,
+                    stroke_width=0.5,
+                )
+            )
+        d.append(
+            draw.Text(
+                cfg.heatmap_display_names.get(col, col),
+                cfg.font_size,
+                left - 5,
+                row_y + cfg.bar_width / 2 + cfg.font_size * 0.35,
+                fill=cfg.text_color,
+                text_anchor="end",
+                font_family=DEFAULT_FONT_FAMILY,
+            )
+        )
 
 
-def _draw_markers(d: draw.Drawing, positions: Sequence[tuple[float, float]], cfg: PlotConfig,
-                  arrow_size: int) -> None:
+def _draw_markers(
+    d: draw.Drawing, positions: Sequence[tuple[float, float]], cfg: PlotConfig, arrow_size: int
+) -> None:
     """Draw left-pointing arrowheads at the given (x, mid_y) read positions."""
     for x, mid_y in positions:
-        d.append(draw.Lines(
-            x - arrow_size - 1, mid_y - arrow_size, x - 1, mid_y,
-            x - arrow_size - 1, mid_y + arrow_size, fill=cfg.text_color, close=True,
-        ))
+        d.append(
+            draw.Lines(
+                x - arrow_size - 1,
+                mid_y - arrow_size,
+                x - 1,
+                mid_y,
+                x - arrow_size - 1,
+                mid_y + arrow_size,
+                fill=cfg.text_color,
+                close=True,
+            )
+        )
 
 
-def _draw_vertical_header(d: draw.Drawing, cfg: PlotConfig, top: int, left: int,
-                          sample_order: Sequence[str], x_start: Mapping[str, float],
-                          x_end: Mapping[str, float]) -> None:
+def _draw_vertical_header(
+    d: draw.Drawing,
+    cfg: PlotConfig,
+    top: int,
+    left: int,
+    sample_order: Sequence[str],
+    x_start: Mapping[str, float],
+    x_end: Mapping[str, float],
+) -> None:
     """Draw sample separator lines + labels above the reads (single- or two-tier)."""
     hm = cfg.heatmap_total
     if not cfg.label_tiers:
         for sample in sample_order:
             if sample in x_start and sample in x_end:
-                d.append(draw.Line(x_start[sample], top - 5 - hm, x_end[sample], top - 5 - hm,
-                                   stroke=cfg.text_color, stroke_width=2))
-                d.append(draw.Text(
-                    sample.replace("_", " "), cfg.font_size, x_start[sample], top - 12 - hm,
-                    fill=cfg.text_color, text_anchor="start", font_family=DEFAULT_FONT_FAMILY,
-                ))
+                d.append(
+                    draw.Line(
+                        x_start[sample],
+                        top - 5 - hm,
+                        x_end[sample],
+                        top - 5 - hm,
+                        stroke=cfg.text_color,
+                        stroke_width=2,
+                    )
+                )
+                d.append(
+                    draw.Text(
+                        sample.replace("_", " "),
+                        cfg.font_size,
+                        x_start[sample],
+                        top - 12 - hm,
+                        fill=cfg.text_color,
+                        text_anchor="start",
+                        font_family=DEFAULT_FONT_FAMILY,
+                    )
+                )
         return
 
     # Tier 2 (inner): subgroup lines + labels.
     tier2_y = top - 5 - hm
     for sample in sample_order:
         if sample in x_start and sample in x_end:
-            d.append(draw.Line(x_start[sample], tier2_y, x_end[sample], tier2_y,
-                               stroke=cfg.text_color, stroke_width=1.5))
+            d.append(
+                draw.Line(
+                    x_start[sample],
+                    tier2_y,
+                    x_end[sample],
+                    tier2_y,
+                    stroke=cfg.text_color,
+                    stroke_width=1.5,
+                )
+            )
             _g, subgroup = cfg.label_tiers.get(sample, (sample, None))
-            d.append(draw.Text(
-                (subgroup or sample).replace("_", " "), cfg.font_size, x_start[sample],
-                top - 10 - hm, fill=cfg.text_color, text_anchor="start",
-                font_family=DEFAULT_FONT_FAMILY,
-            ))
+            d.append(
+                draw.Text(
+                    (subgroup or sample).replace("_", " "),
+                    cfg.font_size,
+                    x_start[sample],
+                    top - 10 - hm,
+                    fill=cfg.text_color,
+                    text_anchor="start",
+                    font_family=DEFAULT_FONT_FAMILY,
+                )
+            )
     if 1 in cfg.tier_display_names:
-        d.append(draw.Text(cfg.tier_display_names[1], cfg.font_size, left - 5, top - 10 - hm,
-                           fill=cfg.text_color, text_anchor="end", font_family=DEFAULT_FONT_FAMILY))
+        d.append(
+            draw.Text(
+                cfg.tier_display_names[1],
+                cfg.font_size,
+                left - 5,
+                top - 10 - hm,
+                fill=cfg.text_color,
+                text_anchor="end",
+                font_family=DEFAULT_FONT_FAMILY,
+            )
+        )
 
     # Tier 1 (outer): group spanning lines + labels.
     tier1_y = top - 5 - cfg.tier_offset - hm
-    for group, gx_start, gx_end in compute_group_spans(sample_order, x_start, x_end,
-                                                       cfg.group_subgroup_order):
-        d.append(draw.Line(gx_start, tier1_y, gx_end, tier1_y, stroke=cfg.text_color,
-                           stroke_width=1.5))
-        d.append(draw.Text(group.replace("_", " "), cfg.font_size, gx_start, tier1_y - 5,
-                           fill=cfg.text_color, text_anchor="start", font_family=DEFAULT_FONT_FAMILY))
+    for group, gx_start, gx_end in compute_group_spans(
+        sample_order, x_start, x_end, cfg.group_subgroup_order
+    ):
+        d.append(
+            draw.Line(gx_start, tier1_y, gx_end, tier1_y, stroke=cfg.text_color, stroke_width=1.5)
+        )
+        d.append(
+            draw.Text(
+                group.replace("_", " "),
+                cfg.font_size,
+                gx_start,
+                tier1_y - 5,
+                fill=cfg.text_color,
+                text_anchor="start",
+                font_family=DEFAULT_FONT_FAMILY,
+            )
+        )
     if 0 in cfg.tier_display_names:
-        d.append(draw.Text(cfg.tier_display_names[0], cfg.font_size, left - 5, tier1_y - 5,
-                           fill=cfg.text_color, text_anchor="end", font_family=DEFAULT_FONT_FAMILY))
+        d.append(
+            draw.Text(
+                cfg.tier_display_names[0],
+                cfg.font_size,
+                left - 5,
+                tier1_y - 5,
+                fill=cfg.text_color,
+                text_anchor="end",
+                font_family=DEFAULT_FONT_FAMILY,
+            )
+        )
 
 
 # --------------------------------------------------------------------------- renderers
 
+
 def _svg_str(d: draw.Drawing) -> str:
     svg = d.as_svg()
-    return svg[svg.index("<svg"):]  # drop the <?xml?> prolog (stable string API)
+    return svg[svg.index("<svg") :]  # drop the <?xml?> prolog (stable string API)
 
 
-def render_reads_svg(reads: Sequence[Read], colors: Mapping[str, str], cfg: PlotConfig,
-                     sample_order: Sequence[str]) -> str:
+def render_reads_svg(
+    reads: Sequence[Read], colors: Mapping[str, str], cfg: PlotConfig, sample_order: Sequence[str]
+) -> str:
     """Vertical layout: each read a column of stacked feature runs.
 
     Reserves room above the reads for the heatmap rows and extra label tiers; draws the scale
     bar, optional heatmap grid, sample headers (single- or two-tier), markers, and legend.
     """
     top = cfg.effective_top_margin
-    subgroup_spacing = cfg.subgroup_spacing if cfg.subgroup_spacing is not None else cfg.sample_spacing
+    subgroup_spacing = (
+        cfg.subgroup_spacing if cfg.subgroup_spacing is not None else cfg.sample_spacing
+    )
     arrow_size = max(2, int(cfg.bar_width // 3 * cfg.marker_scale))
     max_length = max(r.length for r in reads)
     max_height_px = int(max_length * cfg.ratio)
@@ -826,14 +1018,26 @@ def render_reads_svg(reads: Sequence[Read], colors: Mapping[str, str], cfg: Plot
     left = _effective_left_margin(cfg, base_left)
     if cfg.markers:
         left += arrow_size + 2  # room for arrowheads
-    image_width = left + len(reads) * (cfg.bar_width + cfg.read_spacing) + \
-        (len(counts) - 1) * max(cfg.sample_spacing, subgroup_spacing) + 50
+    image_width = (
+        left
+        + len(reads) * (cfg.bar_width + cfg.read_spacing)
+        + (len(counts) - 1) * max(cfg.sample_spacing, subgroup_spacing)
+        + 50
+    )
 
     features_used = {f for r in reads for _s, _e, f in r.features}
-    hm_items = (build_heatmap_legend_items(cfg.metadata_columns, cfg.heatmap_colors,
-                                           cfg.heatmap_display_names) if cfg.has_heatmap else None)
-    legend_extra = (_legend_height(features_used, colors, cfg, image_width, extra_items=hm_items)
-                    if cfg.legend else 0)
+    hm_items = (
+        build_heatmap_legend_items(
+            cfg.metadata_columns, cfg.heatmap_colors, cfg.heatmap_display_names
+        )
+        if cfg.has_heatmap
+        else None
+    )
+    legend_extra = (
+        _legend_height(features_used, colors, cfg, image_width, extra_items=hm_items)
+        if cfg.legend
+        else 0
+    )
     image_height = top + max_height_px + cfg.bottom_margin + int(legend_extra)
 
     d = draw.Drawing(image_width, image_height, id_prefix="tr")
@@ -857,21 +1061,34 @@ def render_reads_svg(reads: Sequence[Read], colors: Mapping[str, str], cfg: Plot
 
         if cfg.feature_mode == "raw":
             for start, end, feature in read.features:
-                d.append(draw.Rectangle(
-                    x, top + int(start * cfg.ratio), cfg.bar_width,
-                    max(1, int((end - start) * cfg.ratio)), fill=resolve_feature_color(feature, colors),
-                ))
+                d.append(
+                    draw.Rectangle(
+                        x,
+                        top + int(start * cfg.ratio),
+                        cfg.bar_width,
+                        max(1, int((end - start) * cfg.ratio)),
+                        fill=resolve_feature_color(feature, colors),
+                    )
+                )
         else:
             for run in _read_runs(read, colors, cfg) or []:
-                d.append(draw.Rectangle(
-                    x, top + run["scaled_start"], cfg.bar_width,
-                    run["scaled_stop"] - run["scaled_start"], fill=run["color"],
-                    fill_opacity=run["fill_opacity"],
-                ))
+                d.append(
+                    draw.Rectangle(
+                        x,
+                        top + run["scaled_start"],
+                        cfg.bar_width,
+                        run["scaled_stop"] - run["scaled_start"],
+                        fill=run["color"],
+                        fill_opacity=run["fill_opacity"],
+                    )
+                )
         if cfg.read_border:
             h = int(max((e for _s, e, _f in read.features), default=0) * cfg.ratio)
-            d.append(draw.Rectangle(x, top, cfg.bar_width, h, fill="none",
-                                    stroke=cfg.text_color, stroke_width=0.5))
+            d.append(
+                draw.Rectangle(
+                    x, top, cfg.bar_width, h, fill="none", stroke=cfg.text_color, stroke_width=0.5
+                )
+            )
         for m_start, m_end in cfg.markers.get(read.read_id, []):
             marker_positions.append((x, top + int((m_start + m_end) / 2 * cfg.ratio)))
         x += cfg.bar_width + cfg.read_spacing
@@ -885,13 +1102,21 @@ def render_reads_svg(reads: Sequence[Read], colors: Mapping[str, str], cfg: Plot
         _draw_vertical_header(d, cfg, top, left, sample_order, x_start, x_end)
 
     if cfg.legend and (features_used or hm_items):
-        _draw_legend(d, features_used, colors, cfg, top + max_height_px + 10, image_width,
-                     extra_items=hm_items)
+        _draw_legend(
+            d,
+            features_used,
+            colors,
+            cfg,
+            top + max_height_px + 10,
+            image_width,
+            extra_items=hm_items,
+        )
     return _svg_str(d)
 
 
-def render_reads_horizontal_svg(reads: Sequence[Read], colors: Mapping[str, str],
-                                cfg: PlotConfig, sample_order: Sequence[str]) -> str:
+def render_reads_horizontal_svg(
+    reads: Sequence[Read], colors: Mapping[str, str], cfg: PlotConfig, sample_order: Sequence[str]
+) -> str:
     """Horizontal layout: one read per row; horizontal scale bar at the top."""
     max_length = max(r.length for r in reads)
     max_width_px = int(max_length * cfg.ratio)
@@ -900,8 +1125,12 @@ def render_reads_horizontal_svg(reads: Sequence[Read], colors: Mapping[str, str]
         counts[r.sample] += 1
 
     image_width = cfg.left_margin + max_width_px + 50
-    image_height = cfg.top_margin + len(reads) * (cfg.bar_width + cfg.read_spacing) + \
-        (len(counts) - 1) * cfg.sample_spacing + 50
+    image_height = (
+        cfg.top_margin
+        + len(reads) * (cfg.bar_width + cfg.read_spacing)
+        + (len(counts) - 1) * cfg.sample_spacing
+        + 50
+    )
 
     d = draw.Drawing(image_width, image_height, id_prefix="trh")
     d.append(draw.Rectangle(0, 0, image_width, image_height, fill=cfg.background))
@@ -915,12 +1144,21 @@ def render_reads_horizontal_svg(reads: Sequence[Read], colors: Mapping[str, str]
         d.append(draw.Rectangle(sx, sy, w, 3, fill=cfg.text_color))
         d.append(draw.Line(sx, sy - 4, sx, sy + 4, stroke=cfg.text_color, stroke_width=1))
         d.append(draw.Line(sx + w, sy - 4, sx + w, sy + 4, stroke=cfg.text_color, stroke_width=1))
-        d.append(draw.Text(
-            f"{bp // 1000} Kbp", cfg.font_size, sx + w / 2, sy - 8, fill=cfg.text_color,
-            text_anchor="middle", font_family=DEFAULT_FONT_FAMILY,
-        ))
+        d.append(
+            draw.Text(
+                f"{bp // 1000} Kbp",
+                cfg.font_size,
+                sx + w / 2,
+                sy - 8,
+                fill=cfg.text_color,
+                text_anchor="middle",
+                font_family=DEFAULT_FONT_FAMILY,
+            )
+        )
 
-    subgroup_spacing = cfg.subgroup_spacing if cfg.subgroup_spacing is not None else cfg.sample_spacing
+    subgroup_spacing = (
+        cfg.subgroup_spacing if cfg.subgroup_spacing is not None else cfg.sample_spacing
+    )
     y = cfg.top_margin
     current_sample: str | None = None
     sample_y_start: dict[str, float] = {}
@@ -934,22 +1172,40 @@ def render_reads_horizontal_svg(reads: Sequence[Read], colors: Mapping[str, str]
 
         if cfg.feature_mode == "raw":
             for start, end, feature in read.features:
-                d.append(draw.Rectangle(
-                    cfg.left_margin + int(start * cfg.ratio), y,
-                    max(1, int((end - start) * cfg.ratio)), cfg.bar_width,
-                    fill=resolve_feature_color(feature, colors),
-                ))
+                d.append(
+                    draw.Rectangle(
+                        cfg.left_margin + int(start * cfg.ratio),
+                        y,
+                        max(1, int((end - start) * cfg.ratio)),
+                        cfg.bar_width,
+                        fill=resolve_feature_color(feature, colors),
+                    )
+                )
         else:
             for run in _read_runs(read, colors, cfg) or []:
-                d.append(draw.Rectangle(
-                    cfg.left_margin + run["scaled_start"], y,
-                    run["scaled_stop"] - run["scaled_start"], cfg.bar_width,
-                    fill=run["color"], fill_opacity=run["fill_opacity"],
-                ))
+                d.append(
+                    draw.Rectangle(
+                        cfg.left_margin + run["scaled_start"],
+                        y,
+                        run["scaled_stop"] - run["scaled_start"],
+                        cfg.bar_width,
+                        fill=run["color"],
+                        fill_opacity=run["fill_opacity"],
+                    )
+                )
         if cfg.read_border:
             w = int(max((e for _s, e, _f in read.features), default=0) * cfg.ratio)
-            d.append(draw.Rectangle(cfg.left_margin, y, w, cfg.bar_width, fill="none",
-                                    stroke=cfg.text_color, stroke_width=0.5))
+            d.append(
+                draw.Rectangle(
+                    cfg.left_margin,
+                    y,
+                    w,
+                    cfg.bar_width,
+                    fill="none",
+                    stroke=cfg.text_color,
+                    stroke_width=0.5,
+                )
+            )
         y += cfg.bar_width + cfg.read_spacing
     if current_sample:
         sample_y_end[current_sample] = y
@@ -958,19 +1214,40 @@ def render_reads_horizontal_svg(reads: Sequence[Read], colors: Mapping[str, str]
         for sample in sample_order:
             if sample in sample_y_start and sample in sample_y_end:
                 line_x = cfg.left_margin - 5
-                d.append(draw.Line(line_x, sample_y_start[sample], line_x, sample_y_end[sample],
-                                   stroke=cfg.text_color, stroke_width=2))
+                d.append(
+                    draw.Line(
+                        line_x,
+                        sample_y_start[sample],
+                        line_x,
+                        sample_y_end[sample],
+                        stroke=cfg.text_color,
+                        stroke_width=2,
+                    )
+                )
                 lx, ly = line_x - 10, sample_y_start[sample] + 50
-                d.append(draw.Text(
-                    sample.replace("_", " "), cfg.font_size, lx, ly, fill=cfg.text_color,
-                    text_anchor="middle", font_family=DEFAULT_FONT_FAMILY,
-                    transform=f"rotate(-90, {lx}, {ly})",
-                ))
+                d.append(
+                    draw.Text(
+                        sample.replace("_", " "),
+                        cfg.font_size,
+                        lx,
+                        ly,
+                        fill=cfg.text_color,
+                        text_anchor="middle",
+                        font_family=DEFAULT_FONT_FAMILY,
+                        transform=f"rotate(-90, {lx}, {ly})",
+                    )
+                )
     return _svg_str(d)
 
 
-def render(reads: Sequence[Read], colors: Mapping[str, str], cfg: PlotConfig,
-           sample_order: Sequence[str], *, horizontal: bool = False) -> str:
+def render(
+    reads: Sequence[Read],
+    colors: Mapping[str, str],
+    cfg: PlotConfig,
+    sample_order: Sequence[str],
+    *,
+    horizontal: bool = False,
+) -> str:
     """Render reads to an SVG string (vertical by default, horizontal if requested)."""
     if not reads:
         raise ValueError("no reads to plot")

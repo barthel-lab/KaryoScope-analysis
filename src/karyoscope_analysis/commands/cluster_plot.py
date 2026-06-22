@@ -187,12 +187,19 @@ def cmd(
         )
         chrom = _major_chromosomes(consensus_by_cluster.get(cid, []), chromosomes)
         title = f"{cid}  n={len(placed)}" + (f"  {chrom}" if chrom else "")
-        panels.append(render.ClusterPanel(title=title, width=span, placed=placed, consensus=consensus))
+        panels.append(
+            render.ClusterPanel(title=title, width=span, placed=placed, consensus=consensus)
+        )
 
     try:
         svg = render.render_clusters_svg(
-            panels, colors, width=width, row_height=row_height, chromosome_track=chromosome_track,
-            consensus_track=consensus_track, legend_sort_key=legend_sort_key,
+            panels,
+            colors,
+            width=width,
+            row_height=row_height,
+            chromosome_track=chromosome_track,
+            consensus_track=consensus_track,
+            legend_sort_key=legend_sort_key,
         )
     except render.UnknownFeatureError as e:
         raise click.ClickException(str(e)) from e

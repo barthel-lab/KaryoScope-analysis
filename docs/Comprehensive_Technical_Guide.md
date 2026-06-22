@@ -99,7 +99,7 @@ Features are organized into multiple independent feature sets, each providing a 
 
 A feature set is built from a bed file with every position annotated as one of several initial features. However, k-mers may occur in multiple of these initial features (for example a `hsat1A` k-mer may also be a `hsat1B` k-mer). To ensure that k-mers are assigned to a single feature, KaryoScope constructs corresponding "feature_specific" and "feature_multigroup" sets of k-mers which are disjoint from each other.
 
-For every initial feature, KaryoScope will construct a corresponding main "feature_specific" feature which consists of k-mers in that initial feature and no other initial feature. For k-mers belonging to multiple features, KaryoScope defines "feature_multigroup" features using a feature phylogeny. Each "feature_multigroup" feature consists of k-mers in a subset of initial features and not in any of the other initial features. For example, the `hsat1_multigroup1` feature consists of k-mers in `hsat1A` and `hsat1B` but no other initial features. 
+For every initial feature, KaryoScope will construct a corresponding main "feature_specific" feature which consists of k-mers in that initial feature and no other initial feature. For k-mers belonging to multiple features, KaryoScope defines "feature_multigroup" features using a feature phylogeny. Each "feature_multigroup" feature consists of k-mers in a subset of initial features and not in any of the other initial features. For example, the `hsat1_multigroup1` feature consists of k-mers in `hsat1A` and `hsat1B` but no other initial features.
 
 KaryoScope consists of 6 feature sets:
 

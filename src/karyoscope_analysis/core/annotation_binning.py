@@ -242,7 +242,10 @@ def _descent_run(
     # window-independent fast path below.
     if counts.get(NOVEL, 0.0) > 0 or NOVEL in anc_e or NOVEL in anc_x:
         feat = descend(
-            counts, tree, majority_fraction=majority_fraction, scope=scope,
+            counts,
+            tree,
+            majority_fraction=majority_fraction,
+            scope=scope,
             novel_min_fraction=novel_min_fraction,
         )
         assert feat is not None
@@ -279,7 +282,9 @@ def _descent_run(
             denom0, denom_slope = sub0.get(node, total0), float(slope(node))
         b0, bs = sub0[best], float(slope(best))
         if b0 > majority_fraction * denom0:  # descend into best
-            run = min(run, _cap_gt(b0, bs, majority_fraction * denom0, majority_fraction * denom_slope))
+            run = min(
+                run, _cap_gt(b0, bs, majority_fraction * denom0, majority_fraction * denom_slope)
+            )
             for c in present:
                 if c == best:
                     continue
@@ -290,11 +295,19 @@ def _descent_run(
         else:  # stop at this node
             for c in present:
                 run = min(
-                    run, _cap_le(sub0[c], float(slope(c)), majority_fraction * denom0, majority_fraction * denom_slope)
+                    run,
+                    _cap_le(
+                        sub0[c],
+                        float(slope(c)),
+                        majority_fraction * denom0,
+                        majority_fraction * denom_slope,
+                    ),
                 )
             break
     if node == root:  # plurality fallback (rare boundary positions): recompute each step
-        node = max((f for f in counts if counts[f] > 0), key=lambda f: (counts[f], tree.depth.get(f, 1), f))
+        node = max(
+            (f for f in counts if counts[f] > 0), key=lambda f: (counts[f], tree.depth.get(f, 1), f)
+        )
         run = 0
     return node, run
 
@@ -372,7 +385,10 @@ def bin_intervals(
     while i <= length - 1:
         if i == length - 1:  # last position: one window, no forward step
             feat = descend(
-                counts, tree, majority_fraction=majority_fraction, scope=scope,
+                counts,
+                tree,
+                majority_fraction=majority_fraction,
+                scope=scope,
                 novel_min_fraction=novel_min_fraction,
             )
             assert feat is not None
@@ -394,8 +410,13 @@ def bin_intervals(
         seg_end = min(seg_end, ends[interval_of(leave)] + a if l_act else a)
 
         feat, run = _descent_run(
-            counts, tree, anc_e=anc_e, anc_x=anc_x, majority_fraction=majority_fraction,
-            scope=scope, novel_min_fraction=novel_min_fraction,
+            counts,
+            tree,
+            anc_e=anc_e,
+            anc_x=anc_x,
+            majority_fraction=majority_fraction,
+            scope=scope,
+            novel_min_fraction=novel_min_fraction,
         )
         d = min(run, seg_end - 1 - i, length - 1 - i)  # constant call, within segment + sequence
         d = max(0, int(d))
@@ -437,7 +458,10 @@ def bin_intervals_naive(
         for x in range(lo, hi + 1):
             counts[labels[x]] += 1
         feature = descend(
-            counts, tree, majority_fraction=majority_fraction, scope=scope,
+            counts,
+            tree,
+            majority_fraction=majority_fraction,
+            scope=scope,
             novel_min_fraction=novel_min_fraction,
         )
         assert feature is not None
@@ -513,7 +537,10 @@ def bin_intervals_strided(
             accumulate(lo, nlo, -1)
         lo, hi = nlo, nhi
         feat = descend(
-            counts, tree, majority_fraction=majority_fraction, scope=scope,
+            counts,
+            tree,
+            majority_fraction=majority_fraction,
+            scope=scope,
             novel_min_fraction=novel_min_fraction,
         )
         assert feat is not None  # window is non-empty for a non-empty sequence
@@ -544,12 +571,21 @@ def bin_sequence(
     shifted = [(s - off, e - off, f) for s, e, f in intervals]
     if step == 1:
         binned = bin_intervals(
-            shifted, tree, window=window, majority_fraction=majority_fraction, scope=scope,
+            shifted,
+            tree,
+            window=window,
+            majority_fraction=majority_fraction,
+            scope=scope,
             novel_min_fraction=novel_min_fraction,
         )
     else:
         binned = bin_intervals_strided(
-            shifted, tree, window=window, step=step, majority_fraction=majority_fraction,
-            scope=scope, novel_min_fraction=novel_min_fraction,
+            shifted,
+            tree,
+            window=window,
+            step=step,
+            majority_fraction=majority_fraction,
+            scope=scope,
+            novel_min_fraction=novel_min_fraction,
         )
     return [(s + off, e + off, f) for s, e, f in binned]

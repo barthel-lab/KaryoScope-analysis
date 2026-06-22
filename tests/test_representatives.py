@@ -55,8 +55,15 @@ def test_select_representatives_cli(cli_runner, tmp_path: Path):
     out = tmp_path / "reps.tsv"
     res = cli_runner.invoke(
         main,
-        ["select-representatives", "--clusters", str(clusters), "--consensus", str(consensus),
-         "-o", str(out)],
+        [
+            "select-representatives",
+            "--clusters",
+            str(clusters),
+            "--consensus",
+            str(consensus),
+            "-o",
+            str(out),
+        ],
     )
     assert res.exit_code == 0, res.output
     lines = out.read_text().splitlines()

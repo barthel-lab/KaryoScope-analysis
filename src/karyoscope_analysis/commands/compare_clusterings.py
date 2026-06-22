@@ -64,8 +64,6 @@ def cmd(
     report = cc.report(result, label1, label2)
     output.write_text(report)
     overlap_path = output.with_suffix(".overlap.tsv")
-    overlap_path.write_text(
-        cc.overlap_tsv(cc.overlap_pairs(labels1, labels2), label1, label2)
-    )
+    overlap_path.write_text(cc.overlap_tsv(cc.overlap_pairs(labels1, labels2), label1, label2))
     click.echo(report.rstrip("\n"))
     click.echo(f"Wrote {output} and {overlap_path}")

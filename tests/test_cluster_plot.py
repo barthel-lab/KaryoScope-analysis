@@ -82,7 +82,9 @@ def test_chromosome_layer_and_color():
 
 def test_render_allows_novel_chromosome_layer():
     # A consensus with a novel chromosome layer (novel:feature) must render, not error.
-    placed = [render.PlacedRead("r", True, False, [(0, 100, "novel:aSat"), (100, 200, "chr2:bSat")])]
+    placed = [
+        render.PlacedRead("r", True, False, [(0, 100, "novel:aSat"), (100, 200, "chr2:bSat")])
+    ]
     consensus = [(0, 100, "novel:aSat"), (100, 200, "chr2:bSat")]
     colors = {"aSat": "#111111", "bSat": "#222222", "chr2": "#333333"}
     svg = render.render_cluster_svg(placed, consensus, 200, colors)
@@ -90,7 +92,9 @@ def test_render_allows_novel_chromosome_layer():
 
 
 def test_chromosome_track_renders_dual_tracks_and_legend():
-    placed = [render.PlacedRead("x", True, False, [(0, 100, "chr4:p_arm"), (100, 200, "chr22:q_arm")])]
+    placed = [
+        render.PlacedRead("x", True, False, [(0, 100, "chr4:p_arm"), (100, 200, "chr22:q_arm")])
+    ]
     consensus = [(0, 100, "chr4:p_arm"), (100, 200, "chr22:q_arm")]
     colors = {"p_arm": "#111111", "q_arm": "#222222", "chr4": "#aaaaaa", "chr22": "#bbbbbb"}
     on = render.render_cluster_svg(placed, consensus, 200, colors, chromosome_track=True)
@@ -113,12 +117,14 @@ def test_consensus_track_can_be_hidden():
 def test_render_clusters_svg_stacks_panels():
     panels = [
         render.ClusterPanel(
-            "cluster_0  n=1  chr13", 100,
+            "cluster_0  n=1  chr13",
+            100,
             [render.PlacedRead("a", True, False, [(0, 100, "chr13:aSat")])],
             [(0, 100, "chr13:aSat")],
         ),
         render.ClusterPanel(
-            "cluster_1  n=1  chr21", 100,
+            "cluster_1  n=1  chr21",
+            100,
             [render.PlacedRead("b", True, False, [(0, 100, "chr21:bSat")])],
             [(0, 100, "chr21:bSat")],
         ),
@@ -140,8 +146,17 @@ def test_cluster_plot_cli(cli_runner, tmp_path: Path):
     res = cli_runner.invoke(
         main,
         [
-            "cluster", "--input", str(overlay), "--hierarchy", str(HIERARCHY_TSV),
-            "--min-overlap-bp", "1000", "--min-identity", "0.9", "-o", str(clusters),
+            "cluster",
+            "--input",
+            str(overlay),
+            "--hierarchy",
+            str(HIERARCHY_TSV),
+            "--min-overlap-bp",
+            "1000",
+            "--min-identity",
+            "0.9",
+            "-o",
+            str(clusters),
         ],
     )
     assert res.exit_code == 0, res.output
@@ -151,11 +166,16 @@ def test_cluster_plot_cli(cli_runner, tmp_path: Path):
         main,
         [
             "cluster-plot",
-            "--layout", str(tmp_path / "clusters.layout.tsv"),
-            "--consensus", str(tmp_path / "clusters.consensus.bed"),
-            "--colors", str(COLORS_TSV),
-            "--cluster-id", "cluster_0",
-            "-o", str(svg_out),
+            "--layout",
+            str(tmp_path / "clusters.layout.tsv"),
+            "--consensus",
+            str(tmp_path / "clusters.consensus.bed"),
+            "--colors",
+            str(COLORS_TSV),
+            "--cluster-id",
+            "cluster_0",
+            "-o",
+            str(svg_out),
         ],
     )
     assert res2.exit_code == 0, res2.output
@@ -184,8 +204,17 @@ def test_cluster_plot_cli_all_clusters(cli_runner, tmp_path: Path):
     res = cli_runner.invoke(
         main,
         [
-            "cluster-plot", "--layout", str(layout), "--consensus", str(consensus),
-            "--colors", str(COLORS_TSV), "--min-cluster-size", "2", "-o", str(out),
+            "cluster-plot",
+            "--layout",
+            str(layout),
+            "--consensus",
+            str(consensus),
+            "--colors",
+            str(COLORS_TSV),
+            "--min-cluster-size",
+            "2",
+            "-o",
+            str(out),
         ],  # no --cluster-id -> all clusters
     )
     assert res.exit_code == 0, res.output
@@ -202,12 +231,19 @@ def test_major_chromosomes_labels_translocations():
     # Chromosome set is DB-derived (species-agnostic), not a "chr" prefix check.
     chroms = frozenset({"chr4", "chr22"})
     # single chromosome
-    assert _major_chromosomes([(0, 1000, "chr4:p_arm"), (1000, 1100, "chr4:aSat")], chroms) == "chr4"
+    assert (
+        _major_chromosomes([(0, 1000, "chr4:p_arm"), (1000, 1100, "chr4:aSat")], chroms) == "chr4"
+    )
     # translocation: both chromosomes >= 10% -> joined, dominant first
-    assert _major_chromosomes(
-        [(0, 1500, "chr4:p_arm"), (1500, 2500, "chr22:q_arm")], chroms
-    ) == "chr4+chr22"
+    assert (
+        _major_chromosomes([(0, 1500, "chr4:p_arm"), (1500, 2500, "chr22:q_arm")], chroms)
+        == "chr4+chr22"
+    )
     # a tiny sliver (<10%) and non-chromosome layers (autosome) are dropped
-    assert _major_chromosomes(
-        [(0, 9000, "chr4:p_arm"), (9000, 9100, "chr22:q_arm"), (9100, 9300, "autosome:ct")], chroms
-    ) == "chr4"
+    assert (
+        _major_chromosomes(
+            [(0, 9000, "chr4:p_arm"), (9000, 9100, "chr22:q_arm"), (9100, 9300, "autosome:ct")],
+            chroms,
+        )
+        == "chr4"
+    )

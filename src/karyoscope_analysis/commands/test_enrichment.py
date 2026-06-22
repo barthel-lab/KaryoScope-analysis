@@ -77,12 +77,8 @@ def cmd(
 
     _ids, columns, read_data, _rows = load_read_list(read_list_path)
     if group_col not in columns:
-        raise click.ClickException(
-            f"--group-col {group_col!r} not in read-list columns {columns}"
-        )
-    read_to_group = {
-        rid: meta[group_col] for rid, meta in read_data.items() if meta.get(group_col)
-    }
+        raise click.ClickException(f"--group-col {group_col!r} not in read-list columns {columns}")
+    read_to_group = {rid: meta[group_col] for rid, meta in read_data.items() if meta.get(group_col)}
     if not read_to_group:
         raise click.ClickException(f"no reads have a {group_col!r} value in {read_list_path}")
 
@@ -94,8 +90,10 @@ def cmd(
         )
 
     results, groups, group_totals = enrich.compute_enrichment(
-        read_to_cluster, read_to_group,
-        min_log2_effect=min_log2_effect, min_cluster_size=min_cluster_size,
+        read_to_cluster,
+        read_to_group,
+        min_log2_effect=min_log2_effect,
+        min_cluster_size=min_cluster_size,
     )
     output.write_text(enrich.enrichment_tsv(results, groups))
 

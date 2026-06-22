@@ -61,8 +61,19 @@ def test_compare_clusterings_cli(cli_runner, tmp_path: Path):
     out = tmp_path / "cmp.txt"
     res = cli_runner.invoke(
         main,
-        ["compare-clusterings", "--layout1", str(l1), "--layout2", str(l2),
-         "--label1", "run1", "--label2", "run2", "-o", str(out)],
+        [
+            "compare-clusterings",
+            "--layout1",
+            str(l1),
+            "--layout2",
+            str(l2),
+            "--label1",
+            "run1",
+            "--label2",
+            "run2",
+            "-o",
+            str(out),
+        ],
     )
     assert res.exit_code == 0, res.output
     assert "ARI): 1.0" in out.read_text()

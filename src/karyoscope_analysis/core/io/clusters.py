@@ -62,8 +62,10 @@ def read_consensus_segments(path: str | Path) -> dict[str, list[tuple[int, int, 
     header, rows = _header_and_rows(path)
     try:
         ci, sti, eni, fti = (
-            header.index("cluster_id"), header.index("start"),
-            header.index("end"), header.index("feature"),
+            header.index("cluster_id"),
+            header.index("start"),
+            header.index("end"),
+            header.index("feature"),
         )
     except ValueError as e:
         raise ValueError(

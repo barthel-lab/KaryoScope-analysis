@@ -12,8 +12,11 @@ HIERARCHY_TSV = Path(__file__).resolve().parent / "data" / "hierarchy.tsv"
 
 
 def test_tally_feature_bp():
-    streams = {"region": iter([("chr1", 0, 100, "arm"), ("chr1", 100, 110, "aSat"),
-                               ("chr2", 0, 50, "arm")])}
+    streams = {
+        "region": iter(
+            [("chr1", 0, 100, "arm"), ("chr1", 100, 110, "aSat"), ("chr2", 0, 50, "arm")]
+        )
+    }
     assert gw.tally_feature_bp(streams) == {"region": {"arm": 150, "aSat": 10}}
 
 
@@ -30,7 +33,10 @@ def test_compute_weights_rare_feature_is_one():
 def test_compute_weights_common_scale_across_featuresets():
     # the global max info content (rarest feature anywhere) anchors weight 1.
     weights = gw.compute_genome_weights(
-        {"region": {"arm": 900, "aSat": 100}, "subtelomeric": {"canonical_telomere": 5, "nonsubtelomeric": 995}}
+        {
+            "region": {"arm": 900, "aSat": 100},
+            "subtelomeric": {"canonical_telomere": 5, "nonsubtelomeric": 995},
+        }
     )
     top = max(weights, key=lambda w: w.weight)
     assert top.feature == "canonical_telomere" and top.weight == 1.0  # rarest overall
@@ -56,10 +62,14 @@ def test_genome_weights_cli_and_loader(cli_runner, tmp_path: Path):
         main,
         [
             "genome-weights",
-            "--bed", f"region={region}",
-            "--bed", f"subtelomeric={subtel}",
-            "--hierarchy", str(HIERARCHY_TSV),
-            "-o", str(out),
+            "--bed",
+            f"region={region}",
+            "--bed",
+            f"subtelomeric={subtel}",
+            "--hierarchy",
+            str(HIERARCHY_TSV),
+            "-o",
+            str(out),
         ],
     )
     assert res.exit_code == 0, res.output
@@ -86,9 +96,21 @@ def test_cluster_genome_freq_uses_weights(cli_runner, tmp_path: Path):
     res = cli_runner.invoke(
         main,
         [
-            "cluster", "--input", str(overlay), "--hierarchy", str(HIERARCHY_TSV),
-            "--weight-method", "genome-freq", "--genome-weights", str(weights),
-            "--min-overlap-bp", "1000", "--min-interesting-bp", "0", "-o", str(out),
+            "cluster",
+            "--input",
+            str(overlay),
+            "--hierarchy",
+            str(HIERARCHY_TSV),
+            "--weight-method",
+            "genome-freq",
+            "--genome-weights",
+            str(weights),
+            "--min-overlap-bp",
+            "1000",
+            "--min-interesting-bp",
+            "0",
+            "-o",
+            str(out),
         ],
     )
     assert res.exit_code == 0, res.output
@@ -102,8 +124,19 @@ def test_cluster_genome_freq_requires_weights_path(cli_runner, tmp_path: Path):
     overlay.write_text("x\t0\t1000\tchr1:q_arm\n")
     res = cli_runner.invoke(
         main,
-        ["cluster", "--input", str(overlay), "--hierarchy", str(HIERARCHY_TSV),
-         "--weight-method", "genome-freq", "--min-interesting-bp", "0", "-o", str(tmp_path / "c.tsv")],
+        [
+            "cluster",
+            "--input",
+            str(overlay),
+            "--hierarchy",
+            str(HIERARCHY_TSV),
+            "--weight-method",
+            "genome-freq",
+            "--min-interesting-bp",
+            "0",
+            "-o",
+            str(tmp_path / "c.tsv"),
+        ],
     )
     assert res.exit_code != 0
     assert "genome-freq requires --genome-weights" in res.output
@@ -115,7 +148,15 @@ def test_genome_weights_cli_rejects_unknown_feature(cli_runner, tmp_path: Path):
     out = tmp_path / "weights.tsv"
     res = cli_runner.invoke(
         main,
-        ["genome-weights", "--bed", f"region={region}", "--hierarchy", str(HIERARCHY_TSV), "-o", str(out)],
+        [
+            "genome-weights",
+            "--bed",
+            f"region={region}",
+            "--hierarchy",
+            str(HIERARCHY_TSV),
+            "-o",
+            str(out),
+        ],
     )
     assert res.exit_code != 0
     assert "not_a_feature" in res.output

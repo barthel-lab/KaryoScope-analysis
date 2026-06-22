@@ -46,23 +46,38 @@ from karyoscope_analysis.core.io.clusters import read_clusters_table, read_conse
     help="Database hierarchy.tsv — defines the telomere/satellite/ITS-TAR1/chromosome classes.",
 )
 @click.option(
-    "--min-cluster-size", default=2, show_default=True, type=int,
+    "--min-cluster-size",
+    default=2,
+    show_default=True,
+    type=int,
     help="Annotate only clusters with at least this many reads.",
 )
 @click.option(
-    "--end-fraction", default=0.15, show_default=True, type=float,
+    "--end-fraction",
+    default=0.15,
+    show_default=True,
+    type=float,
     help="Fraction of the consensus span counted as an 'end' (for telomere-at-end detection).",
 )
 @click.option(
-    "--satellite-fraction", default=0.8, show_default=True, type=float,
+    "--satellite-fraction",
+    default=0.8,
+    show_default=True,
+    type=float,
     help="Satellite bp / span needed to call a cluster satellite-dominant.",
 )
 @click.option(
-    "--alt-block-bp", default=6000, show_default=True, type=int,
+    "--alt-block-bp",
+    default=6000,
+    show_default=True,
+    type=int,
     help="Contiguous canonical-telomere bp for a subtelomere to be a Type II ALT subtelomere.",
 )
 @click.option(
-    "--output", "-o", required=True, type=click.Path(dir_okay=False, path_type=Path),
+    "--output",
+    "-o",
+    required=True,
+    type=click.Path(dir_okay=False, path_type=Path),
     help="Output cluster-annotation TSV.",
 )
 def cmd(
@@ -89,15 +104,21 @@ def cmd(
         alt_block_bp=alt_block_bp,
     )
     rows = core.annotate(
-        cluster_sizes, cluster_widths, consensus_by_cluster, hierarchy,
-        cfg=cfg, min_cluster_size=min_cluster_size,
+        cluster_sizes,
+        cluster_widths,
+        consensus_by_cluster,
+        hierarchy,
+        cfg=cfg,
+        min_cluster_size=min_cluster_size,
     )
     output.write_text(core.annotation_tsv(rows))
 
     counts: dict[str, int] = {}
     for r in rows:
         counts[r.label or "(unlabeled)"] = counts.get(r.label or "(unlabeled)", 0) + 1
-    breakdown = ", ".join(f"{label}={n}" for label, n in sorted(counts.items(), key=lambda x: -x[1]))
+    breakdown = ", ".join(
+        f"{label}={n}" for label, n in sorted(counts.items(), key=lambda x: -x[1])
+    )
     click.echo(f"Annotated {len(rows)} cluster(s) -> {output}")
     if breakdown:
         click.echo(f"  labels: {breakdown}")
