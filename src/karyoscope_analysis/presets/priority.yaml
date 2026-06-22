@@ -1,0 +1,24 @@
+# overlay-annotations preset: priority (3-way)
+#
+# Ported from KaryoScope_merge_beds.priority_merge_three_way + apply_conditional_region_repeat_rules
+# (+ SUBTEL_PRIORITY_FEATURES / REGION_BACKGROUND_FEATURES). Order: subtel > region (conditional) > repeat.
+# v1->v2 translations applied: telomere_like_multigroup1 -> telomere_like; arm_multigroup1 -> arm (@arm);
+# region 'noncentromeric' -> 'rDNA'. DRAFT pending maintainer review (M2).
+name: priority
+precedence: [region, repeat, subtelomeric] # default winner = region
+rules:
+  # subtelomeric priority features override everything (legacy: subtracted last)
+  - when: {subtelomeric: [canonical_telomere, noncanonical_telomere, telomere_like, ITS, TAR1]}
+    emit: subtelomeric
+  # arm / p_arm / q_arm are background -> defer to the repeat feature
+  - when: {region: "@arm"}
+    emit: repeat
+  # ct over nonrepeat stays ct; ct over a real repeat -> the repeat
+  - when: {region: [ct], repeat: [nonrepeat]}
+    emit: {literal: ct}
+  - when: {region: [ct]}
+    emit: repeat
+  # rDNA (legacy 'noncentromeric') over rRNA -> rRNA; otherwise falls through to region (rDNA)
+  - when: {region: [rDNA], repeat: [rRNA]}
+    emit: repeat
+  # default -> region (satellites, rDNA-without-rRNA, etc. keep their region feature)

@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same PR/branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint and format check (pre-commit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Cache pre-commit environments
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      - name: Install pre-commit
+        run: python -m pip install pre-commit
+
+      - name: Run pre-commit on all files
+        run: pre-commit run --all-files --show-diff-on-failure
+
+  test:
+    name: Tests (Python ${{ matrix.python-version }} on ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      # Sibling packages (not on PyPI) — install from their public barthel-lab
+      # repos first so pip resolves the `karyoscope` and `karyoplot` runtime
+      # dependencies from git rather than the (unrelated) PyPI `karyoplot`.
+      - name: Install sibling packages (karyoscope, karyoplot)
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            "karyoscope @ git+https://github.com/barthel-lab/KaryoScope" \
+            "karyoplot @ git+https://github.com/barthel-lab/KaryoScope-plotlib"
+
+      - name: Install karyoscope-analysis
+        run: pip install -e ".[dev]"
+
+      - name: Smoke test the CLI
+        run: |
+          karyoscope-analysis --version
+          karyoscope-analysis --help
+          karyoscope-analysis version
+
+      - name: Run pytest (unit tests — integration deselected by default)
+        run: pytest --cov=karyoscope_analysis --cov-report=term-missing

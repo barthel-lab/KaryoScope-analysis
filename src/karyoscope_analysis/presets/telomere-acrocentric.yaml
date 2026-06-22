@@ -1,0 +1,20 @@
+# overlay-annotations preset: telomere-acrocentric
+#
+# Ported from KaryoScope_merge_beds._resolve_telomere_acro_feature
+# (TELOMERE_ACRO_TOP_PRIORITY / TELOMERE_ACRO_COMPOSITE_SUBTEL / TELOMERE_ACRO_COMPOSITE_ACRO).
+# Canonical/noncanonical telomere always win; TAR1/ITS overlapping DJ/PHR/rDNA form a composite label
+# (e.g. DJ_TAR1, joined in precedence order); otherwise the acrocentric feature wins.
+#
+# REVIEW NOTE: the legacy resolver forced the literal 'nonacrocentric' when *neither* feature was
+# informative. Here the precedence default passes through the acrocentric feature (which is
+# 'nonacrocentric' in background regions anyway, but could be 'categorized'). Confirm this is acceptable.
+# DRAFT pending maintainer review (M2).
+name: telomere-acrocentric
+precedence: [acrocentric, subtelomeric] # default = acrocentric; composite joins in this order (DJ_TAR1)
+rules:
+  - when: {subtelomeric: [canonical_telomere, noncanonical_telomere]}
+    emit: subtelomeric
+  - when: {acrocentric: [DJ, PHR, rDNA], subtelomeric: [ITS, TAR1]}
+    emit: composite
+  - when: {subtelomeric: [ITS, TAR1]}
+    emit: subtelomeric

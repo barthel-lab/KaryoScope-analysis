@@ -26,9 +26,9 @@ import argparse
 
 from karyoplot.core.theme import Theme
 from karyoplot.svg.legend import (
+    clean_label,
     make_legend_drawing,
     merge_by_color,
-    strip_label_suffixes,
 )
 
 
@@ -158,7 +158,7 @@ def main():
         items = [(label, color, False) for label, color in merged]
         print(f"  After merging same-color: {len(items)} entries")
     else:
-        items = [(strip_label_suffixes(f), color, False) for f, color in items]
+        items = [(clean_label(f), color, False) for f, color in items]
 
     if args.groups:
         flat = [(label, color) for label, color, _ in items]

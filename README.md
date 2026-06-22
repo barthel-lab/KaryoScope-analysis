@@ -1,109 +1,125 @@
-# KaryoScope Analysis
+# KaryoScope-analysis
 
-Analysis scripts and documentation for KaryoScope clustering methods.
+Clustering, annotation, cross-sample enrichment, and visualization tools for
+[KaryoScope](https://github.com/barthel-lab/KaryoScope) sequence annotations.
 
 ## Overview
 
-This repository contains the downstream analysis pipeline for [KaryoScope](https://github.com/barthel-lab/KaryoScope), a graph-based method for analyzing long-read sequencing data that identifies structural patterns based on genomic feature composition and transition patterns. The scripts here consume KaryoScope Snakemake pipeline outputs (BED files) and perform clustering, enrichment analysis, and visualization.
+KaryoScope-analysis is an installable Python package exposing a single
+`karyoscope-analysis` command-line interface. It consumes the per-read feature-annotation BEDs
+produced by the KaryoScope engine's Snakemake pipeline and turns them into clustered, annotated,
+and visualized structural-haplotype calls — a chromosome-end "karyotype" view of long-read data.
+
+It sits on top of two sibling packages: the [KaryoScope](https://github.com/barthel-lab/KaryoScope)
+engine (`karyoscope`, which provides the canonical database parsers) and the shared plotting
+library [KaryoScope-plotlib](https://github.com/barthel-lab/KaryoScope-plotlib) (`karyoplot`). See
+`KaryoScope-plotlib/docs/ECOSYSTEM.md` for how the repositories fit together.
+
+> **Note:** this repository was reorganized from a flat collection of `KaryoScope_*.py` scripts into
+> this package + CLI. The legacy scripts and their per-script audit live under `docs/audit/`.
+
+## Install
+
+This package depends on two sibling KaryoScope-ecosystem packages that are **not on PyPI**
+(`karyoplot`, `karyoscope`). Install them editable from their sibling checkouts first, then this
+package. From the parent directory holding all three repos:
+
+```bash
+python3 -m venv KaryoScope-analysis/.venv
+source KaryoScope-analysis/.venv/bin/activate
+python -m pip install --upgrade pip
+
+pip install -e KaryoScope-plotlib          # provides `karyoplot`
+pip install -e KaryoScope                   # provides `karyoscope`
+pip install -e 'KaryoScope-analysis[dev]'   # this package + dev tools
+pip install ruff                            # pinned in .pre-commit-config.yaml
+```
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full development setup.
+
+## Commands
+
+Run `karyoscope-analysis --help`, or `karyoscope-analysis <command> --help` for any command.
+
+### Data foundation
+| Command | Description |
+|---|---|
+| `bin-annotations` | Hierarchy-aware rolling-window mode filter that denoises a featureset BED before overlay |
+| `overlay-annotations` | Combine per-featureset BEDs into one composite (`chrom:structural`) annotation |
+| `build-feature-matrix` | Build a per-read feature matrix from annotations |
+
+### Rearrangements (Engine A)
+| Command | Description |
+|---|---|
+| `detect-rearrangements` | Differential-colocalization rearrangement detection |
+| `genome-weights` | Reference-genome information-content feature weights (input to clustering) |
+
+### Clustering & enrichment (Engine B)
+| Command | Description |
+|---|---|
+| `cluster` | Overlap-layout-consensus clustering → clusters, consensus, layout |
+| `pool-samples` | Namespace + pool per-sample overlays for one joint clustering |
+| `test-enrichment` | Per-cluster cross-sample enrichment (descriptive log2 fold vs pool) |
+| `cluster-annotate` | Label each cluster from its consensus structure (hierarchy-derived classes) |
+| `select-representatives` | Consensus-as-representative catalog |
+| `compare-clusterings` | Compare two clusterings (ARI / NMI + overlap) |
+
+### Visualization
+| Command | Description |
+|---|---|
+| `cluster-plot` | Render clustered reads + consensus per cluster (SVG) |
+| `plot-enrichment` | Clusters × samples enrichment heatmap (+ optional consensus-structure panel) |
+| `plot-reads` | Per-read feature bars (SVG/PNG; heatmap tracks, grouping, telogator preset) |
+| `draw-legend` | Standalone SVG legend from the DB color palette |
+| `version` | Print the package version |
+
+## Typical pipeline
+
+Per sample, denoise each featureset and overlay them; then pool, cluster once, and
+annotate/enrich/visualize:
+
+```
+KaryoScope engine output (per-read featureset BEDs)
+        │   bin-annotations ×3  (region, subtelomeric, chromosome)
+        ▼
+   overlay-annotations  ──►  per-sample composite BED
+        │   pool-samples (all samples)
+        ▼
+   cluster  ──►  clusters.tsv, consensus.bed, layout.tsv
+        ├──► test-enrichment ──►  enrichment.tsv ──┐
+        ├──► cluster-annotate ──► annot.tsv ───────┼──► plot-enrichment (heatmap + consensus)
+        └──► cluster-plot (per-group structure SVGs)┘
+```
+
+The whole-sample clustering pipeline is wrapped as `scripts/run_cluster_pipeline.sh`
+(`--sample S --prefix P --db DB`). The clustering step needs `--block-min-bp` (blocking index;
+without it clustering is O(N²)). See `docs/audit/rearrangement_detection.md` §13 for the runbook.
 
 ## Documentation
 
-The documentation is built using MkDocs Material and hosted on GitHub Pages.
-
-**Live Documentation:** [https://barthel-lab.github.io/KaryoScope-analysis/](https://barthel-lab.github.io/KaryoScope-analysis/)
-
-## Scripts
-
-### Core Analysis
-
-| Script | Description |
-|--------|-------------|
-| `KaryoScope_cluster_analysis.py` | Hierarchical clustering with enrichment testing and sequence assignments |
-| `KaryoScope_merge_beds.py` | Merge multiple BED featuresets by position overlay |
-| `KaryoScope_annotate_sequences.py` | Join sequence assignments with read names and mapping stats |
-
-### Visualization
-
-| Script | Description |
-|--------|-------------|
-| `KaryoScope_cluster_plot.py` | Plot representative reads per cluster with sample and cluster annotations |
-| `KaryoScope_select_representatives.py` | Select best representative reads per cluster (feeds cluster_plot) |
-| `KaryoScope_cluster_diagnostics.py` | Diagnostic stats and plots comparing clusters across metrics |
-
-### Comparison & Annotation
-
-| Script | Description |
-|--------|-------------|
-| `KaryoScope_cluster_annotate.py` | Summarize dominant features per cluster from BED annotations |
-| `KaryoScope_compare_clusterings.py` | Compare two clustering runs (ARI, NMI, Sankey diagram) |
-
-### Utilities
-
-| Script | Description |
-|--------|-------------|
-| `KaryoScope_plot_reads.py` | Visualize telomeric reads as vertical bars with region features |
-| `KaryoScope_draw_legend.py` | Generate SVG legends from KaryoScope color mapping files |
-| `create_panning_animation.py` | Create panning animations from wide or tall PNG images |
-
-### Typical Workflow
-
-```
-KaryoScope Snakemake Output (BED files)
-        │
-        ▼
-KaryoScope_merge_beds.py ──► merged BED
-        │
-        ▼
-KaryoScope_cluster_analysis.py ──► clusters, enrichment, assignments
-        │
-        ├──► KaryoScope_cluster_annotate.py ──► feature summaries per cluster
-        ├──► KaryoScope_cluster_diagnostics.py ──► diagnostic plots
-        ├──► KaryoScope_compare_clusterings.py ──► cross-run comparison
-        │
-        ├──► KaryoScope_select_representatives.py ──► representative reads
-        │         │
-        │         ▼
-        └──► KaryoScope_cluster_plot.py ──► cluster visualization
-```
-
-## Local Development
-
-To build and preview the documentation locally:
+Built with MkDocs Material and hosted on GitHub Pages:
+[https://barthel-lab.github.io/KaryoScope-analysis/](https://barthel-lab.github.io/KaryoScope-analysis/).
+The durable design record (conventions, decisions, per-script audit) lives under `docs/audit/`.
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Serve documentation locally
-mkdocs serve
-
-# Build static site
-mkdocs build
+pip install -r requirements.txt   # mkdocs + theme
+mkdocs serve                       # preview at http://127.0.0.1:8000/
 ```
 
-The documentation will be available at `http://127.0.0.1:8000/`
+## Fonts
 
-### Dependencies
-
-Plotting scripts depend on [`karyoplot`](https://github.com/barthel-lab/KaryoScope-plotlib), the shared KaryoScope plotting library. Install editable alongside this repo:
-
-```bash
-pip install -e ~/Documents/software/KaryoScope-plotlib
-```
-
-`karyoplot` provides shared utilities used by these scripts (font registration, color palettes, SVG → PNG export, BED IO, statistical comparison plots). See `karyoscope_plotting_inventory.md` in `KaryoScope-BIR/` for the full mapping.
-
-### Fonts
-
-Plot outputs default to the generic `sans-serif` family. The optional **Basic Sans** brand font is auto-registered if available — `karyoplot.core.fonts.register_fonts()` looks for it in `~/Documents/Barthel-Custom-Powerpoint-Theme/fonts/` and in this repo's bundled `fonts/` directory. No manual installation required; missing fonts silently fall back to `sans-serif`.
+Plot outputs default to the generic `sans-serif` family. The optional **Basic Sans** brand font is
+auto-registered if available (`karyoplot.core.fonts.register_fonts()`); missing fonts silently fall
+back to `sans-serif`.
 
 ## Contributing
 
-This repository is actively maintained by the Barthel Lab. For questions or issues, please open an issue on GitHub.
+Actively maintained by the Barthel Lab. See [`CONTRIBUTING.md`](CONTRIBUTING.md); for questions or
+issues, open an issue on GitHub.
 
 ## License
 
-Documentation and code in this repository are available under the MIT License.
+GPL-3.0-or-later. See [`LICENSE`](LICENSE).
 
 ## Citation
 
@@ -113,6 +129,5 @@ If you use KaryoScope in your research, please cite:
 
 ## Contact
 
-[Barthel Lab](https://www.barthel-lab.com/)
-
+[Barthel Lab](https://www.barthel-lab.com/) ·
 [Translational Genomics Research Institute (TGen)](https://www.tgen.org/)

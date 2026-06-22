@@ -2021,7 +2021,6 @@ def load_color_mapping(colors_file):
     return load_palette_file(
         colors_file,
         parse_sections=True,
-        suffix_both_ways=True,
         initial={"novel": "#ffffff"},
     )
 

@@ -1,0 +1,10 @@
+# overlay-annotations preset: telomere-satellite
+#
+# Ported 1:1 from KaryoScope_merge_beds.telomere_satellite_merge (+ TELOMERE_PRIORITY_FEATURES).
+# Telomere features (subtelomeric) take priority; satellite (region) fills the rest.
+# v2 names (the legacy set was already v2-clean). DRAFT pending maintainer review (M2).
+name: telomere-satellite
+precedence: [region, subtelomeric] # default winner = region (satellite); telomere overrides
+rules:
+  - when: {subtelomeric: [canonical_telomere, noncanonical_telomere, telomere_like, ITS, TAR1]}
+    emit: subtelomeric

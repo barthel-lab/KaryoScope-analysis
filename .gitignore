@@ -1,14 +1,10 @@
-# MkDocs
-site/
-.cache/
-encryptcontent.cache
-
-# Python
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.Python
+
+# Build / distribution
 build/
 develop-eggs/
 dist/
@@ -25,13 +21,31 @@ wheels/
 .installed.cfg
 *.egg
 
-# Virtual environments
-venv/
-ENV/
-env/
-.venv
+# Test / coverage reports
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+.cache/
 
-# IDE
+# Type checkers
+.mypy_cache/
+.dmypy.json
+.pyre/
+.pytype/
+
+# Linters
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE / editors
 .vscode/
 .idea/
 *.swp
@@ -42,5 +56,20 @@ env/
 # Logs
 *.log
 
-# Results (generated output)
+# MkDocs
+site/
+encryptcontent.cache
+
+# Results / scratch (generated output)
 results/
+scratch/
+tmp/
+
+# Keep committed test fixtures (override any ignores above)
+!tests/data/**
+plots_preview/
+
+# CHM13 genome-wide reference annotations (~475 MB, per-base smoothed) — too large for git;
+# the committed data/chm13v2_feature_weights.tsv is the derived artifact (regenerate with
+# `karyoscope-analysis genome-weights`).
+data/raw_bed/chm13v2.0.*

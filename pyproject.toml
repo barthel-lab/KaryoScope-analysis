@@ -1,0 +1,170 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "karyoscope-analysis"
+dynamic = ["version"]
+description = "Clustering, annotation, and visualization tools for KaryoScope sequence annotations."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-3.0-or-later"
+authors = [
+  { name = "Timothy Rhyker Ranallo-Benavidez", email = "rranallo-benavidez@tgen.org" },
+  { name = "Floris P. Barthel", email = "fbarthel@tgen.org" },
+]
+maintainers = [
+  { name = "Timothy Rhyker Ranallo-Benavidez", email = "rranallo-benavidez@tgen.org" },
+  { name = "Floris P. Barthel", email = "fbarthel@tgen.org" },
+]
+keywords = [
+  "bioinformatics",
+  "genomics",
+  "karyotype",
+  "cytogenetics",
+  "telomere",
+  "clustering",
+  "visualization",
+  "T2T",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
+  "Topic :: Scientific/Engineering :: Visualization",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+]
+
+dependencies = [
+  "click>=8.1",
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "scipy>=1.11",
+  "scikit-learn>=1.3",
+  "matplotlib>=3.7",
+  "drawsvg>=2.0",
+  "pillow>=10.0",
+  "pyyaml>=6.0",
+  "jsonschema>=4.21",
+  # --- Sibling KaryoScope-ecosystem packages (NOT on PyPI) ---
+  # Installed editable from their sibling repos during development (see
+  # CONTRIBUTING.md). Listed here because the migrated code now imports them:
+  #   karyoscope -> KaryoScope          (core engine; canonical DB parsers
+  #                 karyoscope.core.io.{colors,hierarchy} + DB path resolution)
+  #   karyoplot  -> KaryoScope-plotlib  (shared drawsvg/matplotlib plotting library)
+  # They are not on PyPI, so `pip install` cannot resolve them automatically;
+  # install the siblings editable first (CONTRIBUTING.md / `pip install -e ../KaryoScope`).
+  "karyoscope",
+  "karyoplot",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-cov>=4.1",
+  "pre-commit>=3.5",
+]
+docs = [
+  "mkdocs>=1.5.0",
+  "mkdocs-material>=9.4.0",
+  "pymdown-extensions>=10.3.0",
+  "mkdocs-encryptcontent-plugin>=3.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/barthel-lab/KaryoScope-analysis"
+Documentation = "https://github.com/barthel-lab/KaryoScope-analysis#readme"
+Repository = "https://github.com/barthel-lab/KaryoScope-analysis"
+Issues = "https://github.com/barthel-lab/KaryoScope-analysis/issues"
+Changelog = "https://github.com/barthel-lab/KaryoScope-analysis/blob/main/CHANGELOG.md"
+
+[project.scripts]
+karyoscope-analysis = "karyoscope_analysis.cli:main"
+
+# --- hatchling configuration ---
+
+[tool.hatch.version]
+path = "src/karyoscope_analysis/_version.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/",
+  "tests/",
+  "LICENSE",
+  "README.md",
+  "CHANGELOG.md",
+  "pyproject.toml",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/karyoscope_analysis"]
+
+# --- ruff (linter + formatter) ---
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+  "E",   # pycodestyle errors
+  "W",   # pycodestyle warnings
+  "F",   # pyflakes
+  "I",   # isort
+  "B",   # flake8-bugbear
+  "UP",  # pyupgrade
+  "SIM", # flake8-simplify
+  "PTH", # flake8-use-pathlib
+  "RUF", # ruff-specific
+]
+ignore = [
+  "E501",  # line length handled by formatter
+  "B008",  # function calls in argument defaults (click uses this idiomatically)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]  # allow `assert` in tests
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# --- pytest ---
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+  "-ra",
+  "--strict-markers",
+  "--strict-config",
+  # Integration tests need external tools (ffmpeg, rsvg-convert) and/or the
+  # sibling karyoplot/karyoscope packages. Default `pytest` skips them; CI
+  # re-enables with an explicit `pytest -m integration` once those are wired up.
+  "-m", "not integration",
+]
+markers = [
+  "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+  "integration: marks tests that require external tools or sibling packages (karyoplot, karyoscope, ffmpeg, rsvg-convert)",
+]
+
+[tool.coverage.run]
+source = ["src/karyoscope_analysis"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+  "pragma: no cover",
+  "raise NotImplementedError",
+  "if __name__ == .__main__.:",
+  "if TYPE_CHECKING:",
+]

@@ -1,0 +1,451 @@
+# Changelog
+
+All notable changes to KaryoScope-analysis are documented here.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+Reorganizing the historical `scripts/` collection into an installable package
+(`karyoscope_analysis`) with a unified `karyoscope-analysis` CLI, modeled on the
+core KaryoScope engine. See `docs/audit/` for the full audit and decision record.
+
+### Added
+
+- Engine B **backbone layout** (`consensus_layout`): orientation and placement use the cluster's
+  *backbone* — a sequence of landmark features — as the primary signal, which is what makes clusters
+  read correctly. The backbone is **chromosomes** only for a *clean translocation* — a **consistent
+  chromosome junction**: two adjacent chromosome blocks (one large, ≥`MAJOR_CHROM_BP`, and one ≥
+  `JUNCTION_PARTNER_BP`) on different chromosomes, the same pair recurring in ≥half the reads
+  (`_translocation_chromosomes`). That recurring, sized, adjacent junction separates a real
+  chr11-chr13 fusion from a chimera (junctions never agree on a pair), a shared subtelomere (both
+  sides small satellite blocks), or a sliver array — all of which use the **structural backbone**:
+  the structural feature with the chromosome *stripped*, so a satellite array split across
+  chromosome labels (a bSat across chr18/chr22/…) is one landmark, not a scramble. Acrocentric chromosomes (chr13/14/15/21/22, whose short arms
+  recombine) collapse to one `acrocentric` token; only true *structureless* features (arms/ct/non-*)
+  are dropped — telomeres and satellites are kept as layout landmarks even though telomere is filler
+  for clustering. Each read is flipped so its backbone runs
+  in one consistent order (the path read off the landmark adjacencies, e.g. `chr11 — chr13 — chr19`
+  or `bSat — ITS`), then placed by **anchoring on the most cluster-conserved boundary it carries** —
+  a *junction* (landmark pair seen adjacent in the most reads, ties toward a chromosome change), or
+  failing that a *breakpoint* (a landmark block's edge that abuts filler, e.g. a `bSat → q_arm`
+  boundary, so a variable-length feature lines up at its breakpoint rather than drifting on its far
+  edge) — so a shared boundary lines up across every read regardless of how much of each landmark it
+  captured, and a read-specific internal boundary can't pull one read out of register. Robust where feature
+  alignment isn't, because a large ~uniform shared satellite (a hub) no longer flips reads or floats
+  the breakpoint. **Orientation** reads off a *finer* backbone (`ORIENT_MIN_BLOCK_BP`, lower than the
+  anchor threshold): a small but real distinctive feature (a ~400 bp ITS next to a TAR1) is enough to
+  tell which way a read runs, even though it is too small to anchor on — so reads carrying one big
+  landmark stop flipping on a coin-toss best-fit. Finally a **concordance refinement** slides each
+  read to the offset that maximizes weighted feature overlap with the cluster consensus (matched by
+  backbone landmark, scored by genome-frequency weight) — the alignment done directly rather than via
+  the single-junction proxy, so a read the anchor put a feature out of register snaps back to where
+  its features actually line up.
+  A read anchors on its first landmark *contact* (two landmarks within `ADJACENT_GAP_BP` — a
+  breakpoint or a feature junction, not arm-separated landmarks); a read missing the proximal
+  landmark falls back to pinning its lowest-rank landmark, so it still lines up on the shared
+  feature instead of drifting via a distal one. A landmark run must be ≥2 kb (chromosomes) /
+  ≥500 bp (features) to count, with the backbone ranked in the seed's reading direction. Clusters
+  with no filler set or <2 landmarks keep the maximum-spanning-tree feature alignment. Membership is
+  unchanged (placement only). Reads in a cluster are ordered top-to-bottom by their consensus start
+  position (leftmost first). `cluster-plot` gains a
+  `--chromosome-track/--no-chromosome-track` option (default on): a thin chromosome-colored strip
+  is drawn directly under each read's structural track (shared DB color palette + a Chromosomes
+  legend), so structure and chromosome identity line up and translocations show two chromosome
+  colors at a glance.
+- Engine B **confident-overlap criteria** (anti-chaining). Three refinements to what counts as an
+  edge: (1) `cluster --require-transition` (default on) — an overlap must cross at least one
+  *transition* between stretch types (a shared junction where the structural feature and/or
+  chromosome changes), not a single uniform shared stretch (a long telomere or one satellite block
+  is a coincidental repeat, not homology); single-stretch reads no longer drag into clusters.
+  (2) An "internal" overlap counts as proper when its only *unaligned* flanks are filler (a
+  down-weighted arm that didn't align) — recovering real junction overlaps (a chr11→chr13 contact)
+  without reopening distinctive-flanked internal-repeat chaining. (3) The overlap-size gate is on
+  matched *distinctive* (non-filler) bp rather than the weighted total, so a small but real shared
+  structure (e.g. chr20 ITS+TAR1+gSat) isn't rejected just because genome-frequency weighting
+  shrinks it, while filler-only overlaps still score 0.
+- Package skeleton: `src/karyoscope_analysis/` (src layout), hatchling build,
+  `karyoscope-analysis` console entry point, `version` subcommand.
+- Tooling: `pyproject.toml` (ruff, pytest, coverage), `.pre-commit-config.yaml`,
+  GitHub Actions CI (lint + test matrix), issue/PR templates, community files
+  (`CONTRIBUTING`, `CODE_OF_CONDUCT`, `CITATION`, `LICENSE`).
+- `docs/audit/`: per-script audits, scoping `DECISIONS.md`, `KNOWN_ISSUES.md`,
+  `feature_matrix_metrics.md`, `clustering_methods.md`, and `OPEN_QUESTIONS.md`.
+- `core/feature_vocab.py`: the hierarchy-derived, **v2-only** feature vocabulary
+  (satellite/arm/ct/telomere groups loaded from the database `hierarchy.tsv` —
+  satellites = the centromeric subtree minus `ct`; legacy v1 names rejected;
+  `novel` the only out-of-taxonomy feature accepted). Single source of truth for
+  feature groupings, replacing the old `scripts/_feature_vocab.py` constants.
+  Ships with tests and a committed `tests/data/hierarchy.tsv` fixture.
+- `core/intervals.py`: pure per-`seq_id` interval algebra (`coalesce`, `refine`,
+  `merge_overlapping`, `total_covered`) — the sweep-line workhorses behind
+  `overlay-annotations` (no pyranges, decision M5).
+- `core/io/bed.py`: annotation-BED reader/writer enforcing the **C4 invariant**
+  (rows grouped by `seq_id`; each sequence's intervals form a gapless,
+  non-overlapping partition) — malformed input and gaps/overlaps are errors (C2);
+  `.gz` (gzip/bgzip) read transparently. Provides both an eager
+  `read_annotation_bed` and a streaming `iter_annotation_rows` (one row at a time,
+  same C4 validation) for single-pass overlays.
+- `core/annotation_resolution.py`: the `overlay-annotations` resolution engine —
+  a `precedence` (default winner) + an ordered list of class-based `rules` (M2),
+  with `emit` forms passthrough / `{literal}` / `composite`. Specs are validated
+  structurally (jsonschema) and semantically against the database hierarchy (every
+  featureset / feature / `@class` must exist); `when` keys are lint-checked to be in
+  precedence order. Composite labels join in precedence order (e.g. `DJ_TAR1`).
+- Built-in overlay presets (`presets/*.yaml`): the four legacy `merge_beds` priority
+  modes ported 1:1 — `telomere-satellite`, `priority`, `chromosome-acrocentric`,
+  `telomere-acrocentric` — with v1→v2 name translation (`telomere_like_multigroup1`→
+  `telomere_like`, `arm_multigroup1`→`arm`, `array_multigroup1`→`array`,
+  `acrocentric_multigroup1`→`acrocentric`, `noncentromeric`→`rDNA`). Loaded via
+  `load_builtin_preset`; validated against the hierarchy.
+- **`bin-annotations` subcommand** + `core/annotation_binning.py`: a **hierarchy-aware
+  rolling-window mode filter**, run *before* `overlay-annotations` to denoise a single
+  featureset BED. Each base's feature is replaced by the locally dominant feature in a
+  centered window (default 101 bp, clipped at sequence ends; output length and the C4
+  partition are preserved). The vote is **not flat** — per-feature window bp propagate up
+  the database tree and the call is found by descending from the root into the dominant
+  child while its subtree holds a majority, stopping at the deepest node that still does;
+  so related siblings (e.g. `aSat`/`bSat` under `centromeric`) reinforce each other rather
+  than splitting their vote and losing to an unrelated minority, and a split among subtypes
+  honestly reports their ancestor. Knobs: `--majority-fraction` (τ, default 0.5; **0 = always
+  descend to a specific leaf**, no internal/ambiguous labels) and
+  `--threshold-scope` (`node` = conditional majority relative to the current node, more
+  specific [default]; `window` = relative to the whole window, conservative); a window with
+  no top-level majority falls back to flat plurality (keeps clean boundaries sharp). `novel`
+  votes as a top-level leaf; every other label must be in the featureset (C2). Streams one
+  sequence at a time (`O(one sequence)` memory), atomic output. Strongly fragmentation-
+  reducing on real data (U2OS region: 1.38M → 219k intervals at window 101, 6.3×; → 30k at
+  window 1001, 46×). **O(intervals) and window-independent**: between the O(intervals)
+  breakpoints where the window's entering/leaving base crosses an interval edge the per-feature
+  counts are linear, so the descent is evaluated O(1) times per segment (a conservative
+  "constant for the next N steps" bound; recompute-and-merge keeps it exact) — cost no longer
+  grows with the window (U2OS region ~23–28 s at *either* window 101 or 1001, vs ~160 s for the
+  original per-base version). A per-base reference (`bin_intervals_naive`) pins the fast path in
+  a 600-case property test (τ ∈ {0, …, 1}, both scopes).
+- **`bin-annotations --step`**: stride between window centers (bp), default 1. `step=1` keeps the
+  exact per-base engine above; `step>1` switches to a strided engine (`bin_intervals_strided`)
+  that samples the centered window once per `step`-bp output block, maintaining the window
+  contents incrementally as it jumps — `O(intervals)` regardless of how the per-base fast path
+  behaves. This rescues the megabase-window / whole-genome coarsening case: on raw sample BEDs the
+  per-base engine degrades to `O(genome length)` because pervasive `novel` defeats its
+  window-independent bound (a ~3 Gb haplotype was ~hours at `step=1`/1 Mb window; ~1 min at
+  `step=10000`). `step>1` is an approximation of the per-base result — output boundaries snap to
+  the step grid and it is no longer reverse-complement invariant (a boundary can shift up to
+  `step`) — so keep `step` well below the smallest feature to localise. Unifies the two binning
+  styles under one knob: `step=1` is the rolling filter, `step=window` is non-overlapping tiling.
+  A property test pins `step=1` strided == `bin_intervals_naive`.
+- **`overlay-annotations` subcommand** (replaces `KaryoScope_merge_beds.py`): a
+  **single-pass, streaming k-way overlay**. It reads every per-featureset BED
+  concurrently and sweeps a line across the union of track boundaries per `seq_id`,
+  resolving each segment via a preset / custom spec / the default basic overlay and
+  coalescing — holding only the *current* interval of each track, so it runs in
+  `O(featuresets)` memory regardless of input size (peak ~2 MB vs ~420 MB for the
+  in-memory approach on a full sample, byte-identical output). Tracks must present
+  sequences in the same order (lockstep, validated — no fragile name comparison);
+  order/coverage/span disagreements are errors. Validates input features against the
+  hierarchy as they are first seen (C2), and writes output atomically (temp file +
+  replace, so a mid-stream error leaves no partial file). First fully-migrated tool,
+  wired into the `karyoscope-analysis` CLI.
+- `core/seq_features.py`: pure per-`seq_id` feature metrics for `build-feature-matrix`
+  — coverage (`bp`/`frac`/`total_bp`), 1-bp-step sliding-window density
+  (`dmax`/…/`dterminal`), `max_block_bp` (gap-bridged), hierarchy-derived
+  interspersion, and the adaptive-threshold computation. Every magic constant
+  (window size, block-gap tolerance, threshold factor/bounds) is a parameter (F4).
+  The sliding-window density is computed **analytically from the intervals**
+  (`O(intervals + window)`, no dense per-feature coverage array, cumsum, or
+  full-array median) — byte-identical to the old dense computation, verified by a
+  property test over thousands of random partitions.
+- **`build-feature-matrix` subcommand** (replaces the matrix-building part of
+  `KaryoScope_sequence_annotate.py`): a **single-pass, streaming** build — every
+  featureset BED is read concurrently in lockstep by `seq_id` (via
+  `core/io/bed.iter_aligned_groups`), so only one sequence's intervals are held at a
+  time. Emits the wide per-`seq_id` matrix (`{featureset}__{metric}__{feature}`
+  schema, F2) + an adaptive-threshold sidecar (F5). Constants are CLI options (F4);
+  alignment-QC columns intentionally omitted (they move to `cluster-diagnostics`, F6).
+  On a full sample: peak memory ~1244 MB → ~218 MB (5.7×) and read+compute ~58s → ~21s
+  (2.8×), output byte-identical. Second fully-migrated tool; completes the
+  data-foundation tier.
+- End-to-end tests for `overlay-annotations` and `build-feature-matrix` on real
+  `KS_human_CHM13_v2` HeLa data: fast default tests run on tiny committed fixtures
+  (`tests/data/v2_subset/`, carved from the full BEDs by a documented, deterministic
+  `make_subset.py`), and `@pytest.mark.integration` tests run the same pipelines on
+  the full `data/raw_bed/` BEDs (skipped when that large data is absent). They assert
+  the real contracts: C4-valid output, `seq_id` conservation, the F2 column schema,
+  coverage self-consistency (`bp`/`frac` sum to `total_bp`/1), and telomere
+  interspersion over an overlay composite.
+- `docs/audit/rearrangement_detection.md`: the agreed mental model and design for
+  detecting recurrent rearrangements as **abnormal feature colocalizations** —
+  reads as orientation-agnostic ordered feature-segment sequences; the two axes of
+  abnormality (proximity vs abundance); the Engine A (alignment-free colocalization
+  detection) / Engine B (alignment-based clustering) split; the experiment-vs-control
+  + annotated-CHM13-reads baselines; and the anti-circularity discipline (Group A).
+- `core/colocalization.py`: Engine A **measurement layer** — per read, the minimum bp
+  gap between every co-present feature pair (a single sweep, orientation-invariant,
+  `min_occurrence_bp` denoise), plus a streaming reader over an overlay BED. Pure and
+  non-statistical.
+- `core/rearrangement.py` + **`detect-rearrangements` subcommand**: Engine A differential
+  test. Aggregates each sample's per-read gaps into per-(length-bucket, pair) support
+  counts, then tests experiment-vs-control colocalization rates per `(pair, window)` with a
+  **Cochran-Mantel-Haenszel** stratified test (length buckets as strata), **BH-FDR**, and
+  recurrence / effect-size / **reference artifact-floor** gates (the floor = annotated
+  CHM13 reads). Reports all tested pairs with a `passes` flag and a `reference_abnormal`
+  annotation. A **v1 for coauthor review** (Group A statistics); read independence is
+  assumed and surfaced as a runtime warning, not enforced (de-duplication is an open item).
+- `docs/audit/rearrangement_detection.md` §8: the full **Engine B** design — clustering as
+  overlap-layout-consensus (OLC) assembly over feature-segment sequences (overlap graph on
+  *proper* overlaps only, connected-components clustering, seed-anchored consensus,
+  orientation propagation; recurrent inter-cluster bridges = rearrangements).
+- `core/feature_align.py`: Engine B's **feature-sequence local aligner** — Smith-Waterman
+  over `(feature, length)` segments with hierarchy-tiered substitution (`hierarchy_substitution`:
+  exact > sibling > unrelated, `novel` neutral), `min(len)`-weighted (length-change-lenient)
+  matches, linear per-bp gaps, and best-of-forward/reverse. Classifies overlaps as
+  dovetail / containment / internal, with a feature-Jaccard prefilter. Pure; the overlap
+  graph + consensus + CLI build on it.
+- `core/feature_assembly.py`: Engine B's **overlap graph + clustering** — keeps only
+  *proper* overlaps (dovetail/containment) clearing a minimum overlap length and normalized
+  identity (internal-only repeat matches rejected; the anti-chaining safeguard), then groups
+  reads into connected-component clusters via a **parity union-find** that assigns each read
+  an orientation relative to its cluster seed (longest read) and flags orientation
+  conflicts. Singletons kept. `assemble()` returns `(clusters, edges)`.
+- `core/feature_assembly.py` `cluster_consensus`: Engine B's **seed-anchored consensus** —
+  each cluster member is oriented to the seed and locally aligned to it, and every aligned
+  column votes its feature at the corresponding seed position (the seed votes for itself).
+  Yields the per-position majority feature with support/coverage over the seed backbone.
+- **`cluster` subcommand**: Engine B's CLI — clusters an overlay-annotations BED subset of
+  reads into structural haplotypes (OLC), writing a clusters table, a per-cluster consensus
+  BED (with per-position support/coverage), and a member layout TSV (orientation + seed
+  flag). Substitution scorer + all overlap thresholds are options; `--min-length` keeps the
+  long-read-only default. Rendering of the layouts is left to the plotting tier. This
+  completes Engine B (aligner -> overlap graph -> clusters -> consensus -> CLI).
+- Engine B **feature weighting** (anti-chaining) — `core/feature_assembly` per-feature
+  `weight` scales both the match reward and the overlap-length criterion so overlaps must
+  rest on distinctive structure; `idf_weights` (frequency) and
+  `FeatureHierarchy.interspersed_repeat_features` (the `Interspersed_Repeat` subtree). The
+  `cluster --weight-method` defaults to `repeat-mask` (zero interspersed repeats + `nonrepeat`).
+  Validated on real v2 data: repeat-mask cuts a 223/250-read mega-cluster to 127 (singletons
+  11 -> 112); the residual is a structurally-coherent telomeric group whose sub-division is
+  left to community detection (open). See `docs/audit/rearrangement_detection.md` §10.
+- Engine B **chromosome identity** (the bigger anti-chaining lever) — a
+  `chromosome-telomere-satellite` overlay preset emits two-layer `chromosome:structural`
+  labels (e.g. `chr13:canonical_telomere`), enabled by a new **explicit-list composite emit**
+  (`{composite: [chromosome, subtelomeric]}`) in the resolution spec. The aligner gains
+  `chromosome_aware_substitution` (and the `cluster --cross-chromosome-penalty` option): the
+  structural layer is hierarchy-graded; the chromosome layer adds a soft per-bp penalty unless
+  two positions are the *same specific chromosome* (different/ambiguous chromosomes penalized),
+  so reads cluster by chromosome and translocation reads still bridge. Validated: under
+  `telomere-satellite` the subset chained almost entirely (249/250), and the chromosome
+  composite splits it into
+  clean per-chromosome clusters (largest 18) with multi-chromosome clusters surfacing as
+  candidate translocations. See `docs/audit/rearrangement_detection.md` §10.
+- **`genome-weights` subcommand** + `core/genome_weights.py`: per-feature **information-content
+  weights from the annotated CHM13 reference** (one C4 BED per featureset). Tallies each
+  feature's genome bp, takes its fraction `p` of its featureset's partition, and writes
+  `-ln(p)` scaled to `(0, 1]` by the rarest feature across all featuresets (ubiquitous → ~0,
+  rare → 1). New `cluster --weight-method genome-freq --genome-weights <tsv>` applies them.
+  This is the principled answer to *structural* chaining (read-frequency `idf` couldn't
+  separate the drivers): genome-wide, `q_arm`/`p_arm` cover 57%/26% of the genome → weight
+  0.027/0.064 (crushed), while `canonical_telomere` covers 0.003% → weight 0.51 (kept
+  informative). **Also fixes a latent bug:** `_weight`/`idf_weights` now key on the
+  **structural layer** of `chromosome:structural` labels, so weighting actually applies on
+  composite overlays (previously `repeat-mask`/`idf` silently no-op'd there). Validated on the
+  U2OS w1001/τ0 binned subset: clusters become chromosome-coherent and recurrent
+  candidate translocations surface (chr4+chr22 across 3 reads; chr12+chr9 across 2), where
+  before reads were glued by shared `p_arm` with a meaningless consensus.
+- Engine B **distinctive-overlap edge criterion** (`cluster --min-distinctive-bp`,
+  `--distinctive-weight`) — the final anti-arm-chaining lever. An edge now also requires a
+  minimum bp of matched *distinctive* features (weight ≥ `--distinctive-weight`, default 0.15),
+  so an overlap explained only by filler (a shared chromosome arm) is rejected even though its
+  weighted overlap is large (huge arm block × tiny weight). Genome-frequency weighting alone
+  left ~150 kb arm blocks clearing the weighted-overlap floor; this closes that gap. Validated
+  on the U2OS w1001/τ0 subset at `--min-distinctive-bp 1000`: the chr4 arm-star dissolves to
+  singletons and the all-`p_arm` chr5 read drops out of the chr5 cluster, leaving three
+  structurally-justified clusters (chr12+chr9; chr20; chr5+`canonical_telomere`). Off by default
+  (0); recommended with a weighting method.
+- Engine B **scales to a whole sample** — three levers so `cluster` no longer needs the
+  O(N²) all-vs-all alignment that made 4005 reads intractable (43 min, unfinished):
+  (1) a **blocking index** (`--block-min-bp`) that buckets reads by the *specific chromosome*
+  leaf of their composite labels and only aligns within-bucket pairs (translocation reads join
+  every chromosome they span, so the signal is kept; ambiguous `autosome`/`categorized` content
+  is excluded); (2) **scorer memoization** (the substitution scorer is called per DP cell but has
+  only ~hundreds of distinct feature pairs); (3) **process parallelism** (`--workers/-j`) over the
+  candidate pairs via `fork`, so workers inherit the reads + scorer copy-on-write (no pickling)
+  and the result is identical to serial. Full U2OS (4005 reads, w1001/τ0 overlay) now clusters in
+  **~100 s on 8 cores** (≈6.4× speedup), vs >8 min serial / 43 min unoptimized. See the
+  "running on a whole sample" runbook in `docs/audit/rearrangement_detection.md` §13.
+- Engine B **community detection** (`cluster --communities`, default on) — in-house weighted
+  **label propagation** subdivides each connected component so a sparse bridge (a noisy
+  multi-chromosome read, or a lone translocation) no longer transitively merges distinct groups.
+  Orientation parities still come from the component-wide union-find, so they stay consistent
+  within each sub-community. On the full U2OS run this dissolved a **1058-read mega-cluster** (it
+  spanned every chromosome — diagnosed as bridge-chaining through 52 noisy ≥3-chromosome reads,
+  whose chromosome layer is scattered slivers, not the large blocks a real complex rearrangement
+  would show) into **clean per-chromosome haplotype groups** (some chromosomes resolve into
+  *multiple* haplotype communities, e.g. chr18 → 148 + 83) and **24 recurrent translocation
+  candidates** (chr4+chr22 ×43, chr18+chr19 ×34, chr13+chr11 ×33, chr1+chr21 ×23, …). 4005 reads →
+  2544 clusters (75 multi-read), no mega-cluster.
+- Engine B **consensus-coordinate layout** (`feature_assembly.consensus_layout`, replacing the
+  seed-anchored consensus + single-offset layout). Each read is placed in the cluster's consensus
+  frame via a piecewise-linear map through its read→seed **alignment columns** (slope-1 outside
+  the anchors), so **matched features stack vertically** instead of drifting (a chr20 cluster's
+  shared `HSat3` now lands at identical coordinates in both reads, vs ~20 kb off before), and a
+  read's overhang **extends the frame** so the consensus spans the **union** of all reads (not
+  just the seed). `cluster`'s `layout.tsv` is now **per-segment** (`cluster_id, read_id, is_seed,
+  reversed, start, end, feature` in consensus coords) and the consensus BED spans the union;
+  `cluster-plot` draws straight from those coordinates (no `--overlay` needed) with length
+  filtering off by default so a gap unambiguously means "didn't align".
+- Engine B **filler-aware distinctiveness** — a `FeatureHierarchy.filler_features` set (telomere +
+  arm + ct + non-* / novel) is now what "distinctive" means, replacing the genome-frequency weight
+  threshold for clustering. **Telomere is genome-rare (high weight) yet read-set-ubiquitous** (every
+  chromosome end), so the weight couldn't flag it; the explicit set can. Two effects: `cluster
+  --min-interesting-bp` (default 2000) **drops "boring" reads** (telomere/arm-only, no satellite /
+  ITS / TAR1 / rDNA content) before clustering, and the distinctive-overlap edge criterion counts
+  only non-filler shared content, so reads can no longer **chain through shared telomere**. On full
+  U2OS this dissolved the residual 323-read, 23-chromosome `cluster_0` (it was 53% boring reads) —
+  every cluster is now chromosome-coherent: 39 single-chromosome haplotype groups + 14 clean
+  translocation candidates (chr4+chr22 ×34, chr13+chr11 ×33, chr14+chr22 ×28, chr21+chr1 ×23, …).
+  `cluster-plot` titles now list **all** major chromosomes (`chr4+chr22`), so translocations are
+  labeled as such.
+- Engine B aligner now enforces **feature order, spacing, and length**, not just shared content.
+  A matched column scores `sub·min(len) − gap_factor·|len_a − len_b|` — the length mismatch is
+  charged as a gap — so `gap_factor` is the single knob over *all* unmatched bp (a skipped segment
+  = a spacing difference, and a matched feature's length difference), with `min_identity` as the
+  flexibility dial. Order was always enforced (the alignment is colinear). Default `--gap-factor`
+  raised 0.01 → **0.1**: on full U2OS this tightens the under-splitting (largest cluster 131 → 50,
+  53 → 71 clusters) while *keeping* the recurrent translocations (14 → 16); 0.3 over-prunes
+  (translocations collapse, because a flat penalty punishes legitimate arm-length capture
+  variation). Also a **layout orientation fix**: `consensus_layout` now orients each read by its
+  best-fitting alignment to the seed (try both), instead of the union-find parity that can
+  disagree — fixing reads drawn flipped (e.g. by a misplaced `ct`).
+- **`cluster-plot` subcommand** + `core/cluster_plot.py` + `core/io/colors.py`: the package's
+  single **read-renderer** (collapsing the legacy `plot-reads`/`cluster-plot`/`telogator-reads-viz`).
+  Renders **one cluster (`--cluster-id`) or all clusters stacked in one SVG** (omit `--cluster-id`;
+  `--min-cluster-size` filters, each panel titled with its dominant chromosome) — each read a row of
+  feature-colored bars, oriented and offset into the seed frame (from `cluster`'s `layout.tsv`, which
+  now carries a seed-relative `offset`/`length` via `feature_assembly.cluster_layout`), with the
+  consensus track and a shared legend.
+  Colors from the database `colors.tsv` (committed to `tests/data/`; structural layer of
+  `chr:feature` labels), with a deterministic auto-palette fallback; `--min-segment-bp` denoises.
+  Self-contained raw SVG (no plotting deps) — the `karyoplot.svg` push-down is deferred, as are the
+  animation/video (D7) and the old `cluster_analysis`-specific visuals (dendrogram/enrichment bubbles).
+
+### Added
+
+- **`plot-enrichment`** — the capstone enrichment figure: a clusters x samples heatmap colored by
+  log2 fold-enrichment (from `test-enrichment`), rows labeled by their structural label (from
+  `cluster-annotate`), enriched clusters first. With `--consensus`/`--colors` it also draws each
+  row's **consensus structure** (a feature-colored bar + feature legend) beside the heatmap, so the
+  label can be checked against the actual structure. The consensus panel uses a shared **absolute
+  bp scale** (cluster lengths comparable; `--normalize-consensus` for per-row normalized), and by
+  default orients each consensus **telomere-left and aligns rows at the telomere->rest breakpoint**
+  (x=0), so subtelomere/ALT structures line up for comparison (`--no-align-telomere` to disable;
+  clusters without a leading telomere align at their start). One glance shows which structural
+  haplotypes concentrate in which line. matplotlib via `karyoplot.mpl.style`; see
+  `core/enrichment_plot.py`.
+- **`cluster-annotate`** — label each cluster from its **consensus** structure, re-modeled for
+  Engine B. The legacy decision tree keyed on per-read telomere-density columns (the gone Ward-era
+  `sequence_annotate` format); this reads the label off the consensus using **hierarchy-derived
+  feature classes** (`FeatureHierarchy.telomere_features` / `satellite_features` / `its_tar1` /
+  `chromosomes` — no hardcoded feature names): ECTR (telomere both ends) / subtelomere (one end;
+  Type II ALT subtelomere with a long canonical block) / interstitial telomere / interstitial
+  ITS-TAR1 / satellite-dominant. Numeric thresholds default to a documented human/CHM13 preset and
+  are overridable (`--end-fraction`/`--satellite-fraction`/`--alt-block-bp`). Output also carries
+  the specific chromosomes the consensus spans (flags potential translocations) and the consensus
+  signature. **Not ported:** the per-read density aggregation (subsumed by the consensus), the SVD
+  feature-importance (legacy feature matrix), and the sample-specific Type I ALT relabel (sample
+  composition is `test-enrichment`'s job). See `core/cluster_annotate.py`.
+- **`compare-clusterings`** — concordance of two clusterings of the same reads. Takes two `cluster`
+  `layout.tsv` files, computes the Adjusted Rand Index and Normalized Mutual Information over their
+  shared reads (both label-invariant), and writes a report + a long-format cluster-to-cluster
+  read-overlap table. **Fixes the legacy B1 bug** (it imported `adjusted_rand_index` — not a real
+  sklearn name — and swallowed the `ImportError`, so ARI was never computed); the study-specific
+  Pre/Post plots and fragile sidecar discovery are dropped. See `core/clustering_comparison.py`.
+- **`select-representatives`** — catalog each cluster's representative structure. The cluster
+  **consensus is the representative** (Engine B computes it), so the legacy best-read selection (a
+  length/feature heuristic with a declared-but-unused `centroid_distance`) is obsolete: this reads
+  `clusters.tsv` + `consensus.bed` and writes one row per cluster — size, consensus segment count,
+  width, and a compact consensus *signature* (the ordered feature path, e.g.
+  `canonical_telomere > ITS > bSat`) that the raw per-segment `consensus.bed` doesn't provide.
+  Filtered by `--min-cluster-size`. See `core/representatives.py`.
+- **`test-enrichment`** + **`pool-samples`** — cross-sample cluster enrichment (the enrichment half
+  of the legacy `cluster_analysis.py`, re-modeled for Engine B). `pool-samples` concatenates
+  per-sample (overlay) BEDs with `{sample}|{read_id}`-namespaced read ids and emits a read→sample
+  TSV, so all samples are clustered **once, jointly** (Engine B co-clusters shared structures). On
+  that pooled clustering, `test-enrichment` reports, per cluster, per-group read counts,
+  depth-normalized fractions, log2 fold-enrichment vs the pool, and `private`/`enriched` flags —
+  the headline being structures that define a line (e.g. ALT architectures private to U2OS). The
+  model is **descriptive and effect-size-first** (read counts are not independent replicates;
+  typically one sample per line ⇒ no biological replication), so it does not emit per-read p-values;
+  a formal group contrast for replicated designs, plus bp-depth and per-chromosome-end copy-number
+  normalization, are planned refinements. See `core/enrichment.py`.
+- **`plot-reads`** (Phase 3a–3c) — render per-read feature BEDs (`read_id  start  end feature`)
+  as stacked feature-colored bars: vertical columns (default) or `--horizontal` rows, with
+  `--orient {telomere,chromosome,satellite}` reorientation, a scale bar, an optional auto-filtered
+  legend, `--background {black,white}`, and `--feature-mode {smooth,transition,raw}`.
+  Rasterization is delegated to `karyoplot.svg.reads.rasterize_features`; feature colors come from
+  the DB `colors.tsv` (features absent from it render white, the `novel` sentinel). A `--read-list`
+  TSV adds two-tier `--label-tier` grouping, a metadata `--heatmap`/`--heatmap-track` above the
+  reads (categorical colors from `karyoplot.core.colors.qualitative_palette`, **not** a hardcoded
+  list), and `--filter-group`; `--markers` draws arrowheads at given bp positions. `--format
+  png`/`both` converts the SVG to PNG via `karyoplot.svg.export.svg_to_png` (rsvg-convert; the
+  legacy PIL raster path is not ported), and `--preset telogator` reproduces the legacy
+  `telogator-reads-viz` defaults (telomere orientation + SVG/PNG). The panning animation stays
+  deferred (D7). Migrated from the SVG core of the legacy `KaryoScope_plot_reads.py`.
+  **No hardcoded biology:** unknown feature colors are a hard error (only
+  `novel` may be absent, rendered white) rather than a silent white bar; and `--orient`'s
+  telomere/chromosome/satellite feature classes are derived from the DB `hierarchy.tsv` via
+  `FeatureHierarchy` (new `chromosomes`/`telomere_features`/`leaves`), not literal feature lists.
+- **`draw-legend`** — render a standalone SVG legend straight from the database `colors.tsv`,
+  grouped by feature set (the `feature_set` column drives the sections, replacing the legacy
+  `KaryoScope_draw_legend.py` manual `Header:feat1,feat2` string). Colors come entirely from the DB;
+  nothing is hardcoded. Supports `--feature-set`/`--include`/`--exclude` filtering, `--merge-same-color`,
+  `--theme dark|light`, and label cleanup. Renders via `karyoplot.svg.legend` — new helper
+  `featureset_legend_items` flattens a `{feature_set: {feature: color}}` palette into legend rows
+  (DB-agnostic; takes plain dicts). The grouped layout uses one column per feature set so no group is
+  silently truncated.
+
+### Changed
+
+- **`bin-annotations`: gate `novel` on an absolute window fraction.** `novel` (k-mer-not-in-index)
+  is an index property, so the *same* positions are novel across a database's featuresets — but the
+  rolling-window vote chose it by *plurality*, whose competing feature differs per featureset, so the
+  binned-novel extent diverged and overlaying produced spurious `chrN:novel` / `novel:feature` mixes.
+  `novel` now wins a window only when it covers at least `--novel-min-fraction` (default 0.5);
+  otherwise it's dropped from the vote and the dominant non-novel feature wins. This makes
+  binned-novel featureset-independent → overlay yields `novel:novel`. (Rare residual mixes remain
+  where the *raw* novel extents differ by a few bp across featuresets at a boundary; they render
+  fine via the cluster-plot fix below.)
+- **`cluster-plot`: allow `novel` as a chromosome layer.** A composite label's chromosome layer can
+  be the `novel` sentinel (`novel:HSat3`, `novel:novel`); like a novel structural feature it now
+  renders white instead of raising `UnknownFeatureError`.
+- **`cluster-plot` is now strict and DB-faithful** (consistency with `plot-reads`): `--colors` is
+  required, unknown feature colors are a hard error (only `novel` may be absent → white) instead of
+  the previous `TAB20` auto-palette fallback, and translocation-label chromosomes are identified
+  from the DB `hierarchy.tsv` (`FeatureHierarchy.chromosomes`) rather than a hardcoded `chr` prefix
+  — so non-human / custom chromosome naming is handled by the database. `UnknownFeatureError` now
+  lives in `core/feature_vocab.py` (shared by both renderers). Engine B's `feature_assembly`
+  chromosome detection still uses the `chr` prefix and is tracked as a separate follow-up.
+- Dropped all legacy v1 `_specific` / `_multigroup` suffix handling from the migrated plotting
+  code (and from `karyoplot`'s `load_palette_file` / legend label cleaner, now `clean_label`):
+  the v2 DB uses clean feature names, so this dead-code path is gone. v1 names remain rejected by
+  hierarchy validation (the existing v2-only policy), not silently translated.
+- **`cluster-plot` now renders through `karyoplot`** instead of emitting raw SVG strings: the
+  consensus read-track figure is built on a `drawsvg` Drawing using
+  `karyoplot.svg.drawing.draw_annotation_track` (segment + chromosome sub-tracks) and
+  `karyoplot.svg.legend.draw_grouped_legend` (feature/chromosome legend) — the same stack the
+  KaryoScope engine renders with. The hardcoded fallback palette is gone: unknown-feature /
+  cluster colors now come from `karyoplot.core.colors.TAB20` (the one shared categorical palette),
+  while feature colors still come from the DB. The `render_cluster(s)_svg` string API is unchanged.
+- DB color parsing is now delegated to the canonical `karyoscope.core.io.colors.parse_colors`
+  (and `parse_hierarchy`) rather than reimplemented: `core/io/colors.py` is a thin layer over the
+  engine's parser, exposing `load_colors` (collapsed `{feature: color}`) and the new
+  `load_colors_by_featureset` (`{feature_set: {feature: color}}`). `karyoscope` and `karyoplot` are
+  now declared dependencies (install the siblings editable first; see `CONTRIBUTING.md`). This keeps
+  the three-column `colors.tsv`/`hierarchy.tsv` format parsed and validated in exactly one place
+  across the ecosystem, and `karyoplot` stays a DB-agnostic renderer fed plain dicts.
+
+### Notes
+
+- Migration of the analysis scripts into the package (with bug fixes, v2-only
+  feature vocabulary, and `karyoplot` push-down) is in progress; see
+  `docs/audit/DECISIONS.md`.
