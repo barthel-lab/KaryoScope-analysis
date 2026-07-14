@@ -425,3 +425,28 @@ def test_landmark_order_keeps_the_middle_in_the_middle():
     rank = asm._landmark_order(seqs)
     assert rank["ITS"] == 1
     assert {rank["bSat"], rank["TAR1"]} == {0, 2}
+
+
+def test_consensus_layouts_workers_match_serial():
+    # The per-cluster layout is fanned over a pool when workers>1; parallel must equal serial
+    # (clusters are independent + pool.map preserves order), which is what makes it a safe swap.
+    reads = {
+        "a": [("P", 30), ("Q", 100), ("R", 80)],
+        "b": [("Q", 100), ("R", 80), ("S", 40)],
+        "c": [("R", 80), ("S", 40), ("T", 50)],
+        "d": [("X", 90), ("Y", 90)],
+        "e": [("Y", 90), ("Z", 90)],
+    }
+    edges = asm.build_overlap_graph(
+        reads, sub_score=EXACT, gap_factor=0.01, min_overlap_bp=50, min_identity=0.5, workers=1
+    )
+    clusters = asm.cluster_reads(reads, edges)
+    neighbors: dict[str, list[str]] = {}
+    for e in edges:
+        neighbors.setdefault(e.a, []).append(e.b)
+        neighbors.setdefault(e.b, []).append(e.a)
+    common = dict(neighbors=neighbors, sub_score=EXACT, gap_factor=0.01)
+    serial = asm.consensus_layouts(reads, clusters, workers=1, **common)
+    parallel = asm.consensus_layouts(reads, clusters, workers=4, **common)
+    assert len(clusters) > 1  # exercise the parallel path
+    assert serial == parallel

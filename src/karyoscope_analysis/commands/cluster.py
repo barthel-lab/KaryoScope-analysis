@@ -305,20 +305,18 @@ def cmd(
     # Layout backbone keeps telomeres (and satellites) as anchors — only true structureless features
     # (arms/ct/non-*) are dropped — even though telomere is filler for clustering.
     structureless = filler - hierarchy.canonical_telomere - hierarchy.noncanonical_telomere
-    layouts = [
-        asm.consensus_layout(
-            reads,
-            c,
-            neighbors=neighbors,
-            sub_score=sub_score,
-            gap_factor=gap_factor,
-            filler=filler,
-            structureless=structureless,
-            acrocentric_chromosomes=acrocentrics,
-            weight=weight,
-        )
-        for c in clusters
-    ]
+    layouts = asm.consensus_layouts(
+        reads,
+        clusters,
+        workers=workers,
+        neighbors=neighbors,
+        sub_score=sub_score,
+        gap_factor=gap_factor,
+        filler=filler,
+        structureless=structureless,
+        acrocentric_chromosomes=acrocentrics,
+        weight=weight,
+    )
 
     clusters_tsv = output
     consensus_bed = _sidecar(output, "consensus.bed")
