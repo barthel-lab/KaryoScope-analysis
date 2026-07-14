@@ -9,13 +9,42 @@ no-replication caveat.
 
 from __future__ import annotations
 
+import gzip
 from pathlib import Path
 
 import click
 
 from karyoscope_analysis.core import enrichment as enrich
 from karyoscope_analysis.core.io.clusters import read_layout_assignments
-from karyoscope_analysis.core.plot_reads import load_read_list
+
+
+def _read_group_map(path: Path, group_col: str) -> tuple[list[str], dict[str, str]]:
+    """Stream a read-list TSV -> ``(columns, {read_id: group_value})`` for one column only.
+
+    test-enrichment needs only each read's group assignment, so this avoids
+    ``load_read_list``'s full per-read metadata dict + row list -- bounding memory for a large
+    pooled read-list. Header detection matches ``load_read_list``; last value wins per read.
+    """
+    p = str(path)
+    open_func = gzip.open if p.endswith(".gz") else open
+    mode = "rt" if p.endswith(".gz") else "r"
+    columns: list[str] = []
+    gi: int | None = None
+    read_to_group: dict[str, str] = {}
+    with open_func(p, mode) as fh:
+        for line in fh:
+            fields = line.rstrip("\n").split("\t")
+            if not fields or not fields[0]:
+                continue
+            rid = fields[0]
+            if rid.lower() in ("sequence", "read", "read_id"):
+                if len(fields) > 1:
+                    columns = fields[1:]
+                    gi = columns.index(group_col) + 1 if group_col in columns else None
+                continue
+            if gi is not None and gi < len(fields) and fields[gi]:
+                read_to_group[rid] = fields[gi]
+    return columns, read_to_group
 
 
 @click.command(name="test-enrichment", help="Per-cluster enrichment across samples/groups.")
@@ -75,10 +104,9 @@ def cmd(
     except ValueError as e:
         raise click.ClickException(str(e)) from e
 
-    _ids, columns, read_data, _rows = load_read_list(read_list_path)
+    columns, read_to_group = _read_group_map(read_list_path, group_col)
     if group_col not in columns:
         raise click.ClickException(f"--group-col {group_col!r} not in read-list columns {columns}")
-    read_to_group = {rid: meta[group_col] for rid, meta in read_data.items() if meta.get(group_col)}
     if not read_to_group:
         raise click.ClickException(f"no reads have a {group_col!r} value in {read_list_path}")
 
