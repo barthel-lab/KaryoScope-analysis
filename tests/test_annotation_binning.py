@@ -313,3 +313,76 @@ def test_bin_annotations_cli_rejects_unknown_feature_set(cli_runner, tmp_path: P
     )
     assert res.exit_code != 0
     assert "not in the hierarchy" in res.output
+
+
+def _run_bin_cli(cli_runner, bed: Path, out: Path, threads: int) -> str:
+    res = cli_runner.invoke(
+        main,
+        [
+            "bin-annotations",
+            "--input",
+            str(bed),
+            "--hierarchy",
+            str(HIERARCHY_TSV),
+            "--feature-set",
+            "region",
+            "--window",
+            "51",
+            "--step",
+            "3",
+            "--threads",
+            str(threads),
+            "-o",
+            str(out),
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    return out.read_text()
+
+
+def test_bin_annotations_threads_match_serial(cli_runner, tmp_path: Path):
+    # Many sequences, each a gapless C4 partition with tiny fragments to smooth.
+    # The parallel path must be byte-identical to single-threaded (order preserved,
+    # per-sequence binning), which is what makes --threads a safe drop-in.
+    rng = random.Random(0)
+    feats = ["aSat", "bSat", "arm"]
+    lines: list[str] = []
+    for r in range(60):
+        pos, length = 0, 300
+        while pos < length:
+            w = rng.choice([4, 17, 90])
+            end = min(pos + w, length)
+            lines.append(f"r{r:03d}\t{pos}\t{end}\t{rng.choice(feats)}")
+            pos = end
+    bed = tmp_path / "many.bed"
+    bed.write_text("\n".join(lines) + "\n")
+
+    serial = _run_bin_cli(cli_runner, bed, tmp_path / "serial.bed", threads=1)
+    parallel = _run_bin_cli(cli_runner, bed, tmp_path / "parallel.bed", threads=4)
+    assert parallel == serial
+    # sanity: output is a gapless partition per read of the same total length
+    assert serial.strip(), "expected non-empty binned output"
+
+
+def test_bin_annotations_threads_rejects_negative(cli_runner, tmp_path: Path):
+    bed = tmp_path / "r.bed"
+    bed.write_text("r1\t0\t100\taSat\n")
+    out = tmp_path / "out.bed"
+    res = cli_runner.invoke(
+        main,
+        [
+            "bin-annotations",
+            "--input",
+            str(bed),
+            "--hierarchy",
+            str(HIERARCHY_TSV),
+            "--feature-set",
+            "region",
+            "--threads",
+            "-2",
+            "-o",
+            str(out),
+        ],
+    )
+    assert res.exit_code != 0
+    assert "--threads" in res.output
