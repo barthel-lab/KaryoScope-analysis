@@ -391,20 +391,26 @@ def build_overlap_graph(
         filler_features,
         require_transition,
     )
-    pair_iter = (
-        _candidate_pairs(ids, reads, block_min_bp) if block_min_bp > 0.0 else _all_pairs(len(ids))
-    )
+    if block_min_bp > 0.0:
+        pair_iter = _candidate_pairs(ids, reads, block_min_bp)  # a list (dedups across buckets)
+        n_pairs = len(pair_iter)
+    else:
+        pair_iter = _all_pairs(len(ids))  # lazy generator -- streamed to the pool, not realized
+        n_pairs = len(ids) * (len(ids) - 1) // 2
 
     if workers and workers > 1:  # align candidate pairs across processes (fork: shared state)
-        pairs = list(pair_iter)
+        # Feed pair_iter straight into the pool instead of copying it: for blocking this drops the
+        # duplicate of the (O(pairs)) candidate list; for all-vs-all _all_pairs stays lazy so the
+        # O(N^2) pair set is never fully materialized. chunksize matches the previous adaptive
+        # value -- n_pairs is len() for the list, or the closed-form count for _all_pairs.
         _WORKER.update(ids=ids, reads=reads, scorer=scorer, weight=weight, params=params)
         try:
-            chunksize = max(1, len(pairs) // (workers * 8))
+            chunksize = max(1, n_pairs // (workers * 8))
             ctx = mp.get_context("fork")
             edges = []
             with ctx.Pool(workers) as pool:
                 for chunk_edges in pool.imap_unordered(
-                    _edges_for_chunk, _iter_chunks(pairs, chunksize)
+                    _edges_for_chunk, _iter_chunks(pair_iter, chunksize)
                 ):
                     edges.extend(chunk_edges)
         finally:
@@ -1421,6 +1427,79 @@ def consensus_layout(
     return ClusterLayout(
         seed=cluster.seed, width=width, placed=placed, consensus=_union_consensus(placed, width)
     )
+
+
+_LAYOUT_WORKER: dict = {}
+
+
+def _layout_one(cluster: Cluster) -> ClusterLayout:
+    g = _LAYOUT_WORKER
+    return consensus_layout(
+        g["reads"],
+        cluster,
+        neighbors=g["neighbors"],
+        sub_score=g["sub_score"],
+        gap_factor=g["gap_factor"],
+        filler=g["filler"],
+        structureless=g["structureless"],
+        acrocentric_chromosomes=g["acrocentrics"],
+        weight=g["weight"],
+    )
+
+
+def consensus_layouts(
+    reads: Mapping[str, Sequence[Segment]],
+    clusters: Sequence[Cluster],
+    *,
+    workers: int = 1,
+    neighbors: Mapping[str, Sequence[str]] | None = None,
+    sub_score: SubScore,
+    gap_factor: float,
+    filler: frozenset[str] | None = None,
+    structureless: frozenset[str] | None = None,
+    acrocentric_chromosomes: frozenset[str] | None = None,
+    weight: Mapping[str, float] | None = None,
+) -> list[ClusterLayout]:
+    """Lay out every cluster, parallelizing across clusters when ``workers > 1``.
+
+    Clusters are independent, so :func:`consensus_layout` fans over a fork pool (read/neighbor
+    state shared copy-on-write, as in :func:`build_overlap_graph`); ``pool.map`` preserves input
+    order so the result is identical to the serial list. This parallelizes the per-cluster layout
+    tail that runs serially after the (already parallel) overlap-graph build.
+    """
+
+    def one(cluster: Cluster) -> ClusterLayout:
+        return consensus_layout(
+            reads,
+            cluster,
+            neighbors=neighbors,
+            sub_score=sub_score,
+            gap_factor=gap_factor,
+            filler=filler,
+            structureless=structureless,
+            acrocentric_chromosomes=acrocentric_chromosomes,
+            weight=weight,
+        )
+
+    if not workers or workers <= 1 or len(clusters) <= 1:
+        return [one(c) for c in clusters]
+
+    _LAYOUT_WORKER.update(
+        reads=reads,
+        neighbors=neighbors,
+        sub_score=sub_score,
+        gap_factor=gap_factor,
+        filler=filler,
+        structureless=structureless,
+        acrocentrics=acrocentric_chromosomes,
+        weight=weight,
+    )
+    try:
+        ctx = mp.get_context("fork")
+        with ctx.Pool(workers) as pool:
+            return list(pool.map(_layout_one, clusters))
+    finally:
+        _LAYOUT_WORKER.clear()
 
 
 def assemble(
