@@ -10,23 +10,29 @@ from pathlib import Path
 
 
 def read_layout_assignments(path: str | Path) -> dict[str, str]:
-    """Map ``read_id -> cluster_id`` from a ``layout.tsv`` (all of a read's segments share it)."""
+    """Map ``read_id -> cluster_id`` from a ``layout.tsv`` (all of a read's segments share it).
+
+    Streams line-by-line: the returned map is inherently O(reads), but for a read-scale
+    ``layout.tsv`` (one row per read segment) we avoid the transient full-file text buffer
+    that ``read_text().splitlines()`` would allocate on top of it.
+    """
     path = Path(path)
-    lines = path.read_text().splitlines()
-    if not lines:
-        raise ValueError(f"empty layout file: {path}")
-    header = lines[0].split("\t")
-    try:
-        ci, ri = header.index("cluster_id"), header.index("read_id")
-    except ValueError as e:
-        raise ValueError(
-            f"{path}: expected 'cluster_id' and 'read_id' columns, got {header}"
-        ) from e
-    out: dict[str, str] = {}
-    for line in lines[1:]:
-        fields = line.split("\t")
-        if len(fields) > max(ci, ri):
-            out[fields[ri]] = fields[ci]
+    with path.open() as fh:
+        header_line = next(fh, None)
+        if header_line is None:
+            raise ValueError(f"empty layout file: {path}")
+        header = header_line.rstrip("\n").split("\t")
+        try:
+            ci, ri = header.index("cluster_id"), header.index("read_id")
+        except ValueError as e:
+            raise ValueError(
+                f"{path}: expected 'cluster_id' and 'read_id' columns, got {header}"
+            ) from e
+        out: dict[str, str] = {}
+        for line in fh:
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) > max(ci, ri):
+                out[fields[ri]] = fields[ci]
     return out
 
 

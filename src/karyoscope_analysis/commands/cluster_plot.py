@@ -19,9 +19,13 @@ from karyoscope_analysis.core.legend_order import feature_sort_key
 
 
 def _read_tsv(path: Path) -> list[dict[str, str]]:
-    lines = path.read_text().splitlines()
-    header = lines[0].split("\t")
-    return [dict(zip(header, line.split("\t"), strict=True)) for line in lines[1:]]
+    # Stream line-by-line rather than read_text().splitlines(): the row list is inherently
+    # O(rows) (all clusters group into one stacked figure), but for a read-scale layout.tsv
+    # this avoids the transient whole-file string that doubles peak memory.
+    with path.open() as fh:
+        rows = (line.rstrip("\n") for line in fh)
+        header = next(rows, "").split("\t")
+        return [dict(zip(header, row.split("\t"), strict=True)) for row in rows]
 
 
 def _major_chromosomes(
