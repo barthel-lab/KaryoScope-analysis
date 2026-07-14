@@ -148,3 +148,71 @@ def test_cli_preset_and_spec_conflict(cli_runner, tmp_path: Path):
     )
     assert result.exit_code != 0
     assert "mutually exclusive" in result.output
+
+
+def test_cli_overlay_threads_match_serial(cli_runner, tmp_path: Path):
+    # Many sequences with C4 tracks: the parallel overlay must be byte-identical to serial
+    # (per-sequence resolution + order-preserving imap), which is what makes --threads safe.
+    import random
+
+    rng = random.Random(0)
+    region_lines, repeat_lines = [], []
+    for r in range(40):
+        rid = f"read{r:03d}"
+        c1, c2 = rng.randint(2, 8), rng.randint(2, 8)
+        region_lines += [f"{rid}\t0\t{c1}\tarm", f"{rid}\t{c1}\t10\tbSat"]
+        repeat_lines += [f"{rid}\t0\t{c2}\tLINE", f"{rid}\t{c2}\t10\tnonrepeat"]
+    paths = _write_tracks(
+        tmp_path,
+        region="\n".join(region_lines) + "\n",
+        repeat="\n".join(repeat_lines) + "\n",
+    )
+
+    def run(out: Path, threads: int) -> str:
+        res = cli_runner.invoke(
+            main,
+            [
+                "overlay-annotations",
+                "--bed",
+                f"region={paths['region']}",
+                "--bed",
+                f"repeat={paths['repeat']}",
+                "--hierarchy",
+                str(HIERARCHY_TSV),
+                "--threads",
+                str(threads),
+                "-o",
+                str(out),
+            ],
+        )
+        assert res.exit_code == 0, res.output
+        return out.read_text()
+
+    serial = run(tmp_path / "serial.bed", 1)
+    parallel = run(tmp_path / "parallel.bed", 4)
+    assert parallel == serial
+    assert serial.strip(), "expected non-empty overlay output"
+
+
+def test_cli_overlay_rejects_negative_threads(cli_runner, tmp_path: Path):
+    paths = _write_tracks(tmp_path, region=REGION, repeat=REPEAT, subtelomeric=SUBTEL)
+    result = cli_runner.invoke(
+        main,
+        [
+            "overlay-annotations",
+            "--bed",
+            f"region={paths['region']}",
+            "--bed",
+            f"repeat={paths['repeat']}",
+            "--bed",
+            f"subtelomeric={paths['subtelomeric']}",
+            "--hierarchy",
+            str(HIERARCHY_TSV),
+            "--threads",
+            "-3",
+            "-o",
+            str(tmp_path / "out.bed"),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "--threads" in result.output
