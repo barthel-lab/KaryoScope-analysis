@@ -1402,8 +1402,13 @@ def draw_legend_svg(d, features_used, colors, config, legend_y, image_width=None
     layout = compute_legend_layout(
         filtered, max_width=image_width, swatch_size=font_size, font_size=font_size)
 
+    # Centre the legend block within the figure width (a legend narrower than a
+    # wide reads panel would otherwise be left-aligned at x=0). Mirrors the PNG
+    # centring in composite_legend().
+    x_off = max(0, (image_width - layout.width) / 2) if image_width else 0
+
     for item in layout.items:
-        ix = item.x
+        ix = x_off + item.x
         iy = legend_y + item.y
 
         if item.is_header:
@@ -1466,10 +1471,13 @@ def composite_legend(png_path, legend_img, position="below"):
         bg_pixel = main_img.getpixel((0, 0))
         combined = Image.new('RGB', (new_width, new_height), bg_pixel)
         combined.paste(main_img, (0, 0))
+        # Centre the below-legend under the figure (a legend narrower than a wide
+        # reads panel would otherwise be left-aligned at x=0).
+        legend_x = (new_width - lw) // 2
         if legend_img.mode == 'RGBA':
-            combined.paste(legend_img, (0, mh), legend_img)
+            combined.paste(legend_img, (legend_x, mh), legend_img)
         else:
-            combined.paste(legend_img, (0, mh))
+            combined.paste(legend_img, (legend_x, mh))
 
     combined.save(png_path, optimize=True)
     logger.info(f"  Legend composited ({position}): {png_path}")

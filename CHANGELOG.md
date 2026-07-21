@@ -11,6 +11,14 @@ Reorganizing the historical `scripts/` collection into an installable package
 (`karyoscope_analysis`) with a unified `karyoscope-analysis` CLI, modeled on the
 core KaryoScope engine. See `docs/audit/` for the full audit and decision record.
 
+### Fixed
+
+- `scripts/KaryoScope_plot_reads.py`: the "below" legend is now horizontally
+  centred under the figure in both the PNG (`composite_legend`) and SVG
+  (`draw_legend_svg`) paths, instead of left-aligned at x=0 — a legend narrower
+  than a wide reads panel no longer hugs the left edge. (Upstreamed from a
+  KaryoScope-BIR vendor patch.)
+
 ### Added
 
 - Engine B **backbone layout** (`consensus_layout`): orientation and placement use the cluster's
