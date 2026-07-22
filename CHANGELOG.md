@@ -13,6 +13,10 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
 
 ### Fixed
 
+- `plot-reads` (package): the legend block is now horizontally centred within the figure
+  width in `core.plot_reads._draw_legend` (was left-aligned). Brings the package command to
+  parity with the standalone `KaryoScope_plot_reads.py`, which received this earlier.
+
 - `scripts/KaryoScope_plot_reads.py`: the "below" legend is now horizontally
   centred under the figure in both the PNG (`composite_legend`) and SVG
   (`draw_legend_svg`) paths, instead of left-aligned at x=0 — a legend narrower

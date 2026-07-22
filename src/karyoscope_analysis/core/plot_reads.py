@@ -712,8 +712,11 @@ def _draw_legend(
     layout = compute_legend_layout(
         filtered, max_width=image_width, swatch_size=cfg.font_size, font_size=cfg.font_size
     )
+    # Centre the legend block within the figure width (a legend narrower than a wide
+    # reads panel would otherwise hug the left edge). Matches the standalone plot_reads.
+    x_off = max(0, (image_width - layout.width) / 2) if image_width else 0
     for item in layout.items:
-        ix, iy = item.x, legend_y + item.y
+        ix, iy = x_off + item.x, legend_y + item.y
         if item.is_header:
             d.append(
                 draw.Text(
