@@ -151,6 +151,37 @@ def test_render_empty_raises():
         pr.render([], _COLORS, pr.PlotConfig(), [])
 
 
+def test_aspect_fits_canvas_to_ratio():
+    reads = [
+        pr.Read("S", "r1", 1_000_000, [(0, 1_000_000, "aSat")]),
+        pr.Read("S", "r2", 800_000, [(0, 800_000, "bSat")]),
+    ]
+    svg = pr.render(reads, _COLORS, pr.PlotConfig(aspect=(16, 9)), ["S"])
+    root = minidom.parseString(svg).documentElement
+    w, h = float(root.getAttribute("width")), float(root.getAttribute("height"))
+    assert abs(w / h - 16 / 9) < 0.05  # canvas fitted to the requested aspect
+
+
+def test_aspect_shrinks_an_otherwise_tall_render():
+    # A 1 Mb read at the default ratio stretches the canvas very tall; --aspect fits it.
+    reads = [pr.Read("S", "r", 1_000_000, [(0, 1_000_000, "aSat")])]
+    tall = minidom.parseString(pr.render(reads, _COLORS, pr.PlotConfig(), ["S"]))
+    fit = minidom.parseString(pr.render(reads, _COLORS, pr.PlotConfig(aspect=(16, 9)), ["S"]))
+    assert float(fit.documentElement.getAttribute("height")) < float(
+        tall.documentElement.getAttribute("height")
+    )
+
+
+def test_oversample_changes_subpixel_rasterization():
+    # A 1 kb feature in a 400 kb read at a coarse ratio is sub-pixel; oversampling
+    # rasterizes at higher resolution so it survives the windowed-majority vote.
+    reads = [pr.Read("S", "r", 400_000, [(0, 1000, "TAR1"), (1000, 400_000, "ct")])]
+    colors = {"TAR1": "#ff00ff", "ct": "#cccccc"}
+    svg1 = pr.render(reads, colors, pr.PlotConfig(ratio=1 / 4000), ["S"])
+    svg4 = pr.render(reads, colors, pr.PlotConfig(ratio=1 / 4000, oversample=4), ["S"])
+    assert svg1 != svg4  # oversample affects the rasterization
+
+
 # ----------------------------------------------------------------- CLI
 def test_plot_reads_cli_vertical(cli_runner, tmp_path: Path):
     bed = tmp_path / "HeLa.bed"
@@ -174,6 +205,52 @@ def test_plot_reads_cli_vertical(cli_runner, tmp_path: Path):
     assert res.exit_code == 0, res.output
     assert out.exists()
     minidom.parseString(out.read_text())
+
+
+def test_plot_reads_cli_aspect_and_oversample(cli_runner, tmp_path: Path):
+    bed = tmp_path / "HeLa.bed"
+    _write_bed(bed)
+    out = tmp_path / "out.svg"
+    res = cli_runner.invoke(
+        main,
+        [
+            "plot-reads",
+            "--bed",
+            f"HeLa:{bed}",
+            "--colors",
+            str(COLORS_TSV),
+            "--aspect",
+            "16:9",
+            "--oversample",
+            "4",
+            "-o",
+            str(out),
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    root = minidom.parseString(out.read_text()).documentElement
+    w, h = float(root.getAttribute("width")), float(root.getAttribute("height"))
+    assert abs(w / h - 16 / 9) < 0.1
+
+
+def test_plot_reads_cli_bad_aspect_errors(cli_runner, tmp_path: Path):
+    bed = tmp_path / "HeLa.bed"
+    _write_bed(bed)
+    res = cli_runner.invoke(
+        main,
+        [
+            "plot-reads",
+            "--bed",
+            f"HeLa:{bed}",
+            "--colors",
+            str(COLORS_TSV),
+            "--aspect",
+            "banana",
+            "-o",
+            str(tmp_path / "o.svg"),
+        ],
+    )
+    assert res.exit_code != 0
 
 
 def test_plot_reads_cli_length_filter_errors(cli_runner, tmp_path: Path):

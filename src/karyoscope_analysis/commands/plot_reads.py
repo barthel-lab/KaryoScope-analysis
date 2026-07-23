@@ -132,6 +132,20 @@ from karyoscope_analysis.core.legend_order import feature_sort_key
 )
 @click.option("--ratio", type=float, default=1 / 300, show_default=True, help="bp-to-pixel ratio.")
 @click.option(
+    "--aspect",
+    default=None,
+    help="Fit the canvas to a W:H aspect ratio (e.g. '16:9') by choosing the bp-to-pixel "
+    "ratio automatically. Overrides --ratio.",
+)
+@click.option(
+    "--oversample",
+    type=int,
+    default=1,
+    show_default=True,
+    help="Rasterize each read at N x resolution so sub-pixel features (small satellite "
+    "bands) survive the windowed-majority vote instead of being lost to their neighbours.",
+)
+@click.option(
     "--font-size", type=int, default=11, show_default=True, help="Label/scale-bar text size."
 )
 @click.option("--min-length", type=int, default=None, help="Drop reads shorter than this (bp).")
@@ -202,6 +216,8 @@ def cmd(
     sample_spacing: int,
     subgroup_spacing: int | None,
     ratio: float,
+    aspect: str | None,
+    oversample: int,
     font_size: int,
     min_length: int | None,
     max_length: int | None,
@@ -298,12 +314,24 @@ def cmd(
         if lpath.exists():
             legend_key = feature_sort_key(lpath)
 
+    aspect_wh: tuple[int, int] | None = None
+    if aspect:
+        try:
+            w, h = (int(x) for x in aspect.split(":"))
+        except ValueError as e:
+            raise click.UsageError(f"--aspect must be W:H (e.g. 16:9), got {aspect!r}") from e
+        if w <= 0 or h <= 0:
+            raise click.UsageError(f"--aspect W and H must be positive, got {aspect!r}")
+        aspect_wh = (w, h)
+
     cfg = render.PlotConfig(
         bar_width=bar_width,
         read_spacing=read_spacing,
         sample_spacing=sample_spacing,
         subgroup_spacing=subgroup_spacing,
         ratio=ratio,
+        aspect=aspect_wh,
+        oversample=oversample,
         background=background,
         font_size=font_size,
         feature_mode=feature_mode,

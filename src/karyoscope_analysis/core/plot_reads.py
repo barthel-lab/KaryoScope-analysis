@@ -19,7 +19,7 @@ import fnmatch
 import gzip
 from collections import defaultdict, namedtuple
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import drawsvg as draw
@@ -83,6 +83,7 @@ class PlotConfig:
     sample_spacing: int = 20
     subgroup_spacing: int | None = None  # spacing within a group; defaults to sample_spacing
     ratio: float = 1 / 300  # bp -> pixels (height in vertical mode, width in horizontal)
+    aspect: tuple[int, int] | None = None  # (W, H): fit the canvas to this ratio, choosing `ratio`
     top_margin: int = 30
     left_margin: int = 30
     bottom_margin: int = 15
@@ -788,8 +789,8 @@ def _draw_vertical_scale_bar(
         bp = 5000
         h = int(bp * cfg.ratio)
     d.append(draw.Line(x, y, x, y + h, stroke=cfg.text_color, stroke_width=1))
-    d.append(draw.Line(x - 2, y, x + 6, y, stroke=cfg.text_color, stroke_width=1))
-    d.append(draw.Line(x - 2, y + h, x + 6, y + h, stroke=cfg.text_color, stroke_width=1))
+    d.append(draw.Line(x - 4, y, x + 4, y, stroke=cfg.text_color, stroke_width=1))
+    d.append(draw.Line(x - 4, y + h, x + 4, y + h, stroke=cfg.text_color, stroke_width=1))
     lx, ly = x - 5, y + h / 2
     d.append(
         draw.Text(
@@ -1012,7 +1013,6 @@ def render_reads_svg(
     )
     arrow_size = max(2, int(cfg.bar_width // 3 * cfg.marker_scale))
     max_length = max(r.length for r in reads)
-    max_height_px = int(max_length * cfg.ratio)
     counts: dict[str, int] = defaultdict(int)
     for r in reads:
         counts[r.sample] += 1
@@ -1041,12 +1041,27 @@ def render_reads_svg(
         if cfg.legend
         else 0
     )
+
+    # --aspect: choose the bp->pixel ratio that fits the canvas to cfg.aspect (W:H).
+    # The width is independent of the ratio (reads are vertical columns), so the fixed
+    # chrome (margins + header + legend) and the target height pin the ratio exactly —
+    # no probe render needed.
+    if cfg.aspect is not None and max_length:
+        vr_w, vr_h = cfg.aspect
+        chrome = top + cfg.bottom_margin + int(legend_extra)
+        fit_ratio = (image_width * vr_h / vr_w - chrome) / max_length
+        if fit_ratio > 0:
+            cfg = replace(cfg, ratio=fit_ratio)
+
+    max_height_px = int(max_length * cfg.ratio)
     image_height = top + max_height_px + cfg.bottom_margin + int(legend_extra)
 
     d = draw.Drawing(image_width, image_height, id_prefix="tr")
     d.append(draw.Rectangle(0, 0, image_width, image_height, fill=cfg.background))
     if cfg.draw_scale_bar:
-        _draw_vertical_scale_bar(d, base_left - 10, top, cfg, max_height_px)
+        # Position the bar just left of the reads (which start at ``left``). Using
+        # base_left here would strand it far left whenever a tier label widens the margin.
+        _draw_vertical_scale_bar(d, left - 10, top, cfg, max_height_px)
 
     x = left
     current_sample: str | None = None

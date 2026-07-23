@@ -13,6 +13,12 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
 
 ### Fixed
 
+- `plot-reads`: the vertical scale bar is now positioned just left of the reads
+  (off the label-expanded left margin) instead of off the raw `left_margin`, so it no
+  longer strands itself far to the left when a tier/heatmap label widens the margin. Its
+  end caps are also centred on the upright (`x-4..x+4`) instead of the off-centre
+  `x-2..x+6`. (Both were reconstructed as SVG post-processing by a KaryoScope-BIR wrapper;
+  fixed at the source instead.)
 - `plot-reads` (package): the legend block is now horizontally centred within the figure
   width in `core.plot_reads._draw_legend` (was left-aligned). Brings the package command to
   parity with the standalone `KaryoScope_plot_reads.py`, which received this earlier.
@@ -24,6 +30,18 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   KaryoScope-BIR vendor patch.)
 
 ### Added
+
+- `plot-reads --oversample N`: rasterize each read at N× resolution so sub-pixel features
+  (small satellite bands like the ~500–800 bp defining TAR1 elements) survive the
+  windowed-majority vote instead of being lost to their neighbours. Exposes the existing
+  `PlotConfig.oversample`, which the CLI previously never surfaced. (Replaces a
+  KaryoScope-BIR wrapper that monkey-patched `PlotConfig` through a `python -c` shim.)
+- `plot-reads --aspect W:H`: fit the canvas to a target aspect ratio (e.g. `16:9`) by
+  choosing the bp-to-pixel ratio automatically. Because the width is independent of the
+  ratio (reads are vertical columns), the renderer solves for the ratio exactly from the
+  known width and chrome — no probe render needed. Overrides `--ratio`. (Replaces a
+  KaryoScope-BIR wrapper that probe-rendered and regex-measured the SVG to back-calculate
+  the ratio.)
 
 - Engine B **backbone layout** (`consensus_layout`): orientation and placement use the cluster's
   *backbone* — a sequence of landmark features — as the primary signal, which is what makes clusters
