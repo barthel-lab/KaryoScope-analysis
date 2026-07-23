@@ -182,6 +182,29 @@ def test_oversample_changes_subpixel_rasterization():
     assert svg1 != svg4  # oversample affects the rasterization
 
 
+def test_legend_position_right_widens_and_shortens():
+    # A right-of-reads legend adds width (sections stacked vertically) instead of height.
+    reads = [
+        pr.Read("S", f"r{i}", 200_000, [(0, 1000, "canonical_telomere"), (1000, 200_000, "aSat")])
+        for i in range(3)
+    ]
+    secs = [("Subtelomere", ["canonical_telomere"]), ("Region", ["aSat"])]
+    below = minidom.parseString(
+        pr.render(reads, _COLORS, pr.PlotConfig(legend=True, legend_sections=secs), ["S"])
+    )
+    right = minidom.parseString(
+        pr.render(
+            reads,
+            _COLORS,
+            pr.PlotConfig(legend=True, legend_sections=secs, legend_position="right"),
+            ["S"],
+        )
+    )
+    bw, bh = (float(below.documentElement.getAttribute(a)) for a in ("width", "height"))
+    rw, rh = (float(right.documentElement.getAttribute(a)) for a in ("width", "height"))
+    assert rw > bw and rh < bh  # legend moved from below (tall) to the right (wide)
+
+
 def test_legend_sections_draw_section_headers():
     reads = [pr.Read("S", "r", 1000, [(0, 500, "aSat"), (500, 1000, "canonical_telomere")])]
     cfg = pr.PlotConfig(
@@ -346,7 +369,8 @@ def test_load_read_list_parses_header_and_rows(tmp_path: Path):
     rl = tmp_path / "list.tsv"
     _write_readlist(rl)
     read_ids, columns, read_data, read_rows = pr.load_read_list(rl)
-    assert read_ids == {"r1", "r2", "r3"}
+    assert set(read_ids) == {"r1", "r2", "r3"}
+    assert list(read_ids) == ["r1", "r2", "r3"]  # insertion (file) order preserved -> deterministic
     assert columns == ["group", "subgroup", "condition"]
     assert read_data["r1"] == {"group": "Tumor", "subgroup": "A", "condition": "high"}
     assert len(read_rows) == 3
@@ -391,6 +415,11 @@ def test_process_read_list_defaults_and_filter(tmp_path: Path):
 
     only_tumor = pr.process_read_list(reads, rl, heatmap=True, filter_groups=["Tumor"])
     assert {r.read_id for r in only_tumor.reads} == {"r1", "r2"}
+
+    # filter_groups drives column order (config order), not raw read-list row order:
+    # Tumor rows come first in the TSV, but Normal is requested first here.
+    ordered = pr.process_read_list(reads, rl, filter_groups=["Normal", "Tumor"])
+    assert next(g for g, _s in ordered.group_subgroup_order) == "Normal"
 
 
 def test_parse_markers(tmp_path: Path):

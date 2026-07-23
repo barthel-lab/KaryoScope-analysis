@@ -13,6 +13,15 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
 
 ### Fixed
 
+- `plot-reads` `--read-list`: heatmap track colors are now deterministic. `load_read_list`
+  returned `read_ids` as a `set`, and categorical (e.g. Sample) colors are assigned in
+  encounter order, so the color↔value mapping depended on `PYTHONHASHSEED` — a render and a
+  separately-generated legend could disagree. `read_ids` now preserves file order.
+- `plot-reads` `--filter-group`: filtered plots keep the group-major column layout. The
+  filter branch rebuilt the group order in raw read-list row order (dropping `build_grouping`'s
+  sort); it now reuses `build_grouping` and orders groups by their position in `--filter-group`,
+  so column order is config-driven. (Both replaced KaryoScope-BIR wrapper workarounds — a
+  read-list pre-sort script and a pinned `PYTHONHASHSEED`.)
 - `plot-reads`: the vertical scale bar is now positioned just left of the reads
   (off the label-expanded left margin) instead of off the raw `left_margin`, so it no
   longer strands itself far to the left when a tier/heatmap label widens the margin. Its
@@ -47,6 +56,10 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   sections explicitly, in display order, for groupings finer than the `feature_set` column —
   e.g. splitting a track into subgroups a consumer derives from the hierarchy. Takes
   precedence over `--legend-group`; only plotted features appear.
+- `plot-reads --legend-position below|right`: place the legend in the right margin (sections
+  stacked vertically) instead of below the reads — compact for tall, narrow read panels.
+  `compute_legend_layout` gains a `stack_sections` mode. (Replaces a KaryoScope-BIR wrapper
+  that composited the legend into the whitespace by hand.)
 - `plot-reads --aspect W:H`: fit the canvas to a target aspect ratio (e.g. `16:9`) by
   choosing the bp-to-pixel ratio automatically. Because the width is independent of the
   ratio (reads are vertical columns), the renderer solves for the ratio exactly from the

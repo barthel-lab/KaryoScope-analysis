@@ -126,6 +126,10 @@ class PlotConfig:
     #: by the colors.tsv feature_set). None = one flat, ungrouped list.
     legend_sections: Sequence[tuple[str | None, Sequence[str]]] | None = None
 
+    #: Legend placement: "below" the reads (default) or "right" of them (sections stacked
+    #: vertically in the right margin — compact for tall, narrow read panels).
+    legend_position: str = "below"
+
     @property
     def text_color(self) -> str:
         return "#ffffff" if self.background == "black" else "#000000"
@@ -211,16 +215,21 @@ def _composite_label(group: str, subgroup: str | None) -> str:
     return f"{group} — {subgroup}" if subgroup else group
 
 
-def load_read_list(path: str | Path) -> tuple[set[str], list[str], dict, list[tuple[str, dict]]]:
+def load_read_list(
+    path: str | Path,
+) -> tuple[dict[str, None], list[str], dict, list[tuple[str, dict]]]:
     """Parse a read-list TSV.
 
-    Returns ``(read_ids, columns, read_data, read_rows)``: the set of read IDs, the column
-    names from the header (columns 2+), ``{read_id: {col: value}}`` (last wins), and the rows
-    in file order (preserving duplicates so grouping keeps TSV order). A header row is detected
-    by a first field of ``sequence``/``read``/``read_id``.
+    Returns ``(read_ids, columns, read_data, read_rows)``: the read IDs as an
+    **insertion-ordered** set (a ``dict`` keyed by read_id, so ``in`` and iteration both work
+    but iteration is deterministic file order — categorical heatmap colors are assigned in
+    encounter order, so a plain ``set`` here made them ``PYTHONHASHSEED``-dependent), the
+    column names from the header (columns 2+), ``{read_id: {col: value}}`` (last wins), and the
+    rows in file order (preserving duplicates so grouping keeps TSV order). A header row is
+    detected by a first field of ``sequence``/``read``/``read_id``.
     """
     path = str(path)
-    read_ids: set[str] = set()
+    read_ids: dict[str, None] = {}
     columns: list[str] = []
     read_data: dict[str, dict[str, str | None]] = {}
     read_rows: list[tuple[str, dict[str, str | None]]] = []
@@ -236,7 +245,7 @@ def load_read_list(path: str | Path) -> tuple[set[str], list[str], dict, list[tu
                 if len(fields) > 1:
                     columns = fields[1:]
                 continue
-            read_ids.add(rid)
+            read_ids[rid] = None
             if columns and len(fields) > 1:
                 meta = {
                     c: (fields[1 + i] if 1 + i < len(fields) and fields[1 + i] else None)
@@ -444,21 +453,15 @@ def process_read_list(
     read_groups, group_subgroup_order = build_grouping(read_rows, tier_specs)
 
     if filter_groups and tier_specs:
-        allowed = set(filter_groups)
         group_col = tier_specs[0][0]
-        sub_col = tier_specs[1][0] if len(tier_specs) >= 2 else None
-        keep_ids: set[str] = set()
-        read_groups, group_subgroup_order, seen = {}, [], set()
-        for rid, meta in read_rows:
-            g = meta.get(group_col)
-            if g not in allowed:
-                continue
-            keep_ids.add(rid)
-            pair = (g, meta.get(sub_col) if sub_col else None)
-            read_groups[rid] = pair
-            if pair not in seen:
-                seen.add(pair)
-                group_subgroup_order.append(pair)
+        rank = {g: i for i, g in enumerate(filter_groups)}
+        kept_rows = [(rid, meta) for rid, meta in read_rows if meta.get(group_col) in rank]
+        # Reuse build_grouping so filtered plots keep the group-major layout (contiguous
+        # subgroups), then order the groups by their position in filter_groups — column order
+        # is config-driven, not raw read-list row order (which is what the old branch used).
+        read_groups, group_subgroup_order = build_grouping(kept_rows, tier_specs)
+        group_subgroup_order.sort(key=lambda p: rank[p[0]])
+        keep_ids = set(read_groups)
         kept = [r for r in kept if r.read_id in keep_ids]
 
     metadata_columns = [c for c, _ in heatmap_specs]
@@ -605,11 +608,16 @@ def compute_legend_layout(
     padding: int = 10,
     col_gap: int = 20,
     item_padding: int = 3,
+    stack_sections: bool = False,
+    max_rows: int | None = None,
 ) -> LegendLayout:
     """Grid layout for legend items, filling top-to-bottom then left-to-right.
 
-    Each section header starts a new column; ``num_rows`` grows until every section fits
-    within ``max_cols`` so later sections never overwrite earlier columns.
+    By default each section header starts a new column (a wide, short legend for placement
+    below the reads). With ``stack_sections=True`` the sections instead flow **vertically** in
+    one column — header, its items, next header below — wrapping to a new column only when a
+    column would exceed ``max_rows`` rows (a tall, narrow legend for placement beside the
+    reads). ``num_rows`` otherwise grows until every section fits within ``max_cols``.
     """
     if not filtered_items:
         return LegendLayout([], 0, 0, 0, 0, swatch_size, font_size, 0, item_padding)
@@ -619,11 +627,21 @@ def compute_legend_layout(
     max_label_w = max(_measure_text(d, font_size) for d, _, _ in filtered_items)
     col_width = swatch_size + swatch_gap + int(max_label_w) + 2 * item_padding + 4
 
-    if max_width:
-        available = max_width - 2 * padding
-        num_cols = min(max_cols, max(1, int((available + col_gap) / (col_width + col_gap))))
-    else:
-        num_cols = min(max_cols, max(1, len(filtered_items)))
+    def _finish(positioned: list[LegendItem]) -> LegendLayout:
+        max_x = max(it.x for it in positioned) + col_width
+        max_y = max(it.y for it in positioned) + row_height
+        cols = (max(it.x for it in positioned) - padding) // (col_width + col_gap) + 1
+        return LegendLayout(
+            positioned,
+            int(max_x + padding),
+            int(max_y + padding),
+            col_width,
+            int(cols),
+            swatch_size,
+            font_size,
+            row_height,
+            item_padding,
+        )
 
     sections: list[tuple[str | None, list[tuple[str, str]]]] = []
     current_header: str | None = None
@@ -636,6 +654,47 @@ def compute_legend_layout(
         current_items.append((display, color_hex))
     if current_items:
         sections.append((current_header, current_items))
+
+    if stack_sections:
+        # Sections flow vertically in one column; wrap to a new column past max_rows.
+        rows_cap = max_rows or (len(filtered_items) + len(sections) + 1)
+        positioned: list[LegendItem] = []
+        col = row = 0
+        for header, items in sections:
+            need = (1 if header else 0) + len(items)
+            if row > 0 and row + need > rows_cap:
+                col, row = col + 1, 0
+            if header:
+                positioned.append(
+                    LegendItem(
+                        padding + col * (col_width + col_gap),
+                        padding + row * row_height,
+                        header,
+                        None,
+                        True,
+                    )
+                )
+                row += 1
+            for display, color_hex in items:
+                if row >= rows_cap:
+                    col, row = col + 1, 0
+                positioned.append(
+                    LegendItem(
+                        padding + col * (col_width + col_gap),
+                        padding + row * row_height,
+                        display,
+                        color_hex,
+                        False,
+                    )
+                )
+                row += 1
+        return _finish(positioned)
+
+    if max_width:
+        available = max_width - 2 * padding
+        num_cols = min(max_cols, max(1, int((available + col_gap) / (col_width + col_gap))))
+    else:
+        num_cols = min(max_cols, max(1, len(filtered_items)))
 
     total_slots = sum((1 if hdr else 0) + len(its) for hdr, its in sections)
     num_rows = max(1, -(-total_slots // num_cols))
@@ -698,6 +757,15 @@ def compute_legend_layout(
     )
 
 
+def _legend_filtered(
+    features_used, colors, cfg, color_sections, extra_items
+) -> list[tuple[str, str, str | None]]:
+    """Heatmap items (if any) then the filtered feature rows — the legend's contents."""
+    return list(extra_items or []) + filter_legend_features(
+        features_used, colors, color_sections, cfg.legend_sort_key
+    )
+
+
 def _draw_legend(
     d: draw.Drawing,
     features_used: set[str],
@@ -707,19 +775,32 @@ def _draw_legend(
     image_width: int,
     color_sections: Sequence[tuple[str | None, Sequence[str]]] | None = None,
     extra_items: Sequence[tuple[str, str, str | None]] | None = None,
+    origin_x: float | None = None,
+    stack: bool = False,
+    max_rows: int | None = None,
 ) -> float:
-    """Draw the legend (optional heatmap items prepended, then features); return its height."""
-    filtered = list(extra_items or []) + filter_legend_features(
-        features_used, colors, color_sections, cfg.legend_sort_key
-    )
+    """Draw the legend (optional heatmap items prepended, then features); return its height.
+
+    ``origin_x`` places the legend's left edge (default: centred within ``image_width``).
+    ``stack``/``max_rows`` lay the sections out vertically (for a right-of-reads legend).
+    """
+    filtered = _legend_filtered(features_used, colors, cfg, color_sections, extra_items)
     if not filtered:
         return 0
     layout = compute_legend_layout(
-        filtered, max_width=image_width, swatch_size=cfg.font_size, font_size=cfg.font_size
+        filtered,
+        max_width=image_width,
+        swatch_size=cfg.font_size,
+        font_size=cfg.font_size,
+        stack_sections=stack,
+        max_rows=max_rows,
     )
-    # Centre the legend block within the figure width (a legend narrower than a wide
-    # reads panel would otherwise hug the left edge). Matches the standalone plot_reads.
-    x_off = max(0, (image_width - layout.width) / 2) if image_width else 0
+    # Place at origin_x if given (right-of-reads), else centre within the figure width (a
+    # legend narrower than a wide reads panel would otherwise hug the left edge).
+    if origin_x is not None:
+        x_off = origin_x
+    else:
+        x_off = max(0, (image_width - layout.width) / 2) if image_width else 0
     for item in layout.items:
         ix, iy = x_off + item.x, legend_y + item.y
         if item.is_header:
@@ -1040,6 +1121,14 @@ def render_reads_svg(
         if cfg.has_heatmap
         else None
     )
+    legend_right = cfg.legend and cfg.legend_position == "right"
+    legend_items = (
+        _legend_filtered(features_used, colors, cfg, cfg.legend_sections, hm_items)
+        if cfg.legend
+        else []
+    )
+    # A "below" legend adds height (chrome for the aspect fit); a "right" legend adds width
+    # instead and is laid out later, once the reads' height is known (so it can wrap).
     legend_extra = (
         _legend_height(
             features_used,
@@ -1049,14 +1138,14 @@ def render_reads_svg(
             extra_items=hm_items,
             color_sections=cfg.legend_sections,
         )
-        if cfg.legend
+        if legend_items and not legend_right
         else 0
     )
 
     # --aspect: choose the bp->pixel ratio that fits the canvas to cfg.aspect (W:H).
     # The width is independent of the ratio (reads are vertical columns), so the fixed
-    # chrome (margins + header + legend) and the target height pin the ratio exactly —
-    # no probe render needed.
+    # chrome (margins + header + a below-legend) and the target height pin the ratio
+    # exactly — no probe render needed.
     if cfg.aspect is not None and max_length:
         vr_w, vr_h = cfg.aspect
         chrome = top + cfg.bottom_margin + int(legend_extra)
@@ -1065,7 +1154,27 @@ def render_reads_svg(
             cfg = replace(cfg, ratio=fit_ratio)
 
     max_height_px = int(max_length * cfg.ratio)
+
+    # A right-of-reads legend: stack sections vertically (wrapping past the reads' height)
+    # and widen the canvas to hold it beside the reads.
+    legend_origin_x: float | None = None
+    legend_max_rows: int | None = None
+    legend_layout: LegendLayout | None = None
+    if legend_right and legend_items:
+        legend_max_rows = max(3, max_height_px // (cfg.font_size + 10))
+        legend_layout = compute_legend_layout(
+            legend_items,
+            swatch_size=cfg.font_size,
+            font_size=cfg.font_size,
+            stack_sections=True,
+            max_rows=legend_max_rows,
+        )
+        legend_origin_x = image_width
+        image_width += legend_layout.width
+
     image_height = top + max_height_px + cfg.bottom_margin + int(legend_extra)
+    if legend_layout is not None:
+        image_height = max(image_height, top + legend_layout.height + cfg.bottom_margin)
 
     d = draw.Drawing(image_width, image_height, id_prefix="tr")
     d.append(draw.Rectangle(0, 0, image_width, image_height, fill=cfg.background))
@@ -1131,16 +1240,31 @@ def render_reads_svg(
         _draw_vertical_header(d, cfg, top, left, sample_order, x_start, x_end)
 
     if cfg.legend and (features_used or hm_items):
-        _draw_legend(
-            d,
-            features_used,
-            colors,
-            cfg,
-            top + max_height_px + 10,
-            image_width,
-            extra_items=hm_items,
-            color_sections=cfg.legend_sections,
-        )
+        if legend_right:
+            _draw_legend(
+                d,
+                features_used,
+                colors,
+                cfg,
+                top,
+                image_width,
+                extra_items=hm_items,
+                color_sections=cfg.legend_sections,
+                origin_x=legend_origin_x,
+                stack=True,
+                max_rows=legend_max_rows,
+            )
+        else:
+            _draw_legend(
+                d,
+                features_used,
+                colors,
+                cfg,
+                top + max_height_px + 10,
+                image_width,
+                extra_items=hm_items,
+                color_sections=cfg.legend_sections,
+            )
     return _svg_str(d)
 
 

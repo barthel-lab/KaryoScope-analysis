@@ -121,6 +121,14 @@ from karyoscope_analysis.core.legend_order import feature_sort_key
     "--legend.",
 )
 @click.option(
+    "--legend-position",
+    type=click.Choice(["below", "right"]),
+    default="below",
+    show_default=True,
+    help="Place the legend below the reads or in the right margin (sections stacked "
+    "vertically — compact for tall, narrow read panels). Requires --legend.",
+)
+@click.option(
     "--no-scale-bar", "scale_bar", flag_value=False, default=True, help="Omit the scale bar."
 )
 @click.option("--no-header", is_flag=True, help="Omit sample labels and separator lines.")
@@ -224,6 +232,7 @@ def cmd(
     legend: bool,
     legend_group: bool,
     legend_section_specs: tuple[str, ...],
+    legend_position: str,
     scale_bar: bool,
     no_header: bool,
     read_border: bool,
@@ -323,8 +332,10 @@ def cmd(
     markers = render.parse_markers(markers_path) if markers_path is not None else {}
     reads = render.sort_reads(reads, sample_order)
 
-    if (legend_group or legend_section_specs) and not legend:
-        raise click.UsageError("--legend-group / --legend-section require --legend")
+    if (legend_group or legend_section_specs or legend_position != "below") and not legend:
+        raise click.UsageError(
+            "--legend-group / --legend-section / --legend-position require --legend"
+        )
 
     # KaryoScope-style legend ordering when a hierarchy is available (next to --colors or --hierarchy).
     legend_key = None
@@ -387,6 +398,7 @@ def cmd(
         marker_scale=marker_scale,
         legend_sort_key=legend_key,
         legend_sections=legend_sections,
+        legend_position=legend_position,
     )
     try:
         svg = render.render(reads, colors, cfg, sample_order, horizontal=horizontal)
