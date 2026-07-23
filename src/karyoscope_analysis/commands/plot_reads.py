@@ -113,6 +113,14 @@ from karyoscope_analysis.core.legend_order import feature_sort_key
     "Region) instead of one flat list. Requires --legend.",
 )
 @click.option(
+    "--legend-section",
+    "legend_section_specs",
+    multiple=True,
+    help="Explicit legend section as 'HEADER:feat1,feat2,...'; repeatable, in display order. "
+    "Only features actually plotted appear. Takes precedence over --legend-group. Requires "
+    "--legend.",
+)
+@click.option(
     "--no-scale-bar", "scale_bar", flag_value=False, default=True, help="Omit the scale bar."
 )
 @click.option("--no-header", is_flag=True, help="Omit sample labels and separator lines.")
@@ -215,6 +223,7 @@ def cmd(
     background: str,
     legend: bool,
     legend_group: bool,
+    legend_section_specs: tuple[str, ...],
     scale_bar: bool,
     no_header: bool,
     read_border: bool,
@@ -314,8 +323,8 @@ def cmd(
     markers = render.parse_markers(markers_path) if markers_path is not None else {}
     reads = render.sort_reads(reads, sample_order)
 
-    if legend_group and not legend:
-        raise click.UsageError("--legend-group requires --legend")
+    if (legend_group or legend_section_specs) and not legend:
+        raise click.UsageError("--legend-group / --legend-section require --legend")
 
     # KaryoScope-style legend ordering when a hierarchy is available (next to --colors or --hierarchy).
     legend_key = None
@@ -324,8 +333,18 @@ def cmd(
         lpath = hierarchy_path or colors_path.parent / "hierarchy.tsv"
         if lpath.exists():
             legend_key = feature_sort_key(lpath)
-        # Group by the colors.tsv feature_set (data-driven section headers).
-        if legend_group:
+        if legend_section_specs:
+            # Explicit sections take precedence: 'HEADER:feat1,feat2,...'.
+            legend_sections = []
+            for spec in legend_section_specs:
+                header, _, feats = spec.partition(":")
+                if not feats:
+                    raise click.UsageError(
+                        f"--legend-section must be 'HEADER:feat,...', got {spec!r}"
+                    )
+                legend_sections.append((header, [f for f in feats.split(",") if f]))
+        elif legend_group:
+            # Group by the colors.tsv feature_set (data-driven section headers).
             legend_sections = [
                 (fs, list(feats)) for fs, feats in load_colors_by_featureset(colors_path).items()
             ]

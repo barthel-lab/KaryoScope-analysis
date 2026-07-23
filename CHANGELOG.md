@@ -43,6 +43,10 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   them. Opt-in (requires `--legend`) so existing flat legends are unchanged. (Replaces a
   KaryoScope-BIR wrapper that shelled out to `draw-legend`, regex-parsed its SVG, and
   re-rendered a bespoke grouped legend.)
+- `plot-reads --legend-section "HEADER:feat1,feat2,..."` (repeatable): define legend
+  sections explicitly, in display order, for groupings finer than the `feature_set` column —
+  e.g. splitting a track into subgroups a consumer derives from the hierarchy. Takes
+  precedence over `--legend-group`; only plotted features appear.
 - `plot-reads --aspect W:H`: fit the canvas to a target aspect ratio (e.g. `16:9`) by
   choosing the bp-to-pixel ratio automatically. Because the width is independent of the
   ratio (reads are vertical columns), the renderer solves for the ratio exactly from the

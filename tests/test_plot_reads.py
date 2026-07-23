@@ -243,6 +243,32 @@ def test_plot_reads_cli_aspect_and_oversample(cli_runner, tmp_path: Path):
     assert abs(w / h - 16 / 9) < 0.1
 
 
+def test_plot_reads_cli_legend_section_explicit(cli_runner, tmp_path: Path):
+    bed = tmp_path / "HeLa.bed"
+    _write_bed(bed)
+    out = tmp_path / "out.svg"
+    res = cli_runner.invoke(
+        main,
+        [
+            "plot-reads",
+            "--bed",
+            f"HeLa:{bed}",
+            "--colors",
+            str(COLORS_TSV),
+            "--legend",
+            "--legend-section",
+            "Satellite:aSat,bSat",
+            "--legend-section",
+            "Telomere:canonical_telomere,noncanonical_telomere",
+            "-o",
+            str(out),
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    svg = out.read_text()
+    assert "Satellite" in svg and "Telomere" in svg  # explicit section headers drawn
+
+
 def test_plot_reads_cli_legend_group_requires_legend(cli_runner, tmp_path: Path):
     bed = tmp_path / "HeLa.bed"
     _write_bed(bed)
@@ -260,7 +286,7 @@ def test_plot_reads_cli_legend_group_requires_legend(cli_runner, tmp_path: Path)
         ],
     )
     assert res.exit_code != 0
-    assert "requires --legend" in res.output
+    assert "require --legend" in res.output
 
 
 def test_plot_reads_cli_bad_aspect_errors(cli_runner, tmp_path: Path):
