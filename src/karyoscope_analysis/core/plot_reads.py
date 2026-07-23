@@ -122,6 +122,10 @@ class PlotConfig:
     #: core.legend_order.feature_sort_key); None = alphabetical.
     legend_sort_key: object | None = None
 
+    #: Optional ``[(header, [feature, ...]), ...]`` grouping the legend into sections (e.g.
+    #: by the colors.tsv feature_set). None = one flat, ungrouped list.
+    legend_sections: Sequence[tuple[str | None, Sequence[str]]] | None = None
+
     @property
     def text_color(self) -> str:
         return "#ffffff" if self.background == "black" else "#000000"
@@ -1037,7 +1041,14 @@ def render_reads_svg(
         else None
     )
     legend_extra = (
-        _legend_height(features_used, colors, cfg, image_width, extra_items=hm_items)
+        _legend_height(
+            features_used,
+            colors,
+            cfg,
+            image_width,
+            extra_items=hm_items,
+            color_sections=cfg.legend_sections,
+        )
         if cfg.legend
         else 0
     )
@@ -1128,6 +1139,7 @@ def render_reads_svg(
             top + max_height_px + 10,
             image_width,
             extra_items=hm_items,
+            color_sections=cfg.legend_sections,
         )
     return _svg_str(d)
 

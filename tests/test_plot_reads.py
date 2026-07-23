@@ -182,6 +182,16 @@ def test_oversample_changes_subpixel_rasterization():
     assert svg1 != svg4  # oversample affects the rasterization
 
 
+def test_legend_sections_draw_section_headers():
+    reads = [pr.Read("S", "r", 1000, [(0, 500, "aSat"), (500, 1000, "canonical_telomere")])]
+    cfg = pr.PlotConfig(
+        legend=True,
+        legend_sections=[("Region", ["aSat"]), ("Subtelomere", ["canonical_telomere"])],
+    )
+    svg = pr.render(reads, _COLORS, cfg, ["S"])
+    assert "Region" in svg and "Subtelomere" in svg  # grouped section headers drawn
+
+
 # ----------------------------------------------------------------- CLI
 def test_plot_reads_cli_vertical(cli_runner, tmp_path: Path):
     bed = tmp_path / "HeLa.bed"
@@ -231,6 +241,26 @@ def test_plot_reads_cli_aspect_and_oversample(cli_runner, tmp_path: Path):
     root = minidom.parseString(out.read_text()).documentElement
     w, h = float(root.getAttribute("width")), float(root.getAttribute("height"))
     assert abs(w / h - 16 / 9) < 0.1
+
+
+def test_plot_reads_cli_legend_group_requires_legend(cli_runner, tmp_path: Path):
+    bed = tmp_path / "HeLa.bed"
+    _write_bed(bed)
+    res = cli_runner.invoke(
+        main,
+        [
+            "plot-reads",
+            "--bed",
+            f"HeLa:{bed}",
+            "--colors",
+            str(COLORS_TSV),
+            "--legend-group",
+            "-o",
+            str(tmp_path / "o.svg"),
+        ],
+    )
+    assert res.exit_code != 0
+    assert "requires --legend" in res.output
 
 
 def test_plot_reads_cli_bad_aspect_errors(cli_runner, tmp_path: Path):

@@ -36,6 +36,13 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
   windowed-majority vote instead of being lost to their neighbours. Exposes the existing
   `PlotConfig.oversample`, which the CLI previously never surfaced. (Replaces a
   KaryoScope-BIR wrapper that monkey-patched `PlotConfig` through a `python -c` shim.)
+- `plot-reads --legend-group`: group the legend into sections by the colors.tsv
+  `feature_set` column (data-driven section headers) instead of one flat list, via the new
+  `PlotConfig.legend_sections`. The core legend layout already supported sections and
+  `filter_legend_features` already accepted `color_sections`; the CLI just never populated
+  them. Opt-in (requires `--legend`) so existing flat legends are unchanged. (Replaces a
+  KaryoScope-BIR wrapper that shelled out to `draw-legend`, regex-parsed its SVG, and
+  re-rendered a bespoke grouped legend.)
 - `plot-reads --aspect W:H`: fit the canvas to a target aspect ratio (e.g. `16:9`) by
   choosing the bp-to-pixel ratio automatically. Because the width is independent of the
   ratio (reads are vertical columns), the renderer solves for the ratio exactly from the

@@ -25,7 +25,7 @@ from karyoplot.svg.export import RsvgConvertMissingError, svg_to_png
 
 from karyoscope_analysis.core import plot_reads as render
 from karyoscope_analysis.core.feature_vocab import FeatureHierarchy
-from karyoscope_analysis.core.io.colors import load_colors
+from karyoscope_analysis.core.io.colors import load_colors, load_colors_by_featureset
 from karyoscope_analysis.core.legend_order import feature_sort_key
 
 
@@ -106,6 +106,12 @@ from karyoscope_analysis.core.legend_order import feature_sort_key
     help="Background color (sets text/line color to its complement).",
 )
 @click.option("--legend", is_flag=True, help="Draw an auto-filtered color legend below the reads.")
+@click.option(
+    "--legend-group",
+    is_flag=True,
+    help="Group the legend into sections by the colors.tsv feature_set (e.g. Subtelomere / "
+    "Region) instead of one flat list. Requires --legend.",
+)
 @click.option(
     "--no-scale-bar", "scale_bar", flag_value=False, default=True, help="Omit the scale bar."
 )
@@ -208,6 +214,7 @@ def cmd(
     feature_mode: str,
     background: str,
     legend: bool,
+    legend_group: bool,
     scale_bar: bool,
     no_header: bool,
     read_border: bool,
@@ -307,12 +314,21 @@ def cmd(
     markers = render.parse_markers(markers_path) if markers_path is not None else {}
     reads = render.sort_reads(reads, sample_order)
 
+    if legend_group and not legend:
+        raise click.UsageError("--legend-group requires --legend")
+
     # KaryoScope-style legend ordering when a hierarchy is available (next to --colors or --hierarchy).
     legend_key = None
+    legend_sections = None
     if legend:
         lpath = hierarchy_path or colors_path.parent / "hierarchy.tsv"
         if lpath.exists():
             legend_key = feature_sort_key(lpath)
+        # Group by the colors.tsv feature_set (data-driven section headers).
+        if legend_group:
+            legend_sections = [
+                (fs, list(feats)) for fs, feats in load_colors_by_featureset(colors_path).items()
+            ]
 
     aspect_wh: tuple[int, int] | None = None
     if aspect:
@@ -351,6 +367,7 @@ def cmd(
         markers=markers,
         marker_scale=marker_scale,
         legend_sort_key=legend_key,
+        legend_sections=legend_sections,
     )
     try:
         svg = render.render(reads, colors, cfg, sample_order, horizontal=horizontal)
