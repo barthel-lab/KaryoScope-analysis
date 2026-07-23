@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import xml.dom.minidom as minidom
 from pathlib import Path
 
@@ -149,6 +150,32 @@ def test_render_empty_raises():
 
     with pytest.raises(ValueError):
         pr.render([], _COLORS, pr.PlotConfig(), [])
+
+
+def test_grouped_canvas_width_matches_content_not_over_billed():
+    # Two groups x two subgroups; the within-group gap (subgroup_spacing=5) is far smaller
+    # than the between-group gap (sample_spacing=200). The canvas width must bill within-group
+    # gaps at subgroup_spacing (matching the draw loop), not the max — otherwise it is padded
+    # far past the drawn content (dead space that --aspect then makes visible).
+    order = ["G1 - A", "G1 - B", "G2 - A", "G2 - B"]
+    reads = [pr.Read(s, f"r{i}", 60000, [(0, 60000, "aSat")]) for i, s in enumerate(order)]
+    cfg = pr.PlotConfig(
+        bar_width=8,
+        read_spacing=0,
+        subgroup_spacing=5,
+        sample_spacing=200,
+        group_boundaries=frozenset({"G1 - B"}),
+        feature_mode="raw",
+    )
+    svg = pr.render(reads, {"aSat": "#fa0000"}, cfg, order)
+    canvas_w = float(minidom.parseString(svg).documentElement.getAttribute("width"))
+    bars = [
+        (float(x), float(w))
+        for x, w in re.findall(r'<rect x="([\d.]+)" y="[\d.]+" width="([\d.]+)"', svg)
+        if float(w) <= 12
+    ]
+    content_right = max(x + w for x, w in bars)
+    assert canvas_w - content_right <= 55  # ~just the right margin; would be ~440 if over-billed
 
 
 def test_aspect_fits_canvas_to_ratio():

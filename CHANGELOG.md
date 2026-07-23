@@ -13,6 +13,13 @@ core KaryoScope engine. See `docs/audit/` for the full audit and decision record
 
 ### Fixed
 
+- `plot-reads`: the vertical-layout canvas width no longer over-pads grouped plots. It
+  billed every inter-sample gap at `max(sample_spacing, subgroup_spacing)`, but the draw loop
+  uses the narrower `subgroup_spacing` within a group and `sample_spacing` only at group
+  boundaries — so a two-tier grouped figure got dead space on the right, which `--aspect` then
+  stretched into a large empty margin (contigs jammed to the left). Width now matches the drawn
+  content exactly. (Restores, in the renderer, what a KaryoScope-BIR wrapper's `_content_width`
+  measured around before the `--aspect` flag existed.)
 - `plot-reads` `--read-list`: heatmap track colors are now deterministic. `load_read_list`
   returned `read_ids` as a `set`, and categorical (e.g. Sample) colors are assigned in
   encounter order, so the color↔value mapping depended on `PYTHONHASHSEED` — a render and a

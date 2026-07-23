@@ -1106,12 +1106,16 @@ def render_reads_svg(
     left = _effective_left_margin(cfg, base_left)
     if cfg.markers:
         left += arrow_size + 2  # room for arrowheads
-    image_width = (
-        left
-        + len(reads) * (cfg.bar_width + cfg.read_spacing)
-        + (len(counts) - 1) * max(cfg.sample_spacing, subgroup_spacing)
-        + 50
+    # Inter-sample gaps, matching the draw loop exactly: sample_spacing only at a group
+    # boundary, the narrower subgroup_spacing within a group. Billing every gap at the max
+    # would over-pad the canvas — dead space that becomes visible when --aspect fits the
+    # (vertical-column) width to a target ratio.
+    present_order = [s for s in sample_order if s in counts]
+    gap_total = sum(
+        cfg.sample_spacing if present_order[i] in cfg.group_boundaries else subgroup_spacing
+        for i in range(len(present_order) - 1)
     )
+    image_width = left + len(reads) * (cfg.bar_width + cfg.read_spacing) + gap_total + 50
 
     features_used = {f for r in reads for _s, _e, f in r.features}
     hm_items = (
